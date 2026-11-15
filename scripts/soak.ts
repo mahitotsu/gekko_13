@@ -1,33 +1,33 @@
 // シナリオ 2: SVID を短い有効期限で入れ替えながら、連鎖を続けて呼び、失敗を数える。
-// 使い方: node scripts/soak.ts [分（既定 30）] [間隔のミリ秒（既定 1000）]
+// 使い方: node scripts/soak.ts [--target local|aws] [--minutes 30] [--interval 1000]
 import { readFileSync, writeFileSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { join } from "node:path";
+import { targetFrom } from "./target.ts";
 
-const minutes = Number(process.argv[2] ?? 30);
-const interval = Number(process.argv[3] ?? 1000);
-const ROOT = new URL("../local/run/", import.meta.url).pathname;
-const BFF = "http://127.0.0.1:18080";
-const ISSUER = "http://127.0.0.1:19000";
+const arg = (name: string, fallback: number) => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 ? Number(process.argv[i + 1]) : fallback;
+};
+const minutes = arg("minutes", 30);
+const interval = arg("interval", 1000);
+const t = targetFrom(process.argv);
 const SERVICES = ["bff", "transfer", "ledger"];
+// 利用者のアクセストークンの有効期限（Cognito では 5 分）より前に取り直す
+const TOKEN_REFRESH_MS = 4 * 60_000;
 
-const serial = (s: string) => new X509Certificate(readFileSync(join(ROOT, "svid", s, "svid.pem"))).serialNumber;
-
-async function userToken() {
-  const r = await fetch(`${ISSUER}/test/login`, { method: "POST", body: JSON.stringify({ sub: "demo-user", scope: "banking/view banking/transfer" }) });
-  return ((await r.json()) as { access_token: string }).access_token;
-}
+const serial = (s: string) => new X509Certificate(readFileSync(join(t.svidRoot, s, "svid.pem"))).serialNumber;
 
 const seen: Record<string, string[]> = Object.fromEntries(SERVICES.map((s) => [s, [serial(s)]]));
 const failures: { at: string; status: number; body: string }[] = [];
 let ok = 0;
-let token = await userToken();
+let token = await t.userToken();
 let tokenAt = Date.now();
 const end = Date.now() + minutes * 60_000;
 const started = new Date().toISOString();
 
 while (Date.now() < end) {
-  if (Date.now() - tokenAt > 30 * 60_000) [token, tokenAt] = [await userToken(), Date.now()];
+  if (Date.now() - tokenAt > TOKEN_REFRESH_MS) [token, tokenAt] = [await t.userToken(), Date.now()];
   for (const s of SERVICES) {
     try {
       const cur = serial(s);
@@ -40,7 +40,11 @@ while (Date.now() < end) {
     }
   }
   try {
-    const r = await fetch(`${BFF}/transfer`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ amount: 1, to: "acct-2" }) });
+    const r = await fetch(`${t.bffUrl}/transfer`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 1, to: "acct-2" }),
+    });
     const body = await r.text();
     if (r.status === 200) ok++;
     else failures.push({ at: new Date().toISOString(), status: r.status, body });
@@ -51,6 +55,7 @@ while (Date.now() < end) {
 }
 
 const summary = {
+  target: t.name,
   started,
   ended: new Date().toISOString(),
   minutes,
@@ -59,8 +64,10 @@ const summary = {
   rotations: Object.fromEntries(SERVICES.map((s) => [s, seen[s].length - 1])),
   failures,
 };
-const out = join(ROOT, `soak-${started.replace(/[:.]/g, "-")}.json`);
-writeFileSync(out, JSON.stringify(summary, null, 2));
-console.log(JSON.stringify({ ...summary, failures: failures.slice(0, 5) }, null, 2));
-console.log(`記録: ${out}`);
+if (t.outDir) {
+  const out = join(t.outDir, `soak-${t.name}-${started.replace(/[:.]/g, "-")}.json`);
+  writeFileSync(out, JSON.stringify(summary, null, 2));
+  console.log(`記録: ${out}`);
+}
+console.log(`RESULT ${JSON.stringify({ ...summary, failures: failures.slice(0, 20) })}`);
 process.exit(failures.length === 0 ? 0 : 1);

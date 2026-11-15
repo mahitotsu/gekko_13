@@ -1,29 +1,29 @@
-// 合格の基準（計画の表）のシナリオを回す。ローカルでは local/up.sh の環境に、ホストから当てる。
-// 使い方: node scripts/scenarios.ts [--target local]
-// 「盗まれた鍵」は、local/run/svid/<svc>/ の SVID を読んで使う（そのサービスが乗っ取られた想定）。
+// 合格の基準（docs/plan.md の 3 節）のシナリオを回す。
+// 使い方:
+//   ローカル: node scripts/scenarios.ts --target local   （local/up.sh の環境に、ホストから当てる）
+//   AWS:      node scripts/scenarios.ts --target aws     （aws/run-scenarios.sh が ECS のタスク gekko13-probe として動かす）
+// 「盗まれた鍵」は、各サービスの SVID のファイルを読んで使う（そのサービスが乗っ取られた想定）。
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mtlsCall, spiffeIdOf, type Svid } from "../packages/spiffe-tls/src/index.ts";
 import { X509Certificate } from "node:crypto";
+import { mtlsCall, spiffeIdOf, type Svid } from "../packages/spiffe-tls/src/index.ts";
+import { targetFrom, type Target } from "./target.ts";
 
 const TD = "gekko13.internal";
 const id = (s: string) => `spiffe://${TD}/svc/${s}`;
-const ROOT = new URL("../local/run/", import.meta.url).pathname;
-const BFF = "http://127.0.0.1:18080";
-const LEDGER = "https://127.0.0.1:28443";
-const ISSUER = "http://127.0.0.1:19000";
 
-type Result = { id: string; title: string; expected: string; actual: string; pass: boolean };
+type Result = { id: string; title: string; expected: string; actual: string; pass: boolean | "skipped" };
 const results: Result[] = [];
 const record = (r: Result) => {
   results.push(r);
-  console.log(`${r.pass ? "PASS" : "FAIL"} ${r.id} ${r.title}\n     期待: ${r.expected}\n     実際: ${r.actual}`);
+  const mark = r.pass === "skipped" ? "SKIP" : r.pass ? "PASS" : "FAIL";
+  console.log(`${mark} ${r.id} ${r.title}\n     期待: ${r.expected}\n     実際: ${r.actual}`);
 };
 
-const svidOf = (s: string): Svid => {
-  const dir = join(ROOT, "svid", s);
+const svidOf = (t: Target, s: string): Svid => {
+  const dir = join(t.svidRoot, s);
   const cert = readFileSync(join(dir, "svid.pem"), "utf8");
   const leaf = new X509Certificate(cert);
   return {
@@ -36,52 +36,14 @@ const svidOf = (s: string): Svid => {
   };
 };
 
-const envFile = (name: string) =>
-  Object.fromEntries(
-    readFileSync(join(ROOT, name), "utf8")
-      .split("\n")
-      .filter((l) => l.includes("="))
-      .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
-  );
-
-async function post(url: string, body: unknown, headers: Record<string, string> = {}) {
-  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
-  return { status: r.status, body: await r.text() };
-}
-
-async function userToken() {
-  const r = await post(`${ISSUER}/test/login`, { sub: "demo-user", scope: "banking/view banking/transfer" });
-  return (JSON.parse(r.body) as { access_token: string }).access_token;
-}
-
-/** BFF として交換したトークン（act.client_id = bff-client）。BFF が transfer に送るものと同じ形。 */
-async function bffDelegatedToken(user: string) {
-  const { CLIENT_ID, CLIENT_SECRET } = envFile("bff.env");
-  const auth = `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")}`;
-  const form = (p: Record<string, string>) =>
-    fetch(`${ISSUER}/oauth2/token`, { method: "POST", headers: { authorization: auth, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(p) }).then(
-      (r) => r.json() as Promise<{ access_token: string }>,
-    );
-  const actor = await form({ grant_type: "client_credentials", scope: "internal/actor" });
-  const t = await form({
-    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-    subject_token: user,
-    subject_token_type: "urn:ietf:params:oauth:token-type:access_token",
-    actor_token: actor.access_token,
-    actor_token_type: "urn:ietf:params:oauth:token-type:access_token",
-    scope: "banking/transfer",
-  });
-  return t.access_token;
-}
-
 const describeError = (e: unknown) => {
   const err = e as { code?: string; message?: string };
   return `接続の失敗 ${err.code ?? ""} ${err.message ?? String(e)}`.trim();
 };
 
-async function tryCall(svid: Pick<Svid, "cert" | "key" | "bundle">, expectId: string, token?: string) {
+async function tryCall(t: Target, svid: Pick<Svid, "cert" | "key" | "bundle">, expectId: string, token?: string) {
   try {
-    const r = await mtlsCall(svid, `${LEDGER}/entries`, expectId, {
+    const r = await mtlsCall(svid, `${t.ledgerUrl}/entries`, expectId, {
       method: "POST",
       headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({ amount: 1, to: "acct-x" }),
@@ -92,17 +54,7 @@ async function tryCall(svid: Pick<Svid, "cert" | "key" | "bundle">, expectId: st
   }
 }
 
-/** 別の認証局で、SPIFFE の形の証明書を作る。 */
-function fakeSvid(dir: string, spiffeId: string) {
-  const o = (args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "pipe" });
-  writeFileSync(join(dir, "ext.cnf"), `subjectAltName=URI:${spiffeId}\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth,serverAuth\n`);
-  o(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "1", "-subj", "/O=fake"]);
-  o(["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/O=fake"]);
-  o(["x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "leaf.pem", "-days", "1", "-extfile", "ext.cnf"]);
-  return { cert: readFileSync(join(dir, "leaf.pem"), "utf8"), key: readFileSync(join(dir, "leaf.key"), "utf8") };
-}
-
-/** ラベルを付けた spiffe-helper を動かし、SVID が出るかを見る。 */
+/** ローカル: ラベルを付けた spiffe-helper を docker で動かし、SVID が出るかを見る。 */
 async function helperWithLabels(family: string, waitMs: number) {
   const dir = mkdtempSync(join(tmpdir(), "gekko13-helper-"));
   const name = `gekko13-probe-${family}-${Date.now()}`;
@@ -129,89 +81,133 @@ async function helperWithLabels(family: string, waitMs: number) {
   return got;
 }
 
-async function main() {
-  // 1-a
-  const ids = ["bff", "transfer", "ledger"].map((s) => svidOf(s).id);
+/** 偽の証明書。AWS ではイメージに入れたものを、ローカルではその場で作ったものを使う。 */
+function fakeCerts(t: Target): { dir: string; cleanup: () => void } {
+  if (t.fakeCertDir) return { dir: t.fakeCertDir, cleanup: () => {} };
+  const dir = mkdtempSync(join(tmpdir(), "gekko13-fake-"));
+  execFileSync(new URL("./make-fake-certs.sh", import.meta.url).pathname, [dir]);
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+async function identityScenarios(t: Target) {
+  const names = ["bff", "transfer", "ledger"];
+  const ids = names.map((s) => svidOf(t, s).id);
   record({
     id: "1-a",
     title: "登録したファミリーごとに、別の SPIFFE ID が配られる",
-    expected: ["bff", "transfer", "ledger"].map(id).join(", "),
+    expected: names.map(id).join(", "),
     actual: ids.join(", "),
-    pass: ids.join() === ["bff", "transfer", "ledger"].map(id).join(),
+    pass: ids.join() === names.map(id).join(),
   });
 
-  // 1-b
-  const rogue = await helperWithLabels("gekko13-rogue", 20_000);
-  record({ id: "1-b", title: "登録していないファミリーのタスク", expected: "20 秒待っても SVID が出ない", actual: rogue ?? "SVID なし", pass: rogue === undefined });
+  if (t.name === "local") {
+    const rogue = await helperWithLabels("gekko13-rogue", 20_000);
+    record({ id: "1-b", title: "登録していないファミリーのタスク", expected: "20 秒待っても SVID が出ない", actual: rogue ?? "SVID なし", pass: rogue === undefined });
+    const forged = await helperWithLabels("gekko13-ledger", 20_000);
+    record({
+      id: "1-c",
+      title: "ホストで docker run にラベルを偽って付けたコンテナ",
+      expected: `SVID が出る（残るリスクとして記録）: ${id("ledger")}`,
+      actual: forged ?? "SVID なし",
+      pass: forged === id("ledger"),
+    });
+  } else {
+    // aws/run-scenarios.sh が、このタスクより先に gekko13-rogue のタスクを起動しておく
+    const files = existsSync(t.rogueDir!) ? readdirSync(t.rogueDir!) : [];
+    record({
+      id: "1-b",
+      title: "登録していないファミリーのタスク（ECS で起動した gekko13-rogue）",
+      expected: "SVID のファイルがない",
+      actual: files.length === 0 ? "SVID なし" : `ファイルがある: ${files.join(", ")}`,
+      pass: files.length === 0,
+    });
+    record({ id: "1-c", title: "ホストで docker run にラベルを偽って付けたコンテナ", expected: "AWS では行わない（ホストのシェルが要る）", actual: "未実施", pass: "skipped" });
+  }
+}
 
-  // 1-c
-  const forged = await helperWithLabels("gekko13-ledger", 20_000);
-  record({
-    id: "1-c",
-    title: "ホストで docker run にラベルを偽って付けたコンテナ",
-    expected: `SVID が出る（残るリスクとして記録）: ${id("ledger")}`,
-    actual: forged ?? "SVID なし",
-    pass: forged === id("ledger"),
-  });
+async function tokenScenarios(t: Target) {
+  const user = await t.userToken();
 
-  const user = await userToken();
-
-  // 3-a
-  const a = await post(`${BFF}/transfer`, { amount: 1000, to: "acct-2" }, { authorization: `Bearer ${user}` });
+  const a = await fetch(`${t.bffUrl}/transfer`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${user}`, "content-type": "application/json" },
+    body: JSON.stringify({ amount: 1000, to: "acct-2" }),
+  }).then(async (r) => ({ status: r.status, body: await r.text() }));
   record({ id: "3-a", title: "正しい証明書と正しいトークン（BFF → transfer → ledger）", expected: "200", actual: `${a.status} ${a.body}`, pass: a.status === 200 });
 
-  // 3-b
-  const ledgerBundle = svidOf("ledger").bundle;
-  const b = await tryCall({ cert: "", key: "", bundle: ledgerBundle }, id("ledger"), user);
+  const ledgerBundle = svidOf(t, "ledger").bundle;
+  const b = await tryCall(t, { cert: "", key: "", bundle: ledgerBundle }, id("ledger"), user);
   record({ id: "3-b", title: "証明書なしで ledger を呼ぶ", expected: "TLS で拒否", actual: b.text, pass: b.status === 0 });
 
-  // 3-c
-  const bffToken = await bffDelegatedToken(user);
-  const c = await tryCall(svidOf("transfer"), id("ledger"), bffToken);
+  const bffToken = await t.bffDelegatedToken(user);
+  const c = await tryCall(t, svidOf(t, "transfer"), id("ledger"), bffToken);
   record({
     id: "3-c",
-    title: "transfer の証明書で、BFF が受けたトークン（act.client_id=bff）を ledger に送る",
+    title: "transfer の鍵で、BFF が交換したトークン（act.client_id が BFF）を ledger に送る",
     expected: "403 peer_actor_mismatch",
     actual: c.text,
     pass: c.status === 403 && c.text.includes("peer_actor_mismatch"),
   });
 
-  // 3-d
-  const d = await tryCall(svidOf("bff"), id("ledger"), bffToken);
+  const d = await tryCall(t, svidOf(t, "bff"), id("ledger"), bffToken);
   record({
     id: "3-d",
-    title: "BFF の証明書で ledger を直接呼ぶ（transfer を飛ばす）",
+    title: "BFF の鍵で ledger を直接呼ぶ（transfer を飛ばす）",
     expected: "403 caller_not_allowed",
     actual: d.text,
     pass: d.status === 403 && d.text.includes("caller_not_allowed"),
   });
 
-  // 3-e
-  const tmp = mkdtempSync(join(tmpdir(), "gekko13-fake-"));
+  const fake = fakeCerts(t);
   try {
-    const other = fakeSvid(tmp, "spiffe://evil.internal/svc/transfer");
-    const e1 = await tryCall({ ...other, bundle: ledgerBundle }, id("ledger"), bffToken);
-    record({ id: "3-e", title: "別の信頼ドメインの証明書", expected: "TLS で拒否", actual: e1.text, pass: e1.status === 0 });
-    rmSync(tmp, { recursive: true, force: true });
-    const tmp2 = mkdtempSync(join(tmpdir(), "gekko13-fake-"));
-    const same = fakeSvid(tmp2, id("transfer"));
-    const e2 = await tryCall({ ...same, bundle: ledgerBundle }, id("ledger"), bffToken);
-    record({ id: "3-e2", title: "同じ SPIFFE ID を名乗る、別の認証局の証明書", expected: "TLS で拒否", actual: e2.text, pass: e2.status === 0 });
-    rmSync(tmp2, { recursive: true, force: true });
+    for (const [rid, sub, title] of [
+      ["3-e", "other-td", "別の信頼ドメインの証明書"],
+      ["3-e2", "same-id", "同じ SPIFFE ID を名乗る、別の認証局の証明書"],
+    ] as const) {
+      const cert = readFileSync(join(fake.dir, sub, "cert.pem"), "utf8");
+      const key = readFileSync(join(fake.dir, sub, "key.pem"), "utf8");
+      const e = await tryCall(t, { cert, key, bundle: ledgerBundle }, id("ledger"), bffToken);
+      record({ id: rid, title, expected: "TLS で拒否", actual: e.text, pass: e.status === 0 });
+    }
   } finally {
-    rmSync(tmp, { recursive: true, force: true });
+    fake.cleanup();
   }
 
-  // 追加: 正しい証明書でもトークンがなければ拒む。相手の SPIFFE ID が違えば、呼ぶ側が止める
-  const f = await tryCall(svidOf("transfer"), id("ledger"));
-  record({ id: "3-f", title: "transfer の正しい証明書で、トークンなし", expected: "401 no_token", actual: f.text, pass: f.status === 401 });
-  const g = await tryCall(svidOf("transfer"), id("transfer"), bffToken);
+  const f = await tryCall(t, svidOf(t, "transfer"), id("ledger"));
+  record({ id: "3-f", title: "transfer の鍵で、トークンなし", expected: "401 no_token", actual: f.text, pass: f.status === 401 });
+  const g = await tryCall(t, svidOf(t, "transfer"), id("transfer"), bffToken);
   record({ id: "3-g", title: "呼ぶ側が、相手を transfer だと思って ledger につなぐ", expected: "呼ぶ側が接続を止める", actual: g.text, pass: g.status === 0 && g.text.includes("SPIFFE ID") });
 
-  const failed = results.filter((r) => !r.pass);
-  const out = join(ROOT, `scenarios-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
-  writeFileSync(out, JSON.stringify({ at: new Date().toISOString(), results }, null, 2));
-  console.log(`\n${results.length - failed.length}/${results.length} 件が期待どおり。記録: ${out}`);
+  // 本物の Cognito のトークンの形を残す（署名と秘密は残さない。ドキュメントと実測の食い違いを確かめるため）
+  const claims = (tok: string) => JSON.parse(Buffer.from(tok.split(".")[1], "base64url").toString("utf8"));
+  const shape = (c: Record<string, unknown>) => ({
+    ...c,
+    sub: "(省略)",
+    username: c.username ? "(省略)" : undefined,
+    jti: "(省略)",
+    origin_jti: c.origin_jti ? "(省略)" : undefined,
+    event_id: undefined,
+  });
+  console.log(`CLAIMS user ${JSON.stringify(shape(claims(user)))}`);
+  console.log(`CLAIMS bff-delegated ${JSON.stringify(shape(claims(bffToken)))}`);
+}
+
+async function main() {
+  const t = targetFrom(process.argv);
+  await identityScenarios(t);
+  await tokenScenarios(t);
+
+  const graded = results.filter((r) => r.pass !== "skipped");
+  const failed = graded.filter((r) => !r.pass);
+  const summary = { at: new Date().toISOString(), target: t.name, results };
+  if (t.outDir) {
+    const out = join(t.outDir, `scenarios-${t.name}-${summary.at.replace(/[:.]/g, "-")}.json`);
+    writeFileSync(out, JSON.stringify(summary, null, 2));
+    console.log(`記録: ${out}`);
+  }
+  // AWS では、ログから結果を拾う（aws/run-scenarios.sh）
+  console.log(`RESULT ${JSON.stringify(summary)}`);
+  console.log(`\n${graded.length - failed.length}/${graded.length} 件が期待どおり（対象外 ${results.length - graded.length} 件）。`);
   process.exit(failed.length === 0 ? 0 : 1);
 }
 

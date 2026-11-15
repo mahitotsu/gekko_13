@@ -52,6 +52,10 @@ Parameters:
   TransferSecretParameter:
     Type: String
     Default: /gekko13/transfer/client-secret
+  ProbeRefreshTokenParameter:
+    Type: String
+    Default: /gekko13/probe/refresh-token
+    Description: 実行役が使う、利用者のリフレッシュトークン。scripts/aws-login.ts が入れる
   SvidTtlSeconds:
     Type: Number
     Default: 300
@@ -113,6 +117,7 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TransferSecretParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}"
 
   SpireServerTaskRole:
     Type: AWS::IAM::Role
@@ -181,7 +186,7 @@ Resources:
             systemctl restart docker
 
             mkdir -p /etc/gekko13/spire /var/lib/gekko13/spire-server /var/lib/gekko13/spire-agent /var/lib/gekko13/bundle \
-              /var/run/gekko13/spire-sockets /var/lib/gekko13/svid/bff /var/lib/gekko13/svid/transfer /var/lib/gekko13/svid/ledger
+              /var/run/gekko13/spire-sockets /var/lib/gekko13/svid/bff /var/lib/gekko13/svid/transfer /var/lib/gekko13/svid/ledger /var/lib/gekko13/svid-rogue
 
             cat > /etc/gekko13/spire/server.conf <<'EOF'
             server {
@@ -496,6 +501,69 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: bff, mode: non-blocking }
 
+  # シナリオ 1-b: 登録していないファミリー。サービスにせず、aws/run-scenarios.sh が RunTask で起動する
+  RogueTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-rogue"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid, Host: { SourcePath: /var/lib/gekko13/svid-rogue } }
+      ContainerDefinitions:
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: rogue, mode: non-blocking }
+
+  # シナリオの実行役。サービスにせず、aws/run-scenarios.sh が RunTask で起動する。
+  # 各サービスの SVID を読む（そのサービスが乗っ取られた想定）。BFF の秘密も持つ。検証の外では動かさない
+  ProbeTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 盗まれた鍵とトークンで、受け取る側が拒むかを確かめる
+        must: サービスにしない。ほかのタスクに、このタスクの読むパスを渡さない
+    Properties:
+      Family: !Sub "${Prefix}-probe"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: svid-all, Host: { SourcePath: /var/lib/gekko13/svid } }
+        - { Name: svid-rogue, Host: { SourcePath: /var/lib/gekko13/svid-rogue } }
+      ContainerDefinitions:
+        - Name: probe
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 96
+          Command: ["node", "scripts/scenarios.ts", "--target", "aws"]
+          Environment:
+            - { Name: HOST_BRIDGE_IP, Value: !Ref HostBridgeIp }
+            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
+            - { Name: APP_CLIENT_ID, Value: !Ref AppClientId }
+            - { Name: BFF_CLIENT_ID, Value: !Ref BffClientId }
+          Secrets:
+            - { Name: BFF_CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}" }
+            - { Name: USER_REFRESH_TOKEN, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}" }
+          MountPoints:
+            - { SourceVolume: svid-all, ContainerPath: /svid-all, ReadOnly: true }
+            - { SourceVolume: svid-rogue, ContainerPath: /svid-rogue, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe, mode: non-blocking }
+
   SpireServerService:
     Type: AWS::ECS::Service
     Properties:
@@ -549,3 +617,5 @@ Outputs:
   ClusterName: { Value: !Ref Cluster }
   InstanceId: { Value: !Ref Instance }
   LogGroupName: { Value: !Ref LogGroup }
+  ProbeTaskDefinition: { Value: !Ref ProbeTask }
+  RogueTaskDefinition: { Value: !Ref RogueTask }
