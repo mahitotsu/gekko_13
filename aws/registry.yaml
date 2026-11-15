@@ -1,0 +1,60 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージと、SPIRE と spiffe-helper の写しを置く。
+  ghcr.io は IPv6 で届かない恐れがあるので、インスタンスはここからだけ取る。ほかのスタックより先に作る。
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+    AllowedPattern: "[a-z0-9-]+"
+
+Resources:
+  AppRepository:
+    Type: AWS::ECR::Repository
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 全サービスで共通の Node.js のイメージ。タグは git のコミットにする
+        must: タグは変えられないようにする（同じタグで別のイメージを入れさせない）
+    Properties:
+      RepositoryName: !Sub "${Prefix}/node"
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration: { ScanOnPush: true }
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 10","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
+
+  SpireServerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/spire-server"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+
+  SpireAgentRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/spire-agent"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+
+  SpiffeHelperRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/spiffe-helper"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+
+Outputs:
+  AppRepositoryUri: { Value: !GetAtt AppRepository.RepositoryUri }
+  SpireServerRepositoryUri: { Value: !GetAtt SpireServerRepository.RepositoryUri }
+  SpireAgentRepositoryUri: { Value: !GetAtt SpireAgentRepository.RepositoryUri }
+  SpiffeHelperRepositoryUri: { Value: !GetAtt SpiffeHelperRepository.RepositoryUri }

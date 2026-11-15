@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  gekko13 の検証のネットワーク。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
+  インスタンスには既定で公開 IPv4 を付けない。入ってくる通信は受けない（入口は検証の範囲外）。
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  VpcCidr:
+    Type: String
+    Default: 10.13.0.0/16
+  SubnetCidr:
+    Type: String
+    Default: 10.13.0.0/24
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Ref Prefix }]
+
+  Ipv6Block:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref Vpc
+      AmazonProvidedIpv6CidrBlock: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Ref Prefix }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: Ipv6Block
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 1 台のインスタンスだけを置く。IPv6 で外へ出る
+        must: 公開 IPv4 を自動で付けない（付けると 1 時間ごとに課金される）
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 1, 64]]
+      AssignIpv6AddressOnCreation: true
+      MapPublicIpOnLaunch: false
+      EnableDns64: false
+      Tags: [{ Key: Name, Value: !Ref Prefix }]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Ref Prefix }]
+
+  Ipv6DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationIpv6CidrBlock: "::/0"
+      GatewayId: !Ref InternetGateway
+
+  # 公開 IPv4 を一時的に付けたときだけ使われる。付けていなければ、この経路で外へ出る IPv4 の通信はない
+  Ipv4DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  HostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: インスタンスの外からの通信を受けない。サービスどうしと SPIRE は、同じホストの中で話す
+        must: 入ってくる規則を足さない。入口を作るときは CloudFront のプレフィックスリストだけに限る
+    Properties:
+      GroupDescription: gekko13 ECS host (no inbound)
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: AWS APIs and ECR over IPv6 }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: only used while a public IPv4 is attached }
+        - { IpProtocol: udp, FromPort: 123, ToPort: 123, CidrIp: 169.254.169.123/32, Description: Amazon Time Sync }
+      Tags: [{ Key: Name, Value: !Ref Prefix }]
+
+Outputs:
+  VpcId: { Value: !Ref Vpc }
+  SubnetId: { Value: !Ref Subnet }
+  HostSecurityGroupId: { Value: !Ref HostSecurityGroup }

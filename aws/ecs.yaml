@@ -1,0 +1,551 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  gekko13 の検証の実行基盤。ECS の EC2 起動タイプで、t4g.small 1 台に SPIRE の server と agent、BFF、transfer、ledger を載せる。
+  各サービスは app と svid-helper の 2 コンテナ。SPIRE は ECS が付けるコンテナのラベルで身元を見分ける。使わない間はインスタンスを止める。
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  InstanceType:
+    Type: String
+    Default: t4g.small
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
+  AssignPublicIpv4:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: IPv6 だけで届かない AWS の API があったときに、作業の間だけ true にする（1 時間ごとに課金される）
+  AppImage:
+    Type: String
+    Description: ECR の gekko13/node の URI とタグ
+  SpireServerImage:
+    Type: String
+  SpireAgentImage:
+    Type: String
+  SpiffeHelperImage:
+    Type: String
+  Issuer:
+    Type: String
+  TokenUrl:
+    Type: String
+  AppClientId:
+    Type: String
+  BffClientId:
+    Type: String
+  TransferClientId:
+    Type: String
+  BffSecretParameter:
+    Type: String
+    Default: /gekko13/bff/client-secret
+    Description: BFF の client の秘密を入れた SSM の SecureString の名前。デプロイの手順が作る
+  TransferSecretParameter:
+    Type: String
+    Default: /gekko13/transfer/client-secret
+  SvidTtlSeconds:
+    Type: Number
+    Default: 300
+  HostBridgeIp:
+    Type: String
+    Default: 172.17.0.1
+    Description: bridge モードのコンテナから、同じホストに公開したポートへ届くアドレス（docker0）
+
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref Prefix
+      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${Prefix}/ecs"
+      RetentionInDays: 7
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      ManagedPolicyArns: [arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy]
+      Policies:
+        - PolicyName: client-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameters
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TransferSecretParameter}"
+
+  SpireServerTaskRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: aws_iid のノードの確認で、SPIRE の server がインスタンスのタグを読む
+        must: 権限を DescribeInstances より広げない
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: describe-instances
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: ec2:DescribeInstances, Resource: "*" }
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          IMDSv2 を必須にし、応答のホップを 1 にする。bridge モードのコンテナはインスタンスの認証情報を取れず、
+          ホストのネットワークで動く SPIRE の agent だけが識別ドキュメントを取れる
+        must: HttpPutResponseHopLimit を 2 以上にしない
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1, HttpEndpoint: enabled, HttpProtocolIpv6: enabled }
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            SubnetId: !Ref SubnetId
+            Groups: [!Ref SecurityGroupId]
+            AssociatePublicIpAddress: !Ref AssignPublicIpv4
+            Ipv6AddressCount: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Ref Prefix }
+              - { Key: gekko13-role, Value: ecs-host }
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            cat >> /etc/ecs/ecs.config <<'EOF'
+            ECS_CLUSTER=${Prefix}
+            ECS_ENABLE_TASK_IAM_ROLE=true
+            ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=false
+            EOF
+
+            # bridge のコンテナが IPv6 で外へ出られるようにする（ULA を ip6tables で変換する）
+            mkdir -p /etc/docker
+            cat > /etc/docker/daemon.json <<'EOF'
+            {"ipv6": true, "fixed-cidr-v6": "fd00:13::/64", "ip6tables": true}
+            EOF
+            systemctl restart docker
+
+            mkdir -p /etc/gekko13/spire /var/lib/gekko13/spire-server /var/lib/gekko13/spire-agent /var/lib/gekko13/bundle \
+              /var/run/gekko13/spire-sockets /var/lib/gekko13/svid/bff /var/lib/gekko13/svid/transfer /var/lib/gekko13/svid/ledger
+
+            cat > /etc/gekko13/spire/server.conf <<'EOF'
+            server {
+              bind_address = "0.0.0.0"
+              bind_port    = "8081"
+              trust_domain = "gekko13.internal"
+              data_dir     = "/var/lib/spire/server"
+              log_level    = "INFO"
+              default_x509_svid_ttl = "5m"
+              ca_ttl       = "24h"
+            }
+            plugins {
+              DataStore "sql" {
+                plugin_data {
+                  database_type     = "sqlite3"
+                  connection_string = "/var/lib/spire/server/datastore.sqlite3"
+                }
+              }
+              NodeAttestor "aws_iid" {
+                plugin_data {
+                  disable_instance_profile_selectors = true
+                }
+              }
+              KeyManager "disk" {
+                plugin_data {
+                  keys_path = "/var/lib/spire/server/keys.json"
+                }
+              }
+            }
+            EOF
+
+            # aws_iid は、同じインスタンスで一度しか確認を通さない。agent の鍵とデータはディスクに残す
+            cat > /etc/gekko13/spire/agent.conf <<'EOF'
+            agent {
+              data_dir          = "/var/lib/spire/agent"
+              log_level         = "INFO"
+              server_address    = "127.0.0.1"
+              server_port       = "8081"
+              socket_path       = "/run/spire/sockets/agent.sock"
+              trust_bundle_path = "/run/spire/bundle/bundle.crt"
+              trust_domain      = "gekko13.internal"
+            }
+            plugins {
+              NodeAttestor "aws_iid" {
+                plugin_data {}
+              }
+              KeyManager "disk" {
+                plugin_data {
+                  directory = "/var/lib/spire/agent"
+                }
+              }
+              WorkloadAttestor "docker" {
+                plugin_data {}
+              }
+            }
+            EOF
+
+            cat > /etc/gekko13/spire/helper.conf <<'EOF'
+            agent_address         = "/run/spire/sockets/agent.sock"
+            cmd                   = ""
+            cert_dir              = "/svid"
+            svid_file_name        = "svid.pem"
+            svid_key_file_name    = "svid_key.pem"
+            svid_bundle_file_name = "svid_bundle.pem"
+            daemon_mode           = true
+            EOF
+
+            # server が動いたら、バンドルを書き、登録を作る。何度動かしても同じ結果になる
+            cat > /usr/local/bin/gekko13-bootstrap <<'EOF'
+            #!/bin/bash
+            set -euo pipefail
+            TD=gekko13.internal
+            NODE=spiffe://$TD/node/ecs
+            find_server() {
+              docker ps -q --filter label=com.amazonaws.ecs.task-definition-family=${Prefix}-spire-server \
+                --filter label=com.amazonaws.ecs.container-name=spire-server | head -1
+            }
+            until cid=$(find_server) && [ -n "$cid" ] && docker exec "$cid" /opt/spire/bin/spire-server healthcheck >/dev/null 2>&1; do sleep 5; done
+            srv() { docker exec "$cid" /opt/spire/bin/spire-server "$@"; }
+            srv bundle show > /var/lib/gekko13/bundle/bundle.crt.tmp
+            mv /var/lib/gekko13/bundle/bundle.crt.tmp /var/lib/gekko13/bundle/bundle.crt
+            srv entry show -spiffeID "$NODE" | grep -q "Entry ID" || \
+              srv entry create -node -spiffeID "$NODE" -selector aws_iid:tag:gekko13-role:ecs-host
+            for s in bff transfer ledger; do
+              id=spiffe://$TD/svc/$s
+              srv entry show -spiffeID "$id" | grep -q "Entry ID" || \
+                srv entry create -parentID "$NODE" -spiffeID "$id" -x509SVIDTTL ${SvidTtlSeconds} \
+                  -selector "docker:label:com.amazonaws.ecs.task-definition-family:${Prefix}-$s" \
+                  -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper"
+            done
+            EOF
+            chmod 755 /usr/local/bin/gekko13-bootstrap
+
+            cat > /etc/systemd/system/gekko13-bootstrap.service <<'EOF'
+            [Unit]
+            Description=gekko13 SPIRE bundle and registration
+            After=docker.service
+            [Service]
+            Type=oneshot
+            ExecStart=/usr/local/bin/gekko13-bootstrap
+            Restart=on-failure
+            RestartSec=10
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            systemctl daemon-reload
+            systemctl enable --now --no-block gekko13-bootstrap.service
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+  SpireServerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-spire-server"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt SpireServerTaskRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: data, Host: { SourcePath: /var/lib/gekko13/spire-server } }
+      ContainerDefinitions:
+        - Name: spire-server
+          Image: !Ref SpireServerImage
+          Essential: true
+          MemoryReservation: 96
+          Command: ["-config", "/etc/gekko13/spire/server.conf"]
+          PortMappings: [{ ContainerPort: 8081, HostPort: 8081, Protocol: tcp }]
+          Environment:
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            - { Name: AWS_USE_DUALSTACK_ENDPOINT, Value: "true" }
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: data, ContainerPath: /var/lib/spire/server }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-server, mode: non-blocking }
+
+  SpireAgentTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: docker の attestor は、呼び出し元の PID からコンテナを探す。ホストの PID と docker のソケットが要る。IMDS に届くよう、ホストのネットワークで動かす
+        must: このタスクの外に、docker のソケットを渡さない
+    Properties:
+      Family: !Sub "${Prefix}-spire-agent"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: host
+      PidMode: host
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: data, Host: { SourcePath: /var/lib/gekko13/spire-agent } }
+        - { Name: bundle, Host: { SourcePath: /var/lib/gekko13/bundle } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: docker, Host: { SourcePath: /var/run/docker.sock } }
+      ContainerDefinitions:
+        - Name: spire-agent
+          Image: !Ref SpireAgentImage
+          Essential: true
+          MemoryReservation: 64
+          Command: ["-config", "/etc/gekko13/spire/agent.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: data, ContainerPath: /var/lib/spire/agent }
+            - { SourceVolume: bundle, ContainerPath: /run/spire/bundle, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets }
+            - { SourceVolume: docker, ContainerPath: /var/run/docker.sock, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-agent, mode: non-blocking }
+
+  LedgerTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-ledger"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid, Host: { SourcePath: /var/lib/gekko13/svid/ledger } }
+      ContainerDefinitions:
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: ledger, mode: non-blocking }
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 96
+          PortMappings: [{ ContainerPort: 8443, HostPort: 28443, Protocol: tcp }]
+          Environment:
+            - { Name: SERVICE, Value: ledger }
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: ISSUER, Value: !Ref Issuer }
+            - { Name: JWKS_URL, Value: !Sub "${Issuer}/.well-known/jwks.json" }
+            - { Name: CALLERS, Value: !Sub '{"spiffe://gekko13.internal/svc/transfer":"${TransferClientId}"}' }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: ledger, mode: non-blocking }
+
+  TransferTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-transfer"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid, Host: { SourcePath: /var/lib/gekko13/svid/transfer } }
+      ContainerDefinitions:
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: transfer, mode: non-blocking }
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 96
+          PortMappings: [{ ContainerPort: 8443, HostPort: 18443, Protocol: tcp }]
+          Environment:
+            - { Name: SERVICE, Value: transfer }
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: ISSUER, Value: !Ref Issuer }
+            - { Name: JWKS_URL, Value: !Sub "${Issuer}/.well-known/jwks.json" }
+            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
+            - { Name: CLIENT_ID, Value: !Ref TransferClientId }
+            - { Name: ACTOR_SCOPE, Value: internal/actor }
+            - { Name: NEXT_URL, Value: !Sub "https://${HostBridgeIp}:28443" }
+            - { Name: NEXT_ID, Value: spiffe://gekko13.internal/svc/ledger }
+            - { Name: CALLERS, Value: !Sub '{"spiffe://gekko13.internal/svc/bff":"${BffClientId}"}' }
+          Secrets:
+            - { Name: CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TransferSecretParameter}" }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: transfer, mode: non-blocking }
+
+  BffTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-bff"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid, Host: { SourcePath: /var/lib/gekko13/svid/bff } }
+      ContainerDefinitions:
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: bff, mode: non-blocking }
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 96
+          PortMappings: [{ ContainerPort: 8080, HostPort: 18080, Protocol: tcp }]
+          Environment:
+            - { Name: SERVICE, Value: bff }
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: ISSUER, Value: !Ref Issuer }
+            - { Name: JWKS_URL, Value: !Sub "${Issuer}/.well-known/jwks.json" }
+            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
+            - { Name: USER_CLIENT_ID, Value: !Ref AppClientId }
+            - { Name: CLIENT_ID, Value: !Ref BffClientId }
+            - { Name: ACTOR_SCOPE, Value: internal/actor }
+            - { Name: NEXT_URL, Value: !Sub "https://${HostBridgeIp}:18443" }
+            - { Name: NEXT_ID, Value: spiffe://gekko13.internal/svc/transfer }
+          Secrets:
+            - { Name: CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}" }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: bff, mode: non-blocking }
+
+  SpireServerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: spire-server
+      TaskDefinition: !Ref SpireServerTask
+      LaunchType: EC2
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+
+  SpireAgentService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: spire-agent
+      TaskDefinition: !Ref SpireAgentTask
+      LaunchType: EC2
+      SchedulingStrategy: DAEMON
+
+  LedgerService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: ledger
+      TaskDefinition: !Ref LedgerTask
+      LaunchType: EC2
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+
+  TransferService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: transfer
+      TaskDefinition: !Ref TransferTask
+      LaunchType: EC2
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+
+  BffService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: bff
+      TaskDefinition: !Ref BffTask
+      LaunchType: EC2
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+
+Outputs:
+  ClusterName: { Value: !Ref Cluster }
+  InstanceId: { Value: !Ref Instance }
+  LogGroupName: { Value: !Ref LogGroup }

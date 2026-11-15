@@ -1,0 +1,27 @@
+{
+  "name": "gekko-13",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "tsc --noEmit && eslint . && vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "local:up": "local/up.sh",
+    "local:down": "local/down.sh",
+    "scenarios": "node scripts/scenarios.ts"
+  },
+  "dependencies": {
+    "jose": "^6.2.17"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^24.19.2",
+    "eslint": "^9.39.5",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.2",
+    "vitest": "^3.2.7"
+  }
+}
