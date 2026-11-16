@@ -1,9 +1,9 @@
 // シナリオ 2: SVID を短い有効期限で入れ替えながら、連鎖を続けて呼び、失敗を数える。
-// 使い方: node scripts/soak.ts [--target local|aws] [--minutes 30] [--interval 1000]
+// 使い方: node scripts/soak.ts [--target local | --target aws --as bff] [--minutes 30] [--interval 1000]
 import { readFileSync, writeFileSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { join } from "node:path";
-import { targetFrom } from "./target.ts";
+import { targetFrom, type Service } from "./target.ts";
 
 const arg = (name: string, fallback: number) => {
   const i = process.argv.indexOf(`--${name}`);
@@ -12,11 +12,13 @@ const arg = (name: string, fallback: number) => {
 const minutes = arg("minutes", 30);
 const interval = arg("interval", 1000);
 const t = targetFrom(process.argv);
-const SERVICES = ["bff", "transfer", "ledger"];
+// 入れ替えを数えるのは、鍵を持つ役の SVID だけ（ローカルは 3 つ、AWS は --as の 1 つ）。
+// AWS の 3 つのサービスの回数は、aws/run-scenarios.sh がアプリのログ（svid_rotated）から数える
+const SERVICES = t.roles;
 // 利用者のアクセストークンの有効期限（Cognito では 5 分）より前に取り直す
 const TOKEN_REFRESH_MS = 4 * 60_000;
 
-const serial = (s: string) => new X509Certificate(readFileSync(join(t.svidRoot, s, "svid.pem"))).serialNumber;
+const serial = (s: Service) => new X509Certificate(readFileSync(join(t.svidDir(s), "svid.pem"))).serialNumber;
 
 const seen: Record<string, string[]> = Object.fromEntries(SERVICES.map((s) => [s, [serial(s)]]));
 const failures: { at: string; status: number; body: string }[] = [];

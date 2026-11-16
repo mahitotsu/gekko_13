@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の検証のネットワーク。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
-# インスタンスには既定で公開 IPv4 を付けない。入ってくる通信は受けない（入口は検証の範囲外）。
+# gekko13 の検証のネットワークと、SPIRE server の状態を置く EFS。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
+# インスタンスには既定で公開 IPv4 を付けない。VPC の外からの通信は受けない（入口は検証の範囲外）。サブネットは 2 つの AZ に 1 つずつ。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 network. IPv6 first, with no NAT gateway and no VPC endpoints (no fixed monthly cost).
-  Hosts get no public IPv4 by default. No inbound traffic is accepted (the ingress is out of scope).
+  gekko13 network and the EFS that holds SPIRE server state. IPv6 first, with no NAT gateway and no VPC endpoints (no fixed monthly cost).
+  Hosts get no public IPv4 by default. No inbound traffic from outside the VPC (the ingress is out of scope). One subnet in each of two AZs.
 
 Metadata:
   AWSToolsMetrics:
@@ -20,6 +20,9 @@ Parameters:
   SubnetCidr:
     Type: String
     Default: 10.13.0.0/24
+  Subnet2Cidr:
+    Type: String
+    Default: 10.13.1.0/24
 
 Resources:
   Vpc:
@@ -47,24 +50,42 @@ Resources:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref InternetGateway
 
+  # 1 つめの AZ のサブネット。段 A（1 AZ）は、ここだけに台を置く。IPv6 で外へ出る。
+  # 公開 IPv4 を自動で付けない（付けると 1 時間ごとに課金される）。
   Subnet:
     Type: AWS::EC2::Subnet
     DependsOn: Ipv6Block
-    # 1 台のインスタンスだけを置く。IPv6 で外へ出る。
-    # 公開 IPv4 を自動で付けない（付けると 1 時間ごとに課金される）。
     Metadata:
       com.aws.cloudformation.Context:
-        why: Holds the single host. Egress goes over IPv6
+        why: First-AZ subnet. Stage A (single AZ) places hosts here only. Egress goes over IPv6
         must: Never auto-assign public IPv4 (billed per hour)
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref SubnetCidr
       AvailabilityZone: !Select [0, !GetAZs ""]
-      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 1, 64]]
+      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 2, 64]]
       AssignIpv6AddressOnCreation: true
       MapPublicIpOnLaunch: false
       EnableDns64: false
       Tags: [{ Key: Name, Value: !Ref Prefix }]
+
+  # 2 つめの AZ のサブネット。段 B（マルチ AZ）で台を置く。段 A では EFS のマウントターゲットだけがある。
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: Ipv6Block
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Second-AZ subnet for stage B (multi-AZ). In stage A it only holds an EFS mount target
+        must: Never auto-assign public IPv4 (billed per hour)
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref Subnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Ipv6CidrBlock: !Select [1, !Cidr [!Select [0, !GetAtt Vpc.Ipv6CidrBlocks], 2, 64]]
+      AssignIpv6AddressOnCreation: true
+      MapPublicIpOnLaunch: false
+      EnableDns64: false
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-2" }]
 
   RouteTable:
     Type: AWS::EC2::RouteTable
@@ -95,16 +116,25 @@ Resources:
       SubnetId: !Ref Subnet
       RouteTableId: !Ref RouteTable
 
+  Subnet2RouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref RouteTable
+
+  # ホスト、SPIRE server のタスクの ENI（awsvpc）、EFS のマウントターゲットが共有するグループ。
+  # VPC の外からの通信を受けない。受けるのは、同じグループの中からだけ（台をまたぐ Service Connect、SPIRE の 8081、EFS の 2049）。
+  # 入ってくる規則を外へ広げない。入口を作るときは CloudFront のプレフィックスリストだけに限る。
   HostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    # インスタンスの外からの通信を受けない。サービスどうしと SPIRE は、同じホストの中で話す。
-    # 入ってくる規則を足さない。入口を作るときは CloudFront のプレフィックスリストだけに限る。
     Metadata:
       com.aws.cloudformation.Context:
-        why: Accepts no traffic from outside the host. Services and SPIRE talk within the same host
-        must: Add no inbound rules. A future ingress must be limited to the CloudFront prefix list
+        why: >-
+          Shared by hosts, the SPIRE server task ENI (awsvpc) and EFS mount targets.
+          Inbound is accepted only from members of this group (cross-host Service Connect, SPIRE 8081, EFS 2049)
+        must: Never open inbound beyond this group. A future ingress must be limited to the CloudFront prefix list
     Properties:
-      GroupDescription: gekko13 ECS host (no inbound)
+      GroupDescription: gekko13 ECS hosts (inbound only from this group)
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: AWS APIs and ECR over IPv6 }
@@ -112,7 +142,81 @@ Resources:
         - { IpProtocol: udp, FromPort: 123, ToPort: 123, CidrIp: 169.254.169.123/32, Description: Amazon Time Sync }
       Tags: [{ Key: Name, Value: !Ref Prefix }]
 
+  HostIngressFromGroup:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      SourceSecurityGroupId: !Ref HostSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      Description: members of this group only
+
+  HostEgressToGroup:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      DestinationSecurityGroupId: !Ref HostSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      Description: members of this group only
+
+  # SPIRE server のデータストア（sqlite）と鍵、agent が最初に信じるバンドル。
+  # ECS のスタックを作り直しても、台が入れ替わっても、CA と登録が残るように、ECS の外に置く。
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Holds the SPIRE server datastore (sqlite), its keys and the bootstrap bundle for agents.
+          Lives outside the ECS stack so the CA and entries survive host replacement and ECS stack recreation
+        must: Keep encryption at rest on. Deleting this file system rotates the SPIRE CA
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags: [{ Key: Name, Value: !Ref Prefix }]
+
+  MountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref Subnet
+      SecurityGroups: [!Ref HostSecurityGroup]
+
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref Subnet2
+      SecurityGroups: [!Ref HostSecurityGroup]
+
+  # spire-server のイメージは uid 1000 で動く。アクセスポイントで、EFS の上の所有者を 1000 に揃える。
+  SpireServerAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser: { Uid: "1000", Gid: "1000" }
+      RootDirectory:
+        Path: /spire-server
+        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0700" }
+
+  BundleAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser: { Uid: "1000", Gid: "1000" }
+      RootDirectory:
+        Path: /bundle
+        CreationInfo: { OwnerUid: "1000", OwnerGid: "1000", Permissions: "0755" }
+
 Outputs:
   VpcId: { Value: !Ref Vpc }
   SubnetId: { Value: !Ref Subnet }
+  # 段 A は 1 つめだけ、段 B は 2 つとも使う
+  SubnetIds: { Value: !Join [",", [!Ref Subnet, !Ref Subnet2]] }
   HostSecurityGroupId: { Value: !Ref HostSecurityGroup }
+  FileSystemId: { Value: !Ref FileSystem }
+  SpireServerAccessPointId: { Value: !Ref SpireServerAccessPoint }
+  BundleAccessPointId: { Value: !Ref BundleAccessPoint }

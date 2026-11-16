@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # AWS の段の資源を、決まった順番で作る。実行すると費用が出る（EC2 は動いている間、1 時間ごと）。
 # 使い方: aws/deploy.sh <マネージドログインのドメインの接頭辞> [公開 IPv4 を付けるなら true]
+#   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く（段 B）。既定は 1（段 A）。
+#   GEKKO13_TASKS で bff、transfer、ledger のタスク数を、GEKKO13_MAX_HOSTS で台の上限を変える（既定 1 と 2）。
 # 順番: registry → イメージを写す → network → cognito → client の秘密を SSM へ → ecs。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -8,6 +10,9 @@ cd "$(dirname "$0")/.."
 
 DOMAIN_PREFIX=${1:?マネージドログインのドメインの接頭辞を渡す}
 PUBLIC_IPV4=${2:-false}
+AZS=${GEKKO13_AZS:-1}
+TASKS=${GEKKO13_TASKS:-1}
+MAX_HOSTS=${GEKKO13_MAX_HOSTS:-2}
 PREFIX=gekko13
 REGION=${AWS_REGION:-ap-northeast-1}
 SPIRE=1.15.3
@@ -19,6 +24,8 @@ scripts/check-templates.sh
 
 cfn() { aws cloudformation deploy --region "$REGION" --no-fail-on-empty-changeset "$@"; }
 out() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
+# ホストは、IPv6 で届くデュアルスタックの名前からイメージを取る（既定の dkr.ecr の名前は IPv4 だけ。docs/findings.md）
+dualstack() { sed -E 's/\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com/.dkr-ecr.\1.on.aws/' <<<"$1"; }
 
 cfn --stack-name "$PREFIX-registry" --template-file aws/registry.yaml
 APP_REPO=$(out "$PREFIX-registry" AppRepositoryUri)
@@ -31,10 +38,11 @@ copy "ghcr.io/spiffe/spire-server:$SPIRE" "$(out "$PREFIX-registry" SpireServerR
 copy "ghcr.io/spiffe/spire-agent:$SPIRE" "$(out "$PREFIX-registry" SpireAgentRepositoryUri):$SPIRE"
 copy "ghcr.io/spiffe/spiffe-helper:$HELPER" "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri):$HELPER"
 
-# アプリのイメージは arm64 で作る。Dockerfile に RUN がないので、エミュレーションは要らない
+# アプリのイメージは arm64 で作る。Dockerfile に RUN がないので、エミュレーションは要らない。
+# spire-server の CLI を写すので、SPIRE の版を揃える
 CTX=$(scripts/stage-image.sh)
 docker buildx imagetools inspect "$APP_REPO:$TAG" >/dev/null 2>&1 || \
-  docker buildx build --platform linux/arm64 -f Dockerfile -t "$APP_REPO:$TAG" --push "$CTX"
+  docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" -f Dockerfile -t "$APP_REPO:$TAG" --push "$CTX"
 
 cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
 cfn --stack-name "$PREFIX-cognito" --template-file aws/cognito.yaml --parameter-overrides "DomainPrefix=$DOMAIN_PREFIX"
@@ -47,19 +55,34 @@ put_secret() {
 }
 put_secret "$(out "$PREFIX-cognito" BffClientId)" "/$PREFIX/bff/client-secret"
 put_secret "$(out "$PREFIX-cognito" TransferClientId)" "/$PREFIX/transfer/client-secret"
+# プローブの動かし方。aws/run-scenarios.sh が書き換える。なければ作る（秘密ではない）
+aws ssm get-parameter --region "$REGION" --name "/$PREFIX/probe/mode" >/dev/null 2>&1 || \
+  aws ssm put-parameter --region "$REGION" --name "/$PREFIX/probe/mode" --type String --value scenarios >/dev/null
+
+if [ "$AZS" = 2 ]; then
+  SUBNETS=$(out "$PREFIX-network" SubnetIds)
+else
+  SUBNETS=$(out "$PREFIX-network" SubnetId)
+fi
 
 cfn --stack-name "$PREFIX-ecs" --template-file aws/ecs.yaml --capabilities CAPABILITY_IAM --parameter-overrides \
-  "SubnetId=$(out "$PREFIX-network" SubnetId)" \
+  "VpcId=$(out "$PREFIX-network" VpcId)" \
+  "SubnetIds=$SUBNETS" \
   "SecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
+  "FileSystemId=$(out "$PREFIX-network" FileSystemId)" \
+  "SpireServerAccessPointId=$(out "$PREFIX-network" SpireServerAccessPointId)" \
+  "BundleAccessPointId=$(out "$PREFIX-network" BundleAccessPointId)" \
   "AssignPublicIpv4=$PUBLIC_IPV4" \
-  "AppImage=$APP_REPO:$TAG" \
-  "SpireServerImage=$(out "$PREFIX-registry" SpireServerRepositoryUri):$SPIRE" \
-  "SpireAgentImage=$(out "$PREFIX-registry" SpireAgentRepositoryUri):$SPIRE" \
-  "SpiffeHelperImage=$(out "$PREFIX-registry" SpiffeHelperRepositoryUri):$HELPER" \
+  "TaskCount=$TASKS" \
+  "MaxInstances=$MAX_HOSTS" \
+  "AppImage=$(dualstack "$APP_REPO"):$TAG" \
+  "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \
+  "SpireAgentImage=$(dualstack "$(out "$PREFIX-registry" SpireAgentRepositoryUri)"):$SPIRE" \
+  "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
   "Issuer=$(out "$PREFIX-cognito" Issuer)" \
   "TokenUrl=$(out "$PREFIX-cognito" TokenUrl)" \
   "AppClientId=$(out "$PREFIX-cognito" AppClientId)" \
   "BffClientId=$(out "$PREFIX-cognito" BffClientId)" \
   "TransferClientId=$(out "$PREFIX-cognito" TransferClientId)"
 
-echo "作った。インスタンス: $(out "$PREFIX-ecs" InstanceId)。使い終わったら止める: aws ec2 stop-instances --instance-ids <ID>"
+echo "作った。使い終わったら aws/scale.sh down で、タスクと台を 0 にする"

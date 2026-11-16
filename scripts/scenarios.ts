@@ -1,15 +1,17 @@
 // 合格の基準（docs/plan.md の 3 節）のシナリオを回す。
 // 使い方:
-//   ローカル: node scripts/scenarios.ts --target local   （local/up.sh の環境に、ホストから当てる）
-//   AWS:      node scripts/scenarios.ts --target aws     （aws/run-scenarios.sh が ECS のタスク gekko13-probe として動かす）
-// 「盗まれた鍵」は、各サービスの SVID のファイルを読んで使う（そのサービスが乗っ取られた想定）。
+//   ローカル: node scripts/scenarios.ts --target local              （local/up.sh の環境に、ホストから当てる。全部を回す）
+//   AWS:      node scripts/scenarios.ts --target aws --as <役>      （aws/run-scenarios.sh が、ECS のサービス probe-<役> として動かす）
+// 「盗まれた鍵」は、そのサービスが乗っ取られた想定で、そのサービスの SVID を使う。
+// ローカルはホストのパスから 3 つとも読む。AWS は、役のファミリーのタスクとして動き、自分の SVID だけを持つ。
+// そのため AWS では、役が鍵を持つシナリオだけを回し、aws/run-scenarios.sh が 3 つの役と rogue の結果をまとめる（scripts/aws-collect.ts）。
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { X509Certificate } from "node:crypto";
 import { mtlsCall, spiffeIdOf, type Svid } from "../packages/spiffe-tls/src/index.ts";
-import { targetFrom, type Target } from "./target.ts";
+import { targetFrom, type Service, type Target } from "./target.ts";
 
 const TD = "gekko13.internal";
 const id = (s: string) => `spiffe://${TD}/svc/${s}`;
@@ -22,8 +24,10 @@ const record = (r: Result) => {
   console.log(`${mark} ${r.id} ${r.title}\n     期待: ${r.expected}\n     実際: ${r.actual}`);
 };
 
-const svidOf = (t: Target, s: string): Svid => {
-  const dir = join(t.svidRoot, s);
+const has = (t: Target, s: Service) => t.roles.includes(s);
+
+const svidOf = (t: Target, s: Service): Svid => {
+  const dir = t.svidDir(s);
   const cert = readFileSync(join(dir, "svid.pem"), "utf8");
   const leaf = new X509Certificate(cert);
   return {
@@ -90,16 +94,18 @@ function fakeCerts(t: Target): { dir: string; cleanup: () => void } {
 }
 
 async function identityScenarios(t: Target) {
-  const names = ["bff", "transfer", "ledger"];
+  // AWS では、役が 1 つなので、自分の ID だけを記録する。3 つの役がそろって 1-a になる（scripts/aws-collect.ts）
+  const names = t.roles;
   const ids = names.map((s) => svidOf(t, s).id);
   record({
     id: "1-a",
-    title: "登録したファミリーごとに、別の SPIFFE ID が配られる",
+    title: t.name === "local" ? "登録したファミリーごとに、別の SPIFFE ID が配られる" : `登録したファミリーの SPIFFE ID が配られる（${names.join(", ")}）`,
     expected: names.map(id).join(", "),
     actual: ids.join(", "),
     pass: ids.join() === names.map(id).join(),
   });
 
+  // AWS の 1-b は、rogue のタスクが自分で確かめて出す。1-c は AWS では行わない（ホストのシェルが要る）
   if (t.name === "local") {
     const rogue = await helperWithLabels("gekko13-rogue", 20_000);
     record({ id: "1-b", title: "登録していないファミリーのタスク", expected: "20 秒待っても SVID が出ない", actual: rogue ?? "SVID なし", pass: rogue === undefined });
@@ -111,35 +117,37 @@ async function identityScenarios(t: Target) {
       actual: forged ?? "SVID なし",
       pass: forged === id("ledger"),
     });
-  } else {
-    // aws/run-scenarios.sh が、このタスクより先に gekko13-rogue のタスクを起動しておく
-    const files = existsSync(t.rogueDir!) ? readdirSync(t.rogueDir!) : [];
-    record({
-      id: "1-b",
-      title: "登録していないファミリーのタスク（ECS で起動した gekko13-rogue）",
-      expected: "SVID のファイルがない",
-      actual: files.length === 0 ? "SVID なし" : `ファイルがある: ${files.join(", ")}`,
-      pass: files.length === 0,
-    });
-    record({ id: "1-c", title: "ホストで docker run にラベルを偽って付けたコンテナ", expected: "AWS では行わない（ホストのシェルが要る）", actual: "未実施", pass: "skipped" });
   }
 }
 
+/**
+ * 役ごとに受け持つ。bff は 3-a と 3-d、transfer は 3-b、3-c、3-e、3-e2、3-f、3-g と CLAIMS。ledger は受け持たない。
+ * ローカルは役が 3 つともあるので、今までどおり全部を回す。
+ */
 async function tokenScenarios(t: Target) {
+  if (!has(t, "bff") && !has(t, "transfer")) return;
   const user = await t.userToken();
+  const bffToken = await t.bffDelegatedToken(user);
 
-  const a = await fetch(`${t.bffUrl}/transfer`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${user}`, "content-type": "application/json" },
-    body: JSON.stringify({ amount: 1000, to: "acct-2" }),
-  }).then(async (r) => ({ status: r.status, body: await r.text() }));
-  record({ id: "3-a", title: "正しい証明書と正しいトークン（BFF → transfer → ledger）", expected: "200", actual: `${a.status} ${a.body}`, pass: a.status === 200 });
+  if (has(t, "bff")) {
+    const a = await fetch(`${t.bffUrl}/transfer`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${user}`, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 1000, to: "acct-2" }),
+    }).then(async (r) => ({ status: r.status, body: await r.text() }));
+    record({ id: "3-a", title: "正しい証明書と正しいトークン（BFF → transfer → ledger）", expected: "200", actual: `${a.status} ${a.body}`, pass: a.status === 200 });
+  }
 
-  const ledgerBundle = svidOf(t, "ledger").bundle;
+  if (!has(t, "transfer")) {
+    if (has(t, "bff")) await bffKeyScenarios(t, bffToken);
+    return;
+  }
+
+  // 信頼するバンドルは、同じ信頼ドメインのものなら、どの SVID に付いてきたものでもよい
+  const ledgerBundle = svidOf(t, has(t, "ledger") ? "ledger" : "transfer").bundle;
   const b = await tryCall(t, { cert: "", key: "", bundle: ledgerBundle }, id("ledger"), user);
   record({ id: "3-b", title: "証明書なしで ledger を呼ぶ", expected: "TLS で拒否", actual: b.text, pass: b.status === 0 });
 
-  const bffToken = await t.bffDelegatedToken(user);
   const c = await tryCall(t, svidOf(t, "transfer"), id("ledger"), bffToken);
   record({
     id: "3-c",
@@ -149,14 +157,7 @@ async function tokenScenarios(t: Target) {
     pass: c.status === 403 && c.text.includes("peer_actor_mismatch"),
   });
 
-  const d = await tryCall(t, svidOf(t, "bff"), id("ledger"), bffToken);
-  record({
-    id: "3-d",
-    title: "BFF の鍵で ledger を直接呼ぶ（transfer を飛ばす）",
-    expected: "403 caller_not_allowed",
-    actual: d.text,
-    pass: d.status === 403 && d.text.includes("caller_not_allowed"),
-  });
+  if (has(t, "bff")) await bffKeyScenarios(t, bffToken);
 
   const fake = fakeCerts(t);
   try {
@@ -192,6 +193,18 @@ async function tokenScenarios(t: Target) {
   console.log(`CLAIMS bff-delegated ${JSON.stringify(shape(claims(bffToken)))}`);
 }
 
+/** 3-d: 乗っ取られた BFF が、transfer を飛ばして ledger を直接呼ぶ。 */
+async function bffKeyScenarios(t: Target, bffToken: string) {
+  const d = await tryCall(t, svidOf(t, "bff"), id("ledger"), bffToken);
+  record({
+    id: "3-d",
+    title: "BFF の鍵で ledger を直接呼ぶ（transfer を飛ばす）",
+    expected: "403 caller_not_allowed",
+    actual: d.text,
+    pass: d.status === 403 && d.text.includes("caller_not_allowed"),
+  });
+}
+
 async function main() {
   const t = targetFrom(process.argv);
   await identityScenarios(t);
@@ -199,7 +212,7 @@ async function main() {
 
   const graded = results.filter((r) => r.pass !== "skipped");
   const failed = graded.filter((r) => !r.pass);
-  const summary = { at: new Date().toISOString(), target: t.name, results };
+  const summary = { at: new Date().toISOString(), target: t.name, roles: t.roles, results };
   if (t.outDir) {
     const out = join(t.outDir, `scenarios-${t.name}-${summary.at.replace(/[:.]/g, "-")}.json`);
     writeFileSync(out, JSON.stringify(summary, null, 2));
