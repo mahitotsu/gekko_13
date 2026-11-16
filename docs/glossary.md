@@ -27,3 +27,14 @@
 | BFF | Backend for Frontend。利用者の画面の受け口で、最初の交換をする |
 | transfer、ledger | 振込を受け付けるサービスと、記帳する最も奥のサービス |
 | bridge モード | ECS のネットワークモードの 1 つ。コンテナは docker のブリッジにつながり、同じタスクでもネットワークを共有しない |
+| awsvpc モード | ECS のネットワークモードの 1 つ。タスクごとに ENI（ネットワークの口）を持つ。この検証では、SPIRE server だけが使う |
+| DAEMON | ECS のサービスの置き方の 1 つ。どの台にも 1 つずつタスクを置く。この検証では、SPIRE の agent に使う |
+| キャパシティプロバイダー | ECS が、タスクを置く台（ここでは Auto Scaling グループ）を扱うための設定。台の数を ECS に任せられる |
+| マネージドスケーリング | キャパシティプロバイダーの機能。置くタスクに合わせて、台の数を増減する。指標は `CapacityProviderReservation`（必要と見積もった台数 ÷ 今の台数）で、DAEMON のタスクは数えない |
+| Service Connect | ECS の、サービスどうしを名前で呼ばせる仕組み。各タスクに Envoy を足して中継する。この検証では TCP の中継だけに使う |
+| Cloud Map | AWS の、サービスの名前と居場所を登録する仕組み。この検証では、Service Connect の名前空間と、SPIRE server の DNS の名前（`spire-server.svc.gekko13.internal`）に使う |
+| デュアルスタックの名前 | IPv4 と IPv6 の両方で届く、AWS の API の名前（`*.api.aws`、`*.on.aws`）。既定の名前（`*.amazonaws.com`）は IPv4 だけのものがある |
+| registrar | SPIRE server のタスクの中のコンテナ（`scripts/spire-registrar.sh`）。登録を作り、agent が最初に信じるバンドルを EFS に書く |
+| プローブ（乗っ取られたタスク） | AWS でシナリオを回す役。bff、transfer、ledger の本物のファミリーの別の版のタスクとして動き、自分が得た SVID だけで攻撃する。サービス名は probe-bff、probe-transfer、probe-ledger |
+| rogue | シナリオ 1-b の、登録していないファミリー（`gekko13-rogue`）のタスク |
+| 段 A、段 B | AWS の段の分け方。段 A は 1 つの AZ で各サービス 1 タスク、段 B は 2 つの AZ で各サービス 2 タスク（[plan.md](plan.md)） |

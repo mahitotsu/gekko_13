@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-ネットバンキングの試作「Gekko Bank」の内部の通信を、SPIFFE の mTLS で守れるかを、ECS on EC2（1 台）で確かめる検証。文書の書き方は、Kothar プラグインの規則に従う（スキル `write-docs`）。
+ネットバンキングの試作「Gekko Bank」の内部の通信を、SPIFFE の mTLS で守れるかを、ECS on EC2 で確かめる検証。台の数はキャパシティプロバイダーが決め、台の数と AZ を前提にしない。文書の書き方は、Kothar プラグインの規則に従う（スキル `write-docs`）。
 
 コードや git から分かることは書かない。ここには、作業の約束事と、つまずきやすい点だけを置く。
 
@@ -28,7 +28,10 @@
 ## つまずきやすい点
 - この環境には `docker compose` がない。ローカルの環境は `local/up.sh` が `docker run` で立てる。
 - Node.js の型の取り除きは `node_modules` の中では動かない。パッケージは相対パス（`../../../packages/...`）で読む。
-- アプリは自分で mTLS を終える。Envoy などのサイドカーの後ろにアプリを置かない（理由は `docs/design-decisions.md`）。
+- アプリは自分で mTLS を終える。身元の確認をサイドカーに任せない。Service Connect の Envoy は TCP の中継だけに使い、Service Connect の TLS は使わない（理由は `docs/design-decisions.md`）。
+- CloudFormation のテンプレートの Description と Metadata は英語で書く。CloudFormation が ASCII 以外の文字を「?」に置き換えるため。`scripts/check-templates.sh` が、コメント以外の日本語を止める。
+- `local/down.sh` は `local/run/` を全部消す。AWS の結果や控えも消えるので、残すものは先に写す。
+- 作り直すときは、先にコミットする。イメージのタグはコミットから作り、同じ `-dirty` のタグでは古いイメージが使われる。
 
 ## 文書の書き方
 人が読む文書を書く・直すときは、スキル `write-docs` に従う。規則（5 つの原則、5 つの試験、出す前の確認）の正本は、そのスキルにある。ここには写さない。
