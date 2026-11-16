@@ -2,10 +2,11 @@
 
 **この文書の読み手:** この検証が、いつ、何をして、何を決めたかを知りたい人。計画と合格の基準は [plan.md](plan.md)、確かめた事実は [findings.md](findings.md)、判断の理由は [design-decisions.md](design-decisions.md)。用語は [用語集](glossary.md)。新しい出来事は、年表の末尾に足す。
 
-## 現在の状況（2026-11-16）
+## 現在の状況（2026-11-17）
 - ローカルの段は、合格の基準（[plan.md の 4 節](plan.md#4-合格の基準)）の (a) を満たした。シナリオ 11 件と入れ替えの試験が、すべて予測どおりだった。
-- AWS の段は、registry、network、cognito のスタックを作った。ECS のスタックは、docker が起動せず（[findings 5-3](findings.md#5-3-ip6tables-を書いた-daemonjson-でecs-用の-ami-の-docker-が起動しなかった)）、消した。(b) は未判定。
-- 次は、ECS の作りをキャパシティプロバイダーと Service Connect に直してから、作り直す。プローブを Service Connect の下でどう動かすかは、持ち主と決める。
+- AWS の段（段 A: 1 AZ、各サービス 1 タスク）は、シナリオ 1-a、1-b、3-a〜3-g が予測どおりになった（[findings 7-1](findings.md#7-1-aws-でもシナリオは-1010-件が期待どおりだった)）。シナリオ 2（入れ替え）は、まだ回していない。(b) は未判定。
+- AWS の 4 つのスタックは残してあり、台は 0 台。台にかかる費用は止まり、固定費（ホストゾーンとアラーム）と保存の費用だけが残る。
+- 次は、AWS でシナリオ 2 を回す（下の「次の候補」）。
 
 ## 年表
 | 日付 | 実施 | 結果 | 費用 |
@@ -18,6 +19,15 @@
 | 2026-11-16 | `aws/deploy.sh` で AWS の段を作り始めた（公開 IPv4 なし） | registry、network、cognito はできた。ECS は、インスタンスが登録されず止まった（[findings 5-3](findings.md#5-3-ip6tables-を書いた-daemonjson-でecs-用の-ami-の-docker-が起動しなかった)） | EC2 が約 30 分で約 0.01 ドル（推定） |
 | 2026-11-16 | 持ち主の承認を得て、gekko13-ecs のスタックを消した | 消えた。ほかのスタックと SSM のパラメーターは残した | 0 |
 | 2026-11-16 | スタックの説明が「?」に化けているのを、持ち主が見つけた | CloudFormation の側の置き換えと分かった。4 つのテンプレートの説明と Metadata を英語にし、3 つのスタックを更新した（[findings 5-1](findings.md#5-1-cloudformation-はテンプレートの-ascii-以外の文字をに置き換えた)） | 0 |
+| 2026-11-16 | ECS の作りを、キャパシティプロバイダー、Service Connect、awsvpc の SPIRE server と EFS に直した（コミット `ae821af`） | 作成は 2 回、巻き戻った（[findings 5-5](findings.md#5-5-ecs-はタスク定義の-awslogs-endpoint-を受け付けなかった)、[5-6](findings.md#5-6-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。3 回目で、IPv6 だけの 2 台が動いた | 0（巻き戻しの間は台なし） |
+| 2026-11-16 | 取り残された Cloud Map の名前空間と、空のスタックを、持ち主の承認を得て消した | 消えた | 0 |
+| 2026-11-16 | 0 台までの縮小を、マネージドスケーリングに任せて測った | 約 18 分で 0 台。agent の DAEMON は数に入らなかった（[findings 6-1](findings.md#6-1-agent-の-daemon-だけが残った台をマネージドスケーリングは空として縮めた)） | — |
+| 2026-11-17 | 台を起こし直した | SPIRE の CA と登録は EFS に残った（[findings 6-3](findings.md#6-3-台を-0-にして起こし直してもefs-の上の-spire-の-ca-と登録は残った)） | — |
+| 2026-11-17 | 持ち主が利用者を作り、ログインした | 手順の不具合 2 つを直した（[findings 5-8](findings.md#5-8-aws-cli-2381-は標準入力からの値の渡し方の一部で失敗し--output-text-は末尾に改行を付けた)） | 0 |
+| 2026-11-17 | AWS でシナリオを回した | 3 回目で 10/10 件が期待どおり（[findings 7-1](findings.md#7-1-aws-でもシナリオは-1010-件が期待どおりだった)）。1 回目は実行役の不具合、2 回目は秘密の末尾の改行で止まった | — |
+| 2026-11-17 | 入れ替えの試験（soak 30）を始めたが、持ち主の判断で止めた | シナリオ 2 の AWS の分は未判定のまま | — |
+| 2026-11-17 | 直した `aws/scale.sh down` で、台を 0 にした（コミット `1bc38a8`） | 約 3 分で 0 台（マネージドスケーリングに任せたときは約 18 分） | — |
+| 2026-11-16〜17 | この日の AWS の費用 | — | EC2 が延べ約 2 台時で約 0.05 ドル（推定）。ほかに、ホストゾーン、アラーム、EFS、ECR、Cognito が日割りで数セント（推定） |
 
 ## 決めたこと
 - 2026-11-15: ローカルの環境を、`docker compose` ではなく `docker run` で立てる。この環境に compose がなく、ECS も compose を使わないため。持ち主が承認した。
@@ -37,9 +47,15 @@
 - 2026-11-16: AWS の段を 2 つに分ける。段 A は 1 AZ で、各サービス 1 タスク。段 B はマルチ AZ で、複数タスクのサービス。段 B の確かめる項目と合格の基準は、結果を見る前に [plan.md](plan.md) に足す。
 - 2026-11-16: CloudFormation のテンプレートの説明と Metadata は、英語で書く（[findings 5-1](findings.md#5-1-cloudformation-はテンプレートの-ascii-以外の文字をに置き換えた)）。
 - 2026-11-16: この環境に cfn-lint が入っていなかったので、テンプレートの検査は `aws cloudformation validate-template` で行った。
+- 2026-11-16: 段 A でも公開 IPv4 を付けず、IPv6 だけで動かす。持ち主の判断。
+- 2026-11-16: アプリどうしの呼び出しに Service Connect を使う（TCP の中継だけ。Service Connect の TLS は使わない）。持ち主が承認した。
+- 2026-11-16: プローブは、本物のファミリーの別の版のタスク定義で動く「乗っ取られたタスク」にする。台の数と配置に依らないため。findings 1-3 の残るリスクを、検証のためにわざと使う。持ち主が承認した。
+- 2026-11-17: `aws/scale.sh down` は、タスクが 0 になったら ASG の希望台数を直接 0 にする。マネージドスケーリングの縮小の 15 分の待ちを省くため。持ち主が承認した。
+- 2026-11-17: AWS の入れ替えの試験（シナリオ 2）は、持ち主の判断で翌日以降に回す。合格の基準 (b) は変えず、未判定とする。
 
 ## 次の候補（未実施）
-- AWS の段を通す（[runbook.md](runbook.md#aws-で作る)）。[findings の 6 節](findings.md#6-未確認) の未確認の点が、ここで決まる。
+- AWS でシナリオ 2（入れ替え）を回す。手順は `aws/scale.sh up`、`node scripts/aws-login.ts`、`aws/run-scenarios.sh soak 30`、`aws/scale.sh down`。利用者とパスワードは作ってある。ほかの未確認の点は [findings の 8 節](findings.md#8-未確認)。
+- 次の 3 つを、今の作りに合わせて書き直す。設計判断（[design-decisions.md](design-decisions.md)）、段 B の確かめる項目と合格の基準（[plan.md](plan.md)）、手順書（[runbook.md](runbook.md)）。
 - 入口（CloudFront から BFF まで）の区間をどう守るかを決める。
 - データベースへの経路の線引き（SPIFFE の mTLS の範囲と、AWS の TLS と IAM に任せる範囲）を決める。
 - account と enroll のサービスを足し、gekko_12 の要件を書き直す。

@@ -5,9 +5,9 @@
 **読み手:** この検証に後から加わる開発者と、新しい会話の AI エージェント。AWS と OAuth の基礎は知っている前提。読むと、何が確かめられたかと、自分で回す方法が分かる。
 
 ## 答え
-- **身元の配り方:** docker の attestor は、ECS と同じ名前のコンテナのラベルで、サービスごとに別の SPIFFE ID を配れた。ローカルで確かめ、AWS では未確認（[findings.md](docs/findings.md#1-spire-の身元の配り方)）。
-- **付け替えの防止:** 受け取る側は、mTLS の相手の SPIFFE ID とトークンの `act.client_id` を照合し、乗っ取られたサービスが別のサービスのトークンを使うのを拒めた。トークンの発行者は模擬（[findings.md](docs/findings.md#2-mtls-とトークンの照合)）。
-- **入れ替え:** 有効期限 300 秒の SVID を 30 分の間に 13 回入れ替えても、連鎖の呼び出しは失敗しなかった（[findings.md](docs/findings.md#3-svid-の入れ替え)）。
+- **身元の配り方:** docker の attestor は、ECS と同じ名前のコンテナのラベルで、サービスごとに別の SPIFFE ID を配れた。ローカルと、AWS の ECS on EC2（IPv6 だけ、2 台）で確かめた（[findings.md](docs/findings.md#1-spire-の身元の配り方)、[7-1](docs/findings.md#7-1-aws-でもシナリオは-1010-件が期待どおりだった)）。
+- **付け替えの防止:** 受け取る側は、mTLS の相手の SPIFFE ID とトークンの `act.client_id` を照合し、乗っ取られたサービスが別のサービスのトークンを使うのを拒めた。AWS では、本物の Cognito の token exchange で確かめた（[findings.md](docs/findings.md#2-mtls-とトークンの照合)、[7-2](docs/findings.md#7-2-本物の委任のトークンはact-に-sub-と-client_id-の両方を持っていた)）。
+- **入れ替え:** 有効期限 300 秒の SVID を 30 分の間に 13 回入れ替えても、連鎖の呼び出しは失敗しなかった。ローカルで確かめ、AWS では未確認（[findings.md](docs/findings.md#3-svid-の入れ替え)）。
 
 ## 読む順番
 | 知りたいこと | 読む文書 |

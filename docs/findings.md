@@ -12,7 +12,7 @@
 | spiffe-helper | 0.11.0 |
 | Node.js | 24.21.0 |
 
-5 節は、AWS の東京リージョンで 2026-11-16 に、AWS CLI 2.38.1 で確かめた。シナリオはまだ AWS で回していない（[6 節](#6-未確認)）。
+5〜7 節は、AWS の東京リージョンで 2026-11-16〜17 に、AWS CLI 2.38.1 で確かめた。シナリオ 2（入れ替え）は、まだ AWS で回していない（[8 節](#8-未確認)）。
 
 ## 一覧
 | 項目 | 確かめた事実 |
@@ -32,6 +32,18 @@
 | 5-1 | CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた |
 | 5-2 | CloudFormation は、`ExplicitAuthFlows` の `ALLOW_TOKEN_EXCHANGE_DELEGATION` を受け付けた |
 | 5-3 | `ip6tables` を書いた `daemon.json` で、ECS 用の AMI の docker が起動しなかった |
+| 5-4 | 既定の AWS の名前は IPv4 だけで、デュアルスタックの名前に向けると、公開 IPv4 なしで動いた |
+| 5-5 | ECS は、タスク定義の `awslogs-endpoint` を受け付けなかった |
+| 5-6 | 作成中に巻き戻すと、Cloud Map の名前空間がスタックの外に残った |
+| 5-7 | CloudFormation は、YAML のエイリアスを受け付けなかった |
+| 5-8 | AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、`--output text` は末尾に改行を付けた |
+| 6-1 | agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた |
+| 6-2 | 0 台から起こすとき、マネージドスケーリングは 2 台を起こした |
+| 6-3 | 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った |
+| 6-4 | aws_iid のノードの確認は、インスタンスのタグのセレクターで通った |
+| 6-5 | server が 5 分ほどいないと、agent は自分の SVID が切れて止まった |
+| 7-1 | AWS でも、シナリオは 10/10 件が期待どおりだった |
+| 7-2 | 本物の委任のトークンは、`act` に `sub` と `client_id` の両方を持っていた |
 
 ## 1. SPIRE の身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -194,7 +206,7 @@
 </details>
 
 ### 5-3. ip6tables を書いた daemon.json で、ECS 用の AMI の docker が起動しなかった
-**結論:** ユーザーデータで `/etc/docker/daemon.json` に `ipv6`、`fixed-cidr-v6`、`ip6tables` を書いて docker を再起動すると、docker が起動に失敗した。docker が動かないので ECS のエージェントも動かず、インスタンスはクラスターに登録されなかった。そのため、IPv6 だけで ECS の API に届くかは、まだ分かっていない。原因は、AMI の docker が 27 より前の版で、`ip6tables` に `"experimental": true` が要るためと推定している（docker の journal は見ていない）。
+**結論:** ユーザーデータで `/etc/docker/daemon.json` に `ipv6`、`fixed-cidr-v6`、`ip6tables` を書いて docker を再起動すると、docker が起動に失敗した。docker が動かないので ECS のエージェントも動かず、インスタンスはクラスターに登録されなかった。`"experimental": true` を足すと、docker は起動し、台は ECS に登録された。原因は、AMI の docker が 27 より前の版で、`ip6tables` に experimental が要るためと推定している（docker の journal は見ていない）。
 
 <details>
 <summary>根拠</summary>
@@ -202,13 +214,154 @@
 - AMI: `/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id`（2026-11-16 の値）
 - コマンド: `aws ec2 get-console-output --latest`
 - 結果: `systemctl restart docker` の直後に `Job for docker.service failed`、`Failed to run module scripts-user`。ECS のクラスターのコンテナインスタンスは 0 件で、サービスは `No Container Instances were found` を出し続けた。同じ出力に、SSM Agent の `unable to acquire credentials` もあった。
+- `"experimental": true` を足した版（コミット `ae821af`）では、2 台とも ECS に登録された。
 
 </details>
 
-## 6. 未確認
-- 本物の Cognito の委任のトークンの形（4-2）。`aws/run-scenarios.sh` のログの `CLAIMS` の行で確かめる。
-- リフレッシュで得たアクセストークンを、交換元にできるか。シナリオ 3-a で分かる。
-- ECS のエージェントが、コンテナに 1-1 と同じラベルを付けるか。AWS のシナリオ 1-a で確かめる。
-- aws_iid のノードの確認が、タグのセレクターで通るか。インスタンスの上で `spire-server agent list` を実行して確かめる。
-- IPv6 だけで、ECS、ECR、CloudWatch Logs、Cognito、EC2、SSM の API に届くか。届かなければ、公開 IPv4 を付けて作り直す（[runbook.md](runbook.md#つまずきやすい点)）。5-3 のために、まだ確かめられていない。
+### 5-4. 既定の AWS の名前は IPv4 だけで、デュアルスタックの名前に向けると、公開 IPv4 なしで動いた
+**結論:** 東京リージョンの既定の名前（`ecs`、`logs`、`ec2`、`ssm` の `*.amazonaws.com`、イメージの取得先 `<アカウント>.dkr.ecr.*.amazonaws.com`）には、IPv6 のアドレスがなかった。デュアルスタックの名前（`*.api.aws`、`<アカウント>.dkr-ecr.*.on.aws`）には、あった。次のように向けると、公開 IPv4 も NAT もないまま動いた。動いたのは、台の登録、イメージの取得、ログの送信、Service Connect の Envoy、EFS、SPIRE server からの EC2 の API の呼び出し。
+- **ECS のエージェント:** `/etc/ecs/ecs.config` に `AWS_USE_DUALSTACK_ENDPOINT=true` を書いた。
+- **イメージ:** URI を `dkr-ecr.….on.aws` の形にした（`aws/deploy.sh`）。
+- **docker の awslogs:** デーモンに、`AWS_USE_DUALSTACK_ENDPOINT` と `AWS_ENDPOINT_URL_CLOUDWATCH_LOGS` を渡した（5-5）。
+- **SPIRE server:** `AWS_USE_DUALSTACK_ENDPOINT=true` を渡した。
+
+Cognito（`cognito-idp` と、マネージドログインのドメイン）は、既定の名前に IPv6 のアドレスがあった。Session Manager で台に入れるかは、確かめていない。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `getent ahostsv6 <名前>`（2026-11-16）
+- 結果: 上の既定の名前はどれも IPv6 なし。`ecs`、`ecr`、`ssm`、`ec2`、`logs`、`sts`、`servicediscovery`、`ecs-sc` の `*.ap-northeast-1.api.aws` と、`dkr-ecr.….on.aws` は IPv6 あり。`api.ecr`、`ec2messages`、`cognito-idp`、`elasticfilesystem` の `*.api.aws` は、名前がなかった。
+- 動いた証拠: `aws ecs list-container-instances` が 2 台。各サービスのタスクのコンテナが 3 つ（app、svid-helper、Envoy）で RUNNING。CloudWatch Logs にアプリと SPIRE のログが届いた。
+
+</details>
+
+### 5-5. ECS は、タスク定義の awslogs-endpoint を受け付けなかった
+**結論:** ログの送り先を変える `awslogs-endpoint` をタスク定義の `LogConfiguration` に書くと、`Log driver awslogs disallows options: awslogs-endpoint` でタスク定義を作れなかった。awslogs のドライバーは docker のデーモンの中で動くので、ユーザーデータで docker の systemd の設定に `AWS_ENDPOINT_URL_CLOUDWATCH_LOGS=https://logs.<リージョン>.api.aws` を渡すと、IPv6 だけの台からログが届いた。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: CloudFormation の `CREATE_FAILED` の理由（`ClientException`、2026-11-16）。直した版では、`/gekko13/ecs` のロググループに、各コンテナのログストリームができた。
+
+</details>
+
+### 5-6. 作成中に巻き戻すと、Cloud Map の名前空間がスタックの外に残った
+**結論:** ECS のスタックの作成が、別の資源で失敗して巻き戻った。このとき CloudFormation は、作成中だった Cloud Map のプライベート DNS 名前空間を「取り消し」にした。ところが Cloud Map の側では作成が最後まで進み、名前空間と、対になるプライベートのホストゾーン（月額がかかる）が残った。次の作成は、同じ名前のホストゾーンとぶつかって失敗した（`ConflictingDomainExists`）。巻き戻したあとは、`aws servicediscovery list-namespaces` で取り残しを確かめる。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: 2 回目の作成で `The VPC … has already been associated with the hosted zone … with the same domain name`。`list-namespaces` に、1 回目の作成の時刻の `svc.gekko13.internal` があり、サービスは 0 件だった。`delete-namespace` で消すと、ホストゾーンも消えた。
+
+</details>
+
+### 5-7. CloudFormation は、YAML のエイリアスを受け付けなかった
+**結論:** 同じ環境変数の並びを、YAML のアンカー（`&名前`）とエイリアス（`*名前`）で 3 つのタスク定義に使い回すと、`YAML aliases are not allowed in CloudFormation templates` で検証に通らなかった。同じ中身を書き出す。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws cloudformation validate-template --template-body file://aws/ecs.yaml`（2026-11-16）
+
+</details>
+
+### 5-8. AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、--output text は末尾に改行を付けた
+**結論:** 秘密を引数に載せずに渡すつもりで使った書き方の一部が、動かなかった。
+- **`--cli-input-json file:///dev/stdin`:** パイプから渡すと、`Invalid JSON received` になった。`file:///dev/fd/0` と `-` も同じだった。
+- **`--value file:///dev/stdin`:** Node.js の `execFileSync` の `input` で渡すと、`No such device or address: '/dev/stdin'` になった。シェルのパイプからなら読めた。
+- **`--output text`:** 値の末尾に改行を付けた。client の秘密をそのまま SSM に入れると、Cognito が `400 invalid_client` を返した。
+
+秘密は、改行を取り、メモリの上（`/dev/shm`）の、本人だけが読める一時ファイルから `file://` で渡し、すぐに消す（`aws/deploy.sh`、`aws/create-user.sh`、`scripts/aws-login.ts`）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: 秘密を含まない `aws ssm get-parameter --cli-input-json` と `put-parameter --value` で再現した（2026-11-16）。
+- 結果: SSM の秘密の長さは 52 文字、Cognito の値は 51 文字だった。改行を取って入れ直すと、シナリオ 3-a が 200 を返した。
+
+</details>
+
+## 6. AWS の段のスケールと身元
+6 節と 7 節は、コミット `ae821af` と `1bc38a8` の作りで確かめた。台は ECS のキャパシティプロバイダー（マネージドスケーリング、0〜2 台、t4g.small）が決める。アプリどうしは Service Connect で呼び、SPIRE server は awsvpc で動き、状態を EFS に置く。
+
+### 6-1. agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた
+**結論:** サービスのタスクを 0 にすると、agent（DAEMON）が 2 台で動いたままでも、`CapacityProviderReservation` はすぐに 0 % になった。台数を決めるこの指標は、DAEMON のタスクを数えない。ECS のコンソールの「実行中のタスク」は DAEMON も数えるので、見え方が違う。縮小のアラームは「100 % 未満が 1 分ごとに 15 回」で働き、1 回に 1 台ずつ（`MaximumScalingStepSize: 1`）縮めたので、0 台まで約 18 分かかった。`aws/scale.sh down` は、タスクが 0 になったら ASG の希望台数を直接 0 にして、この待ちを省く。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws cloudwatch get-metric-statistics --namespace AWS/ECS/ManagedScaling --metric-name CapacityProviderReservation`、`aws cloudwatch describe-alarms`、`aws autoscaling describe-scaling-activities`（2026-11-16〜17）
+- 結果: タスクを 0 にした直後から 0 %。`AlarmLow` は `LessThanThreshold 100`、`EvaluationPeriods 15`。2 台から 1 台、1 台から 0 台の縮小は、それぞれ 1 分の間を空けて動いた。
+
+</details>
+
+### 6-2. 0 台から起こすとき、マネージドスケーリングは 2 台を起こした
+**結論:** 各サービスが 1 タスクで、1 台のメモリの約 2 割しか使わないのに、0 台から起こすと、2 回とも 2 台を起こした。作成の直後の `CapacityProviderReservation` は 200 % だった。なぜ 2 台と見積もるのかは、分かっていない。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: 台ごとの残りのメモリは 1,846 MiB のうち 1,526 MiB。`describe-scaling-activities` では、2 台を同時に起動した。
+
+</details>
+
+### 6-3. 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った
+**結論:** SPIRE server のデータストア（sqlite）と鍵を EFS に置くと、台が 2 台とも入れ替わったあとも、server は同じ CA を読み込んだ。registrar（server のタスクの中で登録を作るコンテナ）は、4 つの登録をどれも作り直さなかった。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: 起き直した server のログに `Journal loaded … x509_cas=1` と `X509 CA activated`。`local_authority_id` と `issued_at` は、0 台にする前と同じだった。registrar は 4 件とも `exists` を出した。
+
+</details>
+
+### 6-4. aws_iid のノードの確認は、インスタンスのタグのセレクターで通った
+**結論:** ASG が起こした台の agent は、どちらも aws_iid の確認を通った。登録のノードのセレクターは `aws_iid:tag:gekko13-role:ecs-host` の 1 つで、台がいくつでも足りた。agent は、Cloud Map の A レコードの名前（`spire-server.svc.gekko13.internal`）で、awsvpc の server に届いた。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: server のログに、2 台の agent の `Agent attestation request completed`。続けて、agent が bff、transfer、ledger の SVID を作った（`Creating X509-SVID`）。
+
+</details>
+
+### 6-5. server が 5 分ほどいないと、agent は自分の SVID が切れて止まった
+**結論:** server を 0 にして台が残っている間、agent は server に届かず（`no children to pick from`）、5 分ほどで `current SVID has already expired` で止まり、ECS の起こし直しを繰り返した。agent の SVID の有効期限も、server の `default_x509_svid_ttl`（5 分）に従うためと推定している。ワークロードの SVID も 5 分なので、server が 1 つの今の作りでは、server が 5 分ほど止まると、どの台でも mTLS が続けられなくなる（推定）。台を起こし直すときも、agent が server より先に起き、server が起きるまでの約 1 分、止まっては起き直した。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws ecs list-tasks --desired-status STOPPED`、agent のログ（2026-11-16〜17）
+- 結果: 止まった agent のタスクは 36 件。大半は server を 0 にしたあとで、起こし直しのときは 4 件（`could not open attestation stream`）。
+
+</details>
+
+## 7. AWS のシナリオ
+### 7-1. AWS でも、シナリオは 10/10 件が期待どおりだった
+**結論:** AWS で、1-a、1-b、3-a〜3-g が期待どおりになった。攻撃する側は、乗っ取られたタスクを演じるプローブで、本物のファミリーの別の版として動き、自分の svid-helper が得た SVID だけを使う。1-b は、登録していないファミリーの rogue のタスクで確かめた。1-c はホストのシェルが要るので対象外。サービスは 2 台に分かれて置かれ、BFF → transfer → ledger の連鎖は、台をまたいで Service Connect を通った。シナリオ 2（入れ替え）は、AWS ではまだ回していない。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/run-scenarios.sh`（2026-11-17 0:33）
+- 結果: `10/10 件が期待どおり（対象外 1 件）`。3-a は本物の Cognito の token exchange で 200。3-c は `403 peer_actor_mismatch`、3-d は `403 caller_not_allowed`。3-b、3-e、3-e2、3-g は TLS の段階で切れた。
+
+</details>
+
+### 7-2. 本物の委任のトークンは、act に sub と client_id の両方を持っていた
+**結論:** BFF が交換したトークンは、外側の `client_id` が BFF、`act` が `{sub, client_id, iss, token_type}` で、`act.sub` と `act.client_id` はどちらも BFF だった。`sub` は利用者のままで、scope は求めた `banking/transfer` だけになった。4-2 の食い違いは、ドキュメントの例（`act.sub`）と gekko_12 の実測（`act.client_id`）の両方が入っている形で決まった。今のコードの照合（`act.client_id`）は、このトークンで働いた。リフレッシュで得たアクセストークンも、交換元にできた。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: プローブの transfer の役のログの `CLAIMS` の行。値は伏せ、どの client を指すかだけを、Cognito のスタックの出力と比べた。
+
+</details>
+
+## 8. 未確認
+- シナリオ 2（入れ替え）を AWS で回すこと。`aws/run-scenarios.sh soak 30` で確かめる。
+- 0 台から起こすとき、マネージドスケーリングがなぜ 2 台と見積もるか（6-2）。
+- IPv6 だけの台に、Session Manager で入れるか（5-4）。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。
+- 段 B: 2 つの AZ に複数のタスクを置いたときの動き。server が 1 つであることの影響（6-5）も含む。
