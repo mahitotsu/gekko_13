@@ -1,9 +1,11 @@
 // AWS の段: マネージドログインでログインし、利用者のリフレッシュトークンを SSM の SecureString に置く。
-// 実行役（ECS のタスク gekko13-probe）は、そこからアクセストークンを得る。トークンは画面にもファイルにも出さない。
+// プローブ（ECS のサービス probe-bff、probe-transfer、probe-ledger）は、そこからアクセストークンを得る。トークンは画面にもファイルにも出さない。
 // 使い方: node scripts/aws-login.ts   （表示した URL をブラウザで開き、aws/create-user.sh で作った利用者でログインする）
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { join } from "node:path";
 
 const REGION = process.env.AWS_REGION ?? "ap-northeast-1";
 const PREFIX = "gekko13";
@@ -52,11 +54,18 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     console.error(`トークンを得られない: ${r.status} ${body.error ?? ""}`);
     process.exit(1);
   }
-  // 値はコマンドの引数に載せず、標準入力で渡す（プロセスの一覧に出さない）
-  execFileSync("aws", ["ssm", "put-parameter", "--region", REGION, "--name", PARAMETER, "--type", "SecureString", "--overwrite", "--value", "file:///dev/stdin"], {
-    input: body.refresh_token,
-    stdio: ["pipe", "ignore", "inherit"],
-  });
+  // 値はコマンドの引数に載せない（プロセスの一覧に出さない）。AWS CLI 2.38.1 は、子プロセスの標準入力の
+  // file:///dev/stdin を開けない（docs/findings.md）。メモリの上（/dev/shm）の、本人だけが読める一時ファイルを使い、すぐに消す
+  const dir = mkdtempSync(join("/dev/shm", "gekko13-login-"));
+  const file = join(dir, "refresh-token");
+  try {
+    writeFileSync(file, body.refresh_token, { mode: 0o600 });
+    execFileSync("aws", ["ssm", "put-parameter", "--region", REGION, "--name", PARAMETER, "--type", "SecureString", "--overwrite", "--value", `file://${file}`], {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
   res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end("ログインした。このタブは閉じてよい。");
   console.log(`リフレッシュトークンを ${PARAMETER} に置いた。有効期限は 60 分（aws/cognito.yaml）。`);
   process.exit(0);

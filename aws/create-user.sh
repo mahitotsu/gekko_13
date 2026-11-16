@@ -12,7 +12,13 @@ aws cognito-idp admin-get-user --region "$REGION" --user-pool-id "$POOL" --usern
   aws cognito-idp admin-create-user --region "$REGION" --user-pool-id "$POOL" --username "$NAME" --message-action SUPPRESS >/dev/null
 
 read -r -s -p "パスワード（16 文字以上、大文字・小文字・数字を含む）: " PW; echo
-PW=$PW node -e 'process.stdout.write(JSON.stringify({UserPoolId:process.argv[1],Username:process.argv[2],Password:process.env.PW,Permanent:true}))' "$POOL" "$NAME" |
-  aws cognito-idp admin-set-user-password --region "$REGION" --cli-input-json file:///dev/stdin
+# AWS CLI 2.38.1 は、--cli-input-json file:///dev/stdin でパイプから読むと「Invalid JSON received」になる（docs/findings.md）。
+# パスワードを引数にもディスクにも載せないため、メモリの上（/dev/shm）の、本人だけが読める一時ファイルを使い、すぐに消す
+umask 077
+INPUT=$(mktemp -p /dev/shm gekko13-user.XXXXXX)
+trap 'rm -f "$INPUT"' EXIT
+PW=$PW node -e 'process.stdout.write(JSON.stringify({UserPoolId:process.argv[1],Username:process.argv[2],Password:process.env.PW,Permanent:true}))' "$POOL" "$NAME" > "$INPUT"
 unset PW
+aws cognito-idp admin-set-user-password --region "$REGION" --cli-input-json "file://$INPUT"
+rm -f "$INPUT"
 echo "利用者 $NAME を作った。次は node scripts/aws-login.ts"

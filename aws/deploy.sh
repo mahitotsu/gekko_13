@@ -48,10 +48,15 @@ cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
 cfn --stack-name "$PREFIX-cognito" --template-file aws/cognito.yaml --parameter-overrides "DomainPrefix=$DOMAIN_PREFIX"
 
 POOL=$(out "$PREFIX-cognito" UserPoolId)
+# --output text は値の末尾に改行を付ける。そのまま入れると、Cognito が invalid_client を返す（docs/findings.md）。
+# 改行を取り、メモリの上（/dev/shm）の、本人だけが読める一時ファイルから入れて、すぐに消す
 put_secret() {
+  local dir
+  dir=$(umask 077 && mktemp -d -p /dev/shm gekko13-secret.XXXXXX)
   aws cognito-idp describe-user-pool-client --region "$REGION" --user-pool-id "$POOL" --client-id "$1" \
-    --query UserPoolClient.ClientSecret --output text |
-    aws ssm put-parameter --region "$REGION" --name "$2" --type SecureString --overwrite --value file:///dev/stdin >/dev/null
+    --query UserPoolClient.ClientSecret --output text | tr -d '\n' > "$dir/value"
+  aws ssm put-parameter --region "$REGION" --name "$2" --type SecureString --overwrite --value "file://$dir/value" >/dev/null
+  rm -rf "$dir"
 }
 put_secret "$(out "$PREFIX-cognito" BffClientId)" "/$PREFIX/bff/client-secret"
 put_secret "$(out "$PREFIX-cognito" TransferClientId)" "/$PREFIX/transfer/client-secret"

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # AWS の段: 使わない間は down で、各サービスのタスク数を 0 にし、キャパシティプロバイダーに台を 0 まで縮めさせる。up で戻す。
-# 台の数は、マネージドスケーリングが決める。ここでは ASG の台数を直接いじらない。
+# 台の数は、マネージドスケーリングが決める。down のときだけ、タスクが 0 になってから ASG の希望台数を直接 0 にする
+# （マネージドスケーリングの縮小は、アラームが 15 分待つため。docs/findings.md）。
 # SPIRE server の状態は EFS にあるので、台が入れ替わっても CA と登録は残る。
 # 使い方:
-#   aws/scale.sh down        タスクを 0 にして、台が 0 になるまで待つ（縮小には 15 分ほどかかる）
+#   aws/scale.sh down        タスクを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ（数分）
 #   aws/scale.sh up [数]     server を 1、bff、transfer、ledger を「数」（既定 1）にして、安定するまで待つ
 set -euo pipefail
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -17,8 +18,22 @@ hosts() { aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto
 
 case "$MODE" in
   down)
-    for s in probe-bff probe-transfer probe-ledger bff transfer ledger spire-server; do set_count "$s" 0; done
-    echo "タスク数を 0 にした。台が 0 になるまで待つ（上限 40 分）"
+    SERVICES_DOWN="probe-bff probe-transfer probe-ledger bff transfer ledger spire-server"
+    for s in $SERVICES_DOWN; do set_count "$s" 0; done
+    echo "タスク数を 0 にした。DAEMON 以外のタスクが止まるまで待つ"
+    # shellcheck disable=SC2086
+    aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services $SERVICES_DOWN
+    # マネージドスケーリングに任せると、縮小のアラームが 15 分待つ。タスクが 0 なら、希望台数を直接 0 にして待ちを省く。
+    # 終了保護は切ってあり、マネージドドレインがあるので、タスクを巻き込まない。DAEMON 以外が残っていれば、0 にしない
+    LEFT=$(aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --desired-status RUNNING --query 'taskArns' --output text | wc -w)
+    AGENTS=$(aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --service-name spire-agent --desired-status RUNNING --query 'taskArns' --output text | wc -w)
+    if [ "$LEFT" -eq "$AGENTS" ]; then
+      aws autoscaling set-desired-capacity --region "$REGION" --auto-scaling-group-name "$ASG" --desired-capacity 0
+      echo "残りは agent（DAEMON）だけなので、ASG の希望台数を 0 にした"
+    else
+      echo "DAEMON 以外のタスクが $((LEFT - AGENTS)) 個残っている。希望台数は変えず、マネージドスケーリングに任せる" >&2
+    fi
+    echo "台が 0 になるまで待つ（上限 40 分）"
     DEADLINE=$(($(date +%s) + 2400))
     until [ "$(hosts)" = 0 ]; do
       if [ "$(date +%s)" -ge "$DEADLINE" ]; then

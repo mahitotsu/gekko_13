@@ -52,15 +52,20 @@ if [ "$MODE" = scenarios ]; then
 fi
 
 START_MS=$(($(date +%s) * 1000))
-for r in $ROLES; do ecs update-service --cluster "$CLUSTER" --service "probe-$r" --desired-count 1 --force-new-deployment >/dev/null; done
+# タスク数は 0 から 1 にするだけで、新しいデプロイを強制しない（強制すると、最初に起きたタスクが入れ替えられる。docs/findings.md）
+for r in $ROLES; do ecs update-service --cluster "$CLUSTER" --service "probe-$r" --desired-count 1 >/dev/null; done
+# サービスが安定してから、動いているタスクを取る。台が起きるのを待つことがあるので、services-stable を 3 回（30 分）まで繰り返す
+PROBES=$(for r in $ROLES; do printf 'probe-%s ' "$r"; done)
+for i in 1 2 3; do
+  # shellcheck disable=SC2086
+  ecs wait services-stable --cluster "$CLUSTER" --services $PROBES 2>/dev/null && break
+  if [ "$i" = 3 ]; then echo "プローブのサービスが 30 分で安定しなかった" >&2; exit 1; fi
+done
 
 declare -A TASK
 for r in $ROLES; do
-  TASK[$r]=None
-  until [ "${TASK[$r]}" != None ]; do
-    sleep 5
-    TASK[$r]=$(ecs list-tasks --cluster "$CLUSTER" --service-name "probe-$r" --desired-status RUNNING --query 'taskArns[0]' --output text)
-  done
+  TASK[$r]=$(ecs list-tasks --cluster "$CLUSTER" --service-name "probe-$r" --desired-status RUNNING --query 'taskArns[0]' --output text)
+  [ "${TASK[$r]}" != None ] || { echo "probe-$r のタスクが見つからない" >&2; exit 1; }
   echo "probe-$r を起動した: ${TASK[$r]##*/}"
 done
 
