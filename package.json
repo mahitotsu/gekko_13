@@ -6,7 +6,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "tsc --noEmit && eslint . && vitest run",
+    "test": "tsc --noEmit && eslint . && vitest run && scripts/check-templates.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "local:up": "local/up.sh",

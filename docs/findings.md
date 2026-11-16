@@ -1,6 +1,6 @@
 # 実機で確かめた事実
 
-**この文書の読み手:** SPIRE の身元の配り方、mTLS の拒み方、SVID の入れ替え、Cognito の設定について、個別の事実を調べに来た開発者と AI エージェント。検証の計画と合格の基準は [plan.md](plan.md)、経過は [log.md](log.md)。用語は [用語集](glossary.md)。
+**この文書の読み手:** 実機で確かめた個別の事実を調べに来た開発者と AI エージェント。扱うのは、SPIRE の身元の配り方、mTLS の拒み方、SVID の入れ替え、Cognito の設定、AWS の段の作成。検証の計画と合格の基準は [plan.md](plan.md)、経過は [log.md](log.md)。用語は [用語集](glossary.md)。
 
 各項目は、**結論**（見出しと数行）と、**根拠**（コマンド・出典・取得日）に分けて書く。1〜3 節はローカルの docker で 2026-11-15 に確かめた。環境は次のとおり。
 
@@ -11,7 +11,8 @@
 | SPIRE | 1.15.3 |
 | spiffe-helper | 0.11.0 |
 | Node.js | 24.21.0 |
-AWS の段はまだ行っていない（[5 節](#5-未確認)）。
+
+5 節は、AWS の東京リージョンで 2026-11-16 に、AWS CLI 2.38.1 で確かめた。シナリオはまだ AWS で回していない（[6 節](#6-未確認)）。
 
 ## 一覧
 | 項目 | 確かめた事実 |
@@ -28,6 +29,9 @@ AWS の段はまだ行っていない（[5 節](#5-未確認)）。
 | 4-2 | 委任のトークンの形は、ドキュメントの例と gekko_12 の実測で食い違う |
 | 4-3 | cfn-lint 1.60.1 と AWS CLI 2.38.1 は、token exchange のフローの値をまだ知らない |
 | 4-4 | `RUN` のない Dockerfile なら、エミュレーションなしで arm64 のイメージを作れた |
+| 5-1 | CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた |
+| 5-2 | CloudFormation は、`ExplicitAuthFlows` の `ALLOW_TOKEN_EXCHANGE_DELEGATION` を受け付けた |
+| 5-3 | `ip6tables` を書いた `daemon.json` で、ECS 用の AMI の docker が起動しなかった |
 
 ## 1. SPIRE の身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -165,11 +169,46 @@ AWS の段はまだ行っていない（[5 節](#5-未確認)）。
 
 </details>
 
-## 5. 未確認
-- CloudFormation が `ALLOW_TOKEN_EXCHANGE_DELEGATION` を受け付けるか。`aws/deploy.sh` で Cognito のスタックを作って確かめる。
+## 5. AWS の段の作成
+### 5-1. CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた
+**結論:** 日本語で書いたテンプレートの `Description`、パラメーターの `Description`、`Metadata` は、AWS の上では文字ごとに「?」になった。AWS CLI は UTF-8 のまま送っていた。JSON のテンプレートで日本語を `\u` のエスケープで書き、要求を ASCII だけにしても「?」が返ったので、置き換えは CloudFormation の側で起きている。YAML のコメントも、保存されたテンプレートの本文の中では同じく化ける。そのため、テンプレートの説明と Metadata は英語で書き、日本語の理由はリポジトリの `#` のコメントに置く。`scripts/check-templates.sh` が、コメント以外の行の ASCII 以外の文字を止める（`npm test` と `aws/deploy.sh` から呼ぶ）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws cloudformation describe-stacks --query 'Stacks[0].Description'`、`aws cloudformation get-template`、`aws cloudformation validate-template --debug`
+- 結果: `--debug` の要求の `TemplateBody` は日本語のまま、応答の XML は `<Description>??????</Description>` だった。`{"Description":"日本語", ...}` の検証は `"???"` を返した。
+- 英語に直した registry、network、cognito のスタックは、変更セットがどれも Metadata の変更（置き換えなし）で、更新のあとは説明を読めた。
+
+</details>
+
+### 5-2. CloudFormation は、ExplicitAuthFlows の ALLOW_TOKEN_EXCHANGE_DELEGATION を受け付けた
+**結論:** Cognito のスタックは作成に成功し、BFF と transfer の client の認証フローに `ALLOW_TOKEN_EXCHANGE_DELEGATION` が入った。4-1 で確かめていなかった、CloudFormation で設定が通るかの点は、これで決まった。交換が実際に動くかは、シナリオ 3-a で確かめる。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws cognito-idp describe-user-pool-client --query 'UserPoolClient.ExplicitAuthFlows'`（秘密を出さないように、この欄だけを読んだ）
+- 結果: 2 つの client とも `ALLOW_REFRESH_TOKEN_AUTH` と `ALLOW_TOKEN_EXCHANGE_DELEGATION`。
+
+</details>
+
+### 5-3. ip6tables を書いた daemon.json で、ECS 用の AMI の docker が起動しなかった
+**結論:** ユーザーデータで `/etc/docker/daemon.json` に `ipv6`、`fixed-cidr-v6`、`ip6tables` を書いて docker を再起動すると、docker が起動に失敗した。docker が動かないので ECS のエージェントも動かず、インスタンスはクラスターに登録されなかった。そのため、IPv6 だけで ECS の API に届くかは、まだ分かっていない。原因は、AMI の docker が 27 より前の版で、`ip6tables` に `"experimental": true` が要るためと推定している（docker の journal は見ていない）。
+
+<details>
+<summary>根拠</summary>
+
+- AMI: `/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id`（2026-11-16 の値）
+- コマンド: `aws ec2 get-console-output --latest`
+- 結果: `systemctl restart docker` の直後に `Job for docker.service failed`、`Failed to run module scripts-user`。ECS のクラスターのコンテナインスタンスは 0 件で、サービスは `No Container Instances were found` を出し続けた。同じ出力に、SSM Agent の `unable to acquire credentials` もあった。
+
+</details>
+
+## 6. 未確認
 - 本物の Cognito の委任のトークンの形（4-2）。`aws/run-scenarios.sh` のログの `CLAIMS` の行で確かめる。
 - リフレッシュで得たアクセストークンを、交換元にできるか。シナリオ 3-a で分かる。
 - ECS のエージェントが、コンテナに 1-1 と同じラベルを付けるか。AWS のシナリオ 1-a で確かめる。
 - aws_iid のノードの確認が、タグのセレクターで通るか。インスタンスの上で `spire-server agent list` を実行して確かめる。
-- IPv6 だけで、ECS、ECR、CloudWatch Logs、Cognito、EC2 の API に届くか。届かなければ、公開 IPv4 を付けて作り直す（[runbook.md](runbook.md#つまずきやすい点)）。
+- IPv6 だけで、ECS、ECR、CloudWatch Logs、Cognito、EC2、SSM の API に届くか。届かなければ、公開 IPv4 を付けて作り直す（[runbook.md](runbook.md#つまずきやすい点)）。5-3 のために、まだ確かめられていない。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。

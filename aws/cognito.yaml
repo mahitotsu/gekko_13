@@ -1,7 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の検証の Cognito。利用者のトークンをマネージドログイン v2 で出し、BFF と transfer が token exchange（委任）で発行し直す。
+# BFF と transfer の client の秘密は、デプロイの手順が SSM の SecureString に写す（このテンプレートには出さない）。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 の検証の Cognito。利用者のトークンをマネージドログイン v2 で出し、BFF と transfer が token exchange（委任）で発行し直す。
-  BFF と transfer の client の秘密は、デプロイの手順が SSM の SecureString に写す（このテンプレートには出さない）。
+  gekko13 Cognito. User tokens come from managed login v2; BFF and transfer reissue them by token exchange (delegation).
+  The deploy script copies the BFF and transfer client secrets into SSM SecureString (never in this template).
 
 Metadata:
   AWSToolsMetrics:
@@ -13,20 +16,21 @@ Parameters:
     Default: gekko13
   DomainPrefix:
     Type: String
-    Description: マネージドログインのドメインの接頭辞。リージョンの中で一意にする
+    Description: Managed login domain prefix. Must be unique within the region
     AllowedPattern: "[a-z0-9-]+"
   LoginCallbackUrl:
     Type: String
     Default: http://localhost:8765/callback
-    Description: scripts/aws-login.ts が受ける戻り先
+    Description: Redirect URI that scripts/aws-login.ts listens on
 
 Resources:
   UserPool:
     Type: AWS::Cognito::UserPool
+    # token exchange は Essentials 以上の機能（ドキュメント）。UserPoolTier を LITE に下げない。
     Metadata:
       com.aws.cloudformation.Context:
-        why: token exchange は Essentials 以上の機能（ドキュメント）
-        must: UserPoolTier を LITE に下げない
+        why: Token exchange requires the Essentials tier or higher (per the docs)
+        must: Never downgrade UserPoolTier to LITE
     Properties:
       UserPoolName: !Ref Prefix
       UserPoolTier: ESSENTIALS
@@ -40,9 +44,10 @@ Resources:
 
   Domain:
     Type: AWS::Cognito::UserPoolDomain
+    # 交換元にできるのは、マネージドログインで得たトークンだけ。ドメインは v2 にする（gekko_12 の実測 1-1）。
     Metadata:
       com.aws.cloudformation.Context:
-        why: 交換元にできるのは、マネージドログインで得たトークンだけ。ドメインは v2 にする（gekko_12 の実測 1-1）
+        why: Only tokens from managed login can be exchanged, so the domain must be v2 (gekko_12 measurement 1-1)
     Properties:
       UserPoolId: !Ref UserPool
       Domain: !Ref DomainPrefix
@@ -90,9 +95,10 @@ Resources:
 
   AppLoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
+    # マネージドログイン v2 は、client ごとにブランドの設定がないとログイン画面を出さない（推定）。
     Metadata:
       com.aws.cloudformation.Context:
-        why: マネージドログイン v2 は、client ごとにブランドの設定がないとログイン画面を出さない（推定）
+        why: Managed login v2 shows no login page for a client without branding (assumed)
     Properties:
       UserPoolId: !Ref UserPool
       ClientId: !Ref AppClient
@@ -106,11 +112,14 @@ Resources:
         config:
           # ALLOW_TOKEN_EXCHANGE_DELEGATION は 2026-11 の機能で、cfn-lint の値の一覧にまだない。ドキュメントの値を使う（通るかは未確認）
           ignore_checks: [E3030]
+      # BFF が token exchange（委任）で利用者のトークンを発行し直す。actor のトークンは client_credentials で得る。
+      # 委任は ExplicitAuthFlows の ALLOW_TOKEN_EXCHANGE_DELEGATION で許す（ドキュメント。CloudFormation で通るかは未確認）。
+      # 交換で出せる scope は、ここで許した scope に限られる。banking の scope を外すと交換できない。
       com.aws.cloudformation.Context:
         why: >-
-          BFF が token exchange（委任）で利用者のトークンを発行し直す。actor のトークンは client_credentials で得る。
-          委任は ExplicitAuthFlows の ALLOW_TOKEN_EXCHANGE_DELEGATION で許す（ドキュメント。CloudFormation で通るかは未確認）
-        must: 交換で出せる scope は、ここで許した scope に限られる。banking の scope を外すと交換できない
+          BFF reissues the user token by token exchange (delegation); its actor token comes from client_credentials.
+          Delegation is allowed by ALLOW_TOKEN_EXCHANGE_DELEGATION in ExplicitAuthFlows (per the docs)
+        must: Exchanged tokens can carry only the scopes allowed here. Removing the banking scopes breaks the exchange
     Properties:
       UserPoolId: !Ref UserPool
       ClientName: !Sub "${Prefix}-bff"

@@ -1,7 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の検証のネットワーク。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
+# インスタンスには既定で公開 IPv4 を付けない。入ってくる通信は受けない（入口は検証の範囲外）。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 の検証のネットワーク。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
-  インスタンスには既定で公開 IPv4 を付けない。入ってくる通信は受けない（入口は検証の範囲外）。
+  gekko13 network. IPv6 first, with no NAT gateway and no VPC endpoints (no fixed monthly cost).
+  Hosts get no public IPv4 by default. No inbound traffic is accepted (the ingress is out of scope).
 
 Metadata:
   AWSToolsMetrics:
@@ -47,10 +50,12 @@ Resources:
   Subnet:
     Type: AWS::EC2::Subnet
     DependsOn: Ipv6Block
+    # 1 台のインスタンスだけを置く。IPv6 で外へ出る。
+    # 公開 IPv4 を自動で付けない（付けると 1 時間ごとに課金される）。
     Metadata:
       com.aws.cloudformation.Context:
-        why: 1 台のインスタンスだけを置く。IPv6 で外へ出る
-        must: 公開 IPv4 を自動で付けない（付けると 1 時間ごとに課金される）
+        why: Holds the single host. Egress goes over IPv6
+        must: Never auto-assign public IPv4 (billed per hour)
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref SubnetCidr
@@ -92,10 +97,12 @@ Resources:
 
   HostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    # インスタンスの外からの通信を受けない。サービスどうしと SPIRE は、同じホストの中で話す。
+    # 入ってくる規則を足さない。入口を作るときは CloudFront のプレフィックスリストだけに限る。
     Metadata:
       com.aws.cloudformation.Context:
-        why: インスタンスの外からの通信を受けない。サービスどうしと SPIRE は、同じホストの中で話す
-        must: 入ってくる規則を足さない。入口を作るときは CloudFront のプレフィックスリストだけに限る
+        why: Accepts no traffic from outside the host. Services and SPIRE talk within the same host
+        must: Add no inbound rules. A future ingress must be limited to the CloudFront prefix list
     Properties:
       GroupDescription: gekko13 ECS host (no inbound)
       VpcId: !Ref Vpc

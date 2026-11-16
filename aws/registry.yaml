@@ -1,7 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージと、SPIRE と spiffe-helper の写しを置く。
+# ghcr.io は IPv6 で届かない恐れがあるので、インスタンスはここからだけ取る。ほかのスタックより先に作る。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージと、SPIRE と spiffe-helper の写しを置く。
-  ghcr.io は IPv6 で届かない恐れがあるので、インスタンスはここからだけ取る。ほかのスタックより先に作る。
+  gekko13 container registry (ECR): the app image and copies of SPIRE and spiffe-helper.
+  Hosts pull only from here because ghcr.io may be unreachable over IPv6. Create before the other stacks.
 
 Metadata:
   AWSToolsMetrics:
@@ -16,10 +19,12 @@ Parameters:
 Resources:
   AppRepository:
     Type: AWS::ECR::Repository
+    # 全サービスで共通の Node.js のイメージ。タグは git のコミットにする。
+    # タグは変えられないようにする（同じタグで別のイメージを入れさせない）。
     Metadata:
       com.aws.cloudformation.Context:
-        why: 全サービスで共通の Node.js のイメージ。タグは git のコミットにする
-        must: タグは変えられないようにする（同じタグで別のイメージを入れさせない）
+        why: Shared Node.js image for all services. Tags are git commits
+        must: Keep tags immutable (never push a different image under the same tag)
     Properties:
       RepositoryName: !Sub "${Prefix}/node"
       ImageTagMutability: IMMUTABLE

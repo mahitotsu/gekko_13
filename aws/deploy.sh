@@ -14,6 +14,9 @@ SPIRE=1.15.3
 HELPER=0.11.0
 TAG=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || echo "-dirty")
 
+# CloudFormation は ASCII 以外の文字を「?」に置き換える。送る前に止める
+scripts/check-templates.sh
+
 cfn() { aws cloudformation deploy --region "$REGION" --no-fail-on-empty-changeset "$@"; }
 out() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
 
