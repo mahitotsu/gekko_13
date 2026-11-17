@@ -78,12 +78,37 @@ aws/scale.sh down    # タスクを 0 にし、ASG の希望台数も 0 にし�
 - 手順 3 は、`probe-bff`、`probe-transfer`、`probe-ledger` がそれぞれ `終わった（0）` と出たあと、`10/10 件が期待どおり（対象外 1 件）。` と出る。対象外は 1-c で、ホストのシェルが要るため AWS では行わない。最後に `プローブのタスク数を 0 に戻した` と出る。
 - 手順 4 は `失敗 0 件。入れ替え bff … 回、transfer … 回、ledger … 回（10 回以上が基準）。` と出る。
 
+## 段 B を回す
+段 B は、2 つの AZ に台を置き、bff、transfer、ledger を各 2 タスクにして、段 A と同じ試験と、SPIRE server の入れ替え（B-4）を回す。ケースと予測は [plan.md の 4 節](plan.md#4-段-b-のケースと予測)。台は最大 4 台で、1 時間あたり最大約 0.09 ドル。全体で 1 時間半ほどかかる（推定）。
+
+1. 変更をコミットしてから、段 B の作りにする。スタックの更新で、ASG のサブネットと上限、サービスのタスク数が変わる。
+
+```sh
+GEKKO13_AZS=2 GEKKO13_TASKS=2 GEKKO13_MAX_HOSTS=4 aws/deploy.sh <ドメインの接頭辞>
+aws/scale.sh up 2
+```
+
+2. `node scripts/aws-login.ts` でログインする。ここから 60 分のうちに、手順 3〜5 を終える。
+3. `aws/run-scenarios.sh` を実行する（B-1、B-2）。
+4. `aws/run-scenarios.sh soak 30` を実行する（B-3）。
+5. ログインし直してから、`aws/run-scenarios.sh failover 30` を実行する（B-4）。始めて 10 分後（`FAILOVER_AFTER` で変えられる）に、SPIRE server のサービスへ「今の AZ 以外に置く」制約を付け、新しいデプロイを強制して、server を移す。別の AZ に台がなければ、今の台以外に移す。
+6. `aws/scale.sh down` で台を 0 にする。
+
+期待する結果:
+- 手順 3 は、段 A の 10 件に B-1 を加えて `11/11 件が期待どおり（対象外 1 件）。` と出る。B-1 の行に、サービスごとのタスクの AZ が出る。
+- 手順 4 は、`入れ替え bff … 回（2 タスクの最少）` のように、タスクの中で一番少ない回数が出る。
+- 手順 5 は、`PASS B-4` の行に、移し先の AZ、CA の識別子の前と後、server がいなかった時間、止まった agent の数、連鎖の失敗の数が出る。
+
+手順 5 で付けた制約は外さずに残る。外すと、もう一度 server が入れ替わるため。次に `aws/deploy.sh` を実行すると、テンプレートの値（制約なし）に戻る。段 A に戻すときは、環境変数を付けずに `aws/deploy.sh <ドメインの接頭辞>` を実行する。
+
 ## 結果の置き場所
 | ファイル | 中身 |
 |---|---|
 | `local/run/scenarios-local-*.json`、`local/run/soak-local-*.json` | ローカルのシナリオと入れ替えの試験の結果 |
 | `local/run/aws-scenarios-<時刻>/`、`local/run/aws-soak-<時刻>/` | AWS のプローブの 3 つの役と rogue のログ。`CLAIMS` の行に、本物のトークンの形がある |
-| `local/run/scenarios-aws-*.json`、`local/run/soak-aws-*.json` | `scripts/aws-collect.ts` がまとめた AWS の結果 |
+| `local/run/scenarios-aws-*.json`、`local/run/soak-aws-*.json`、`local/run/failover-aws-*.json` | `scripts/aws-collect.ts` がまとめた AWS の結果 |
+| `local/run/aws-scenarios-<時刻>/placement.txt` | タスクの置き場所（サービス、タスク、AZ、台） |
+| `local/run/aws-failover-<時刻>/` | server の入れ替えの記録（`failover.txt`）、新旧の server と registrar のログ、止まった agent の一覧 |
 
 `local/run/` は git に入れない。`local/down.sh` は `local/run/` を全部消すので、AWS の結果も一緒に消える。残す結果は、要点を [findings.md](findings.md) と [log.md](log.md) に書き写す。
 

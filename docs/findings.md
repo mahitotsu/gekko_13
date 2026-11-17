@@ -42,6 +42,8 @@
 | 6-3 | 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った |
 | 6-4 | aws_iid のノードの確認は、インスタンスのタグのセレクターで通った |
 | 6-5 | server が 5 分ほどいないと、agent は自分の SVID が切れて止まった |
+| 6-6 | SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない |
+| 6-7 | Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない |
 | 7-1 | AWS でも、シナリオは 10/10 件が期待どおりだった |
 | 7-2 | 本物の委任のトークンは、`act` に `sub` と `client_id` の両方を持っていた |
 | 7-3 | AWS でも、30 分の連鎖の呼び出し 1,404 回は、SVID の入れ替えを 12〜13 回挟んで、失敗 0 件だった |
@@ -328,13 +330,37 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 </details>
 
 ### 6-5. server が 5 分ほどいないと、agent は自分の SVID が切れて止まった
-**結論:** server を 0 にして台が残っている間、agent は server に届かず（`no children to pick from`）、5 分ほどで `current SVID has already expired` で止まり、ECS の起こし直しを繰り返した。agent の SVID の有効期限も、server の `default_x509_svid_ttl`（5 分）に従うためと推定している。ワークロードの SVID も 5 分なので、server が 1 つの今の作りでは、server が 5 分ほど止まると、どの台でも mTLS が続けられなくなる（推定）。台を起こし直すときも、agent が server より先に起き、server が起きるまでの約 1 分、止まっては起き直した。
+**結論:** server を 0 にして台が残っている間、agent は server に届かず（`no children to pick from`）、5 分ほどで `current SVID has already expired` で止まり、ECS の起こし直しを繰り返した。agent の SVID の有効期限も、server の `default_x509_svid_ttl`（5 分）に従う。`agent_ttl` を指定しなければ、この値になると資料にある（6-6）。ワークロードの SVID も 5 分なので、server が 1 つの今の作りでは、server が 5 分ほど止まると、どの台でも mTLS が続けられなくなる（推定）。台を起こし直すときも、agent が server より先に起き、server が起きるまでの約 1 分、止まっては起き直した。
 
 <details>
 <summary>根拠</summary>
 
 - コマンド: `aws ecs list-tasks --desired-status STOPPED`、agent のログ（2026-11-16〜17）
 - 結果: 止まった agent のタスクは 36 件。大半は server を 0 にしたあとで、起こし直しのときは 4 件（`could not open attestation stream`）。
+
+</details>
+
+### 6-6. SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない
+**結論:** SPIRE の資料によると、server を冗長にするには、同じ信頼ドメインの全部の server が、同じ 1 つのデータストアを読み書きする。データストアは組み込みの SQL のプラグインだけで、SQLite、PostgreSQL、MySQL に対応する。差し替える仕組みはもうないので、DynamoDB は使えない。SQLite は、複数の台で共有しにくく、本番には一般に勧めないとある。冗長の構成では、server ごとに自分の CA を持つ。`agent_ttl` の既定は `default_x509_svid_ttl` で、その既定は 1 時間。
+
+この資料に、EFS や NFS の上の SQLite についての記述はない。データストアが 1 つなら、server を複数にしても、データストアが止まれば全体が止まる。可用性が上がるのは、server の側（タスク、台、AZ、更新）が落ちる場合だけになる（推定）。
+
+<details>
+<summary>根拠</summary>
+
+- 出典: [Scaling SPIRE](https://spiffe.io/docs/latest/planning/scaling_spire/)、[Configuring SPIRE](https://spiffe.io/docs/latest/deploying/configuring/)、[SPIRE Server の資料](https://github.com/spiffe/spire/blob/main/doc/spire_server.md)（取得日 2026-11-17）
+- 結果: 「Pluggability for the DataStore is no longer supported. Only the built-in SQL plugin can be used.」「each server maintains its own Certificate Authority」。`agent_ttl` の既定は「The value of `default_x509_svid_ttl`」。
+
+</details>
+
+### 6-7. Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない
+**結論:** Aurora Serverless v2 は、最小の容量を 0 ACU にすると、つながりがなくなってから 5 分〜1 日で自動で一時停止する。止まっている間のインスタンスの料金は 0 で、保存とクラスターの費用は残る。再開はふつう約 15 秒で、24 時間を超えて止まると 30 秒以上かかることがある。利用者のつながりが 1 本でも開いていると、止まらない。SPIRE server はつながりを持ち続けるので、止まるのは server を 0 にしたあとだけになる（推定）。ライターは 1 つなので、データベースまで AZ の障害に耐えさせるには、別の AZ にリーダーが要る。
+
+<details>
+<summary>根拠</summary>
+
+- 出典: [Aurora Serverless v2 の自動の一時停止](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html)（取得日 2026-11-17）。対応する版は、Aurora PostgreSQL 16.3、15.7、14.12、13.15 以上、Aurora MySQL 3.08.0 以上。
+- 単価（料金の API、東京、2026-11-17）: Aurora PostgreSQL Serverless v2 は 1 ACU 1 時間 0.15 ドル、保存は 1 GB あたり月 0.12 ドル（どちらも標準）。
 
 </details>
 

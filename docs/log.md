@@ -57,6 +57,7 @@
 - 2026-11-17: plan.md に、段 B のケース（B-1〜B-4）、予測、合格の基準 (d) を足した。段 B の結果はまだなく、結果を見る前に決めた。B-4（server の入れ替え）は、findings 6-5 の残るリスクを確かめるために足した。基準 (a)〜(c) は変えていない。(b) の AWS は、段 A で判定すると書き添えた。
 - 2026-11-17: plan.md の AWS の段の環境の書き方を、今の作り（キャパシティプロバイダー、段 A と段 B）に合わせた。AWS で取るものから、`agent list` と `entry show` を外した。ホストに入らない作りにしたため、代わりに server と registrar のログを取る。
 - 2026-11-17: design-decisions、runbook、glossary、CLAUDE.md を、今の作りに合わせて直した。
+- 2026-11-17: SPIRE server の冗長化について、持ち主と次のとおり整理した（[findings 6-6](findings.md#6-6-spire-server-を冗長にするには全部の-server-が-1-つの-sql-のデータストアを共有するdynamodb-は使えない)、[6-7](findings.md#6-7-aurora-serverless-v2-は-0-acu-まで縮みつながりが-1-本でもあると止まらない)）。DynamoDB は SPIRE が対応しない。RDB を 1 つ共有するだけでは、可用性は server 1 つと変わらない。ECS の上の PostgreSQL は、止まると全体が止まる場所を移すだけ。server は 1 つのまま、冗長にするかとアプリのデータベースは、段 B の B-4 の結果を見て一緒に決める（design-decisions に「提案」として書いた）。
 
 ## 次の候補（未実施）
 - AWS の段 B を確かめる（[plan.md の 4 節](plan.md#4-段-b-のケースと予測)。ケース B-1〜B-4）。作り方は [runbook.md](runbook.md#aws-で作る) の段 B の環境変数。ほかの未確認の点は [findings の 8 節](findings.md#8-未確認)。
