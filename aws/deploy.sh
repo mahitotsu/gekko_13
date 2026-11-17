@@ -70,6 +70,13 @@ else
   SUBNETS=$(out "$PREFIX-network" SubnetId)
 fi
 
+# scale.sh down のあとは、spire-server のタスク数が 0 のまま残る。テンプレートの値（1）は変わらないので、
+# スタックの更新では戻らず、server のいないサービスが安定しないまま更新が待ち続ける。更新の前に 1 に戻す
+if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services spire-server \
+  --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q spire-server; then
+  aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 1 >/dev/null
+fi
+
 cfn --stack-name "$PREFIX-ecs" --template-file aws/ecs.yaml --capabilities CAPABILITY_IAM --parameter-overrides \
   "VpcId=$(out "$PREFIX-network" VpcId)" \
   "SubnetIds=$SUBNETS" \

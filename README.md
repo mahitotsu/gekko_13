@@ -7,7 +7,7 @@
 ## 答え
 - **身元の配り方:** docker の attestor は、ECS と同じ名前のコンテナのラベルで、サービスごとに別の SPIFFE ID を配れた。ローカルと、AWS の ECS on EC2（IPv6 だけ、2 台）で確かめた（[findings.md](docs/findings.md#1-spire-の身元の配り方)、[7-1](docs/findings.md#7-1-aws-でもシナリオは-1010-件が期待どおりだった)）。
 - **付け替えの防止:** 受け取る側は、mTLS の相手の SPIFFE ID とトークンの `act.client_id` を照合し、乗っ取られたサービスが別のサービスのトークンを使うのを拒めた。AWS では、本物の Cognito の token exchange で確かめた（[findings.md](docs/findings.md#2-mtls-とトークンの照合)、[7-2](docs/findings.md#7-2-本物の委任のトークンはact-に-sub-と-client_id-の両方を持っていた)）。
-- **入れ替え:** 有効期限 300 秒の SVID を 30 分の間に 12〜13 回入れ替えても、連鎖の呼び出しは失敗しなかった。ローカルと、AWS の 1 つの AZ で確かめた。2 つの AZ（段 B）は未確認（[findings.md](docs/findings.md#3-svid-の入れ替え)、[7-3](docs/findings.md#7-3-aws-でも30-分の連鎖の呼び出し-1404-回はsvid-の入れ替えを-1213-回挟んで失敗-0-件だった)）。
+- **入れ替え:** 有効期限 300 秒の SVID を 30 分の間に 12〜13 回入れ替えても、連鎖の呼び出しは失敗しなかった。ローカル、AWS の 1 つの AZ、2 つの AZ に各 2 タスクの配置で確かめた。SPIRE server を別の AZ へ移しても、通信は切れなかった（[findings.md](docs/findings.md#3-svid-の入れ替え)、[7-5](docs/findings.md#7-5-段-b-でも30-分の連鎖の呼び出し-1403-回は各タスクで-svid-の入れ替えを-13-回以上挟んで失敗-0-件だった)、[7-6](docs/findings.md#7-6-spire-server-を別の-az-へ移すとserver-は-24-秒いなかったが連鎖の失敗は-0-件でca-も変わらなかった)）。
 
 ## 読む順番
 | 知りたいこと | 読む文書 |

@@ -91,7 +91,7 @@ aws/scale.sh up 2
 2. `node scripts/aws-login.ts` でログインする。ここから 60 分のうちに、手順 3〜5 を終える。
 3. `aws/run-scenarios.sh` を実行する（B-1、B-2）。
 4. `aws/run-scenarios.sh soak 30` を実行する（B-3）。
-5. ログインし直してから、`aws/run-scenarios.sh failover 30` を実行する（B-4）。始めて 10 分後（`FAILOVER_AFTER` で変えられる）に、SPIRE server のサービスへ「今の AZ 以外に置く」制約を付け、新しいデプロイを強制して、server を移す。別の AZ に台がなければ、今の台以外に移す。
+5. ログインし直してから、`FAILOVER_AFTER=3 aws/run-scenarios.sh failover 12` を実行する（B-4。約 15 分）。始めて 3 分後に、SPIRE server のサービスへ「今の AZ 以外に置く」制約を付け、新しいデプロイを強制して、server を移す。別の AZ に台がなければ、今の台以外に移す。移したあとに、SVID の有効期限（5 分）を超えて 9 分見る。
 6. `aws/scale.sh down` で台を 0 にする。
 
 期待する結果:
