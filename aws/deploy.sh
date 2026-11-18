@@ -44,7 +44,11 @@ CTX=$(scripts/stage-image.sh)
 docker buildx imagetools inspect "$APP_REPO:$TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" -f Dockerfile -t "$APP_REPO:$TAG" --push "$CTX"
 
-cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
+# CloudFront の送り先向けの IPv6 のプレフィックスリスト（ID はリージョンで決まる）。台は、ここからだけ 8080 を受ける
+CF_PL=$(aws ec2 describe-managed-prefix-lists --region "$REGION" \
+  --filters Name=prefix-list-name,Values=com.amazonaws.global.ipv6.cloudfront.origin-facing \
+  --query 'PrefixLists[0].PrefixListId' --output text)
+cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml --parameter-overrides "CloudFrontIpv6PrefixList=$CF_PL"
 cfn --stack-name "$PREFIX-cognito" --template-file aws/cognito.yaml --parameter-overrides "DomainPrefix=$DOMAIN_PREFIX"
 
 POOL=$(out "$PREFIX-cognito" UserPoolId)

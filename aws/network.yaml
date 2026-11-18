@@ -23,6 +23,13 @@ Parameters:
   Subnet2Cidr:
     Type: String
     Default: 10.13.1.0/24
+  CloudFrontIpv6PrefixList:
+    Type: String
+    Default: ""
+    Description: ID of the managed prefix list com.amazonaws.global.ipv6.cloudfront.origin-facing. Empty means no CloudFront ingress
+
+Conditions:
+  AllowCloudFront: !Not [!Equals [!Ref CloudFrontIpv6PrefixList, ""]]
 
 Resources:
   Vpc:
@@ -161,6 +168,23 @@ Resources:
       FromPort: 0
       ToPort: 65535
       Description: members of this group only
+
+  # 段 C の C-1: CloudFront の送り先向けの IPv6 のアドレスからだけ、確認用のサービスのポート（8080）を受ける。
+  # 外からの受信は、この規則のほかに足さない。
+  HostIngressFromCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: AllowCloudFront
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stage C-1. Only CloudFront origin-facing IPv6 addresses may reach the edge port
+        must: Add no other inbound rule from outside the group
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      SourcePrefixListId: !Ref CloudFrontIpv6PrefixList
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      Description: CloudFront origin-facing IPv6 only
 
   # SPIRE server のデータストア（sqlite）と鍵、agent が最初に信じるバンドル。
   # ECS のスタックを作り直しても、台が入れ替わっても、CA と登録が残るように、ECS の外に置く。

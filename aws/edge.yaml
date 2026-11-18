@@ -1,0 +1,64 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の入口の CloudFront の配信（段 C の C-1）。配信の既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
+# 配信を作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消しても配信は残す（DeletionPolicy: Retain）。
+# 送り先は、確認用のサービスが動いている台。台が入れ替わったら、aws/edge-point.sh が OriginDomain を書き換える。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
+Description: >-
+  gekko13 entry CloudFront distribution. Its default domain (dXXXX.cloudfront.net) becomes the passkey RP ID,
+  so the distribution is retained even if the stack is deleted. aws/edge-point.sh points the origin at the current host.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  OriginDomain:
+    Type: String
+    Description: Public DNS name that resolves to the host running the edge service (AAAA only in stage C-1a)
+  OriginPort:
+    Type: Number
+    Default: 8080
+
+Resources:
+  # キャッシュはしない（CachingDisabled）。送り先には、Host を除く利用者の値を渡す（AllViewerExceptHostHeader）。
+  # Host を渡すと、送り先の名前と食い違う。送り先へは平文の HTTP にする（台の上の TLS は、段 D で決める）。
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader), because Host would not
+          match the origin name. HTTP to the origin for now; TLS on the host is decided in stage D
+        must: Never replace or delete this distribution. Its domain is the passkey RP ID
+    Properties:
+      DistributionConfig:
+        Comment: !Sub "${Prefix} entry"
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: edge
+            DomainName: !Ref OriginDomain
+            CustomOriginConfig:
+              HTTPPort: !Ref OriginPort
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        DefaultCacheBehavior:
+          TargetOriginId: edge
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          Compress: true
+
+Outputs:
+  DistributionId: { Value: !Ref Distribution }
+  DomainName: { Value: !GetAtt Distribution.DomainName }

@@ -938,6 +938,42 @@ Resources:
       DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
       ServiceConnectConfiguration: { Enabled: true, Namespace: !GetAtt Namespace.Arn }
 
+  # 段 C の C-1: CloudFront から台の上のサービスに届くかの確認用。CloudFront は決まったポートを指すので、ホストポートを 8080 に固定する。
+  # 受けるのは、CloudFront の送り先向けのプレフィックスリストからだけ（network のスタックのセキュリティグループ）。
+  EdgeCheckTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stage C-1 check that CloudFront can reach a service on an IPv6-only host. Fixed host port because CloudFront targets a fixed port
+        must: Accept traffic only from the CloudFront origin-facing prefix list (network stack security group)
+    Properties:
+      Family: !Sub "${Prefix}-edge-check"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 48
+          PortMappings: [{ ContainerPort: 8080, HostPort: 8080, Protocol: tcp }]
+          Environment:
+            - { Name: SERVICE, Value: edge-check }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: edge-check, mode: non-blocking }
+
+  EdgeCheckService:
+    Type: AWS::ECS::Service
+    DependsOn: CapacityProviderAssociation
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: edge-check
+      TaskDefinition: !Ref EdgeCheckTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+
 Outputs:
   ClusterName: { Value: !Ref Cluster }
   LogGroupName: { Value: !Ref LogGroup }

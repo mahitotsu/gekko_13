@@ -18,7 +18,7 @@ hosts() { aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto
 
 case "$MODE" in
   down)
-    SERVICES_DOWN="probe-bff probe-transfer probe-ledger bff transfer ledger spire-server"
+    SERVICES_DOWN="probe-bff probe-transfer probe-ledger bff transfer ledger edge-check spire-server"
     for s in $SERVICES_DOWN; do set_count "$s" 0; done
     echo "タスク数を 0 にした。DAEMON 以外のタスクが止まるまで待つ"
     # shellcheck disable=SC2086
@@ -46,11 +46,12 @@ case "$MODE" in
     ;;
   up)
     set_count spire-server 1
+    set_count edge-check 1
     for s in ledger transfer bff; do set_count "$s" "$COUNT"; done
     echo "タスク数を戻した。台が起き、サービスが安定するまで待つ"
     # services-stable は 10 分で切れる。台が起きるのに時間がかかるので、4 回（40 分）まで繰り返す
     for i in 1 2 3 4; do
-      aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services spire-server ledger transfer bff 2>/dev/null && break
+      aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services spire-server ledger transfer bff edge-check 2>/dev/null && break
       if [ "$i" = 4 ]; then echo "40 分で安定しなかった。aws ecs describe-services の events を見る" >&2; exit 1; fi
     done
     echo "安定した（台 $(hosts) 台）"
