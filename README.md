@@ -12,6 +12,7 @@
 ## 読む順番
 | 知りたいこと | 読む文書 |
 |---|---|
+| 結論と、信頼できる範囲、目的に対して足りないこと | [docs/report.md](docs/report.md) |
 | 何を確かめ、何を合格とするか | [docs/plan.md](docs/plan.md) |
 | 確かめた事実と、未確認の点 | [docs/findings.md](docs/findings.md) |
 | なぜその作りにしたか | [docs/design-decisions.md](docs/design-decisions.md) |
