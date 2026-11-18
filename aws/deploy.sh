@@ -75,10 +75,13 @@ else
 fi
 
 # scale.sh down のあとは、spire-server のタスク数が 0 のまま残る。テンプレートの値（1）は変わらないので、
-# スタックの更新では戻らず、server のいないサービスが安定しないまま更新が待ち続ける。更新の前に 1 に戻す
+# スタックの更新では戻らず、server のいないサービスが安定しないまま更新が待ち続ける。更新の前に 1 に戻す。
+# 置き方の制約（B-4 の試験が付ける）が残っていれば、外す。CloudFormation は、テンプレートに書いていない制約を戻さないので、
+# 残っていると、制約に合う台がないときに server を置けず、更新が待ち続ける（docs/findings.md）
 if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services spire-server \
   --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q spire-server; then
-  aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 1 >/dev/null
+  aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 1 \
+    --placement-constraints '[]' >/dev/null
 fi
 
 cfn --stack-name "$PREFIX-ecs" --template-file aws/ecs.yaml --capabilities CAPABILITY_IAM --parameter-overrides \

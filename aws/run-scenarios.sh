@@ -72,7 +72,9 @@ placement() {
 
 # B-4: SPIRE server を、今の AZ 以外（別の AZ に台がなければ、今の台以外）に移す。サービスに制約を付けて、新しいデプロイを強制する。
 # 最小 0 %、最大 100 % なので、古いタスクを止めてから新しいタスクを起こす。結果は「キー=値」の行で出す。
-# 制約は外さずに残す（外すと、もう一度入れ替えが起きる）。次の aws/deploy.sh で、テンプレートの値（制約なし）に戻る
+# 新しいタスクが動いたら、すぐに制約を外す。制約は次にタスクを置くときだけに効き、動いているタスクは動かさない。
+# 外さないと、制約に合う台がなくなったとき（段 A の 1 つの AZ に戻したときなど）に、server を置けなくなる。
+# CloudFormation は、テンプレートに書いていない制約を戻さない（docs/findings.md）
 failover() {
   local old az ci host others expr kind new
   old=$(ecs list-tasks --cluster "$CLUSTER" --service-name spire-server --desired-status RUNNING --query 'taskArns[0]' --output text)
@@ -100,6 +102,8 @@ failover() {
   echo "new_az=$az"
   echo "new_host=$(host_of "$ci")"
   echo "new_started_at=$(ecs describe-tasks --cluster "$CLUSTER" --tasks "$new" --query 'tasks[0].startedAt' --output text)"
+  ecs update-service --cluster "$CLUSTER" --service spire-server --placement-constraints '[]' >/dev/null
+  echo "constraint_cleared=yes"
 }
 
 if [ "$MODE" = scenarios ]; then
