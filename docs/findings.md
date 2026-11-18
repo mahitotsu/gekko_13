@@ -2,7 +2,7 @@
 
 **この文書の読み手:** 実機で確かめた個別の事実を調べに来た開発者と AI エージェント。扱うのは、第 2 部の基盤（ECS on EC2、SPIRE、IPv6 だけの AWS）と、第 2 部で確かめたこと。検証の計画と合格の基準は [plan.md](plan.md)、経過は [log.md](log.md)、判断の理由は [design-decisions.md](design-decisions.md)。用語は [用語集](glossary.md)。
 
-各項目は、**結論**（見出しと数行）と、**根拠**（コマンド・出典・取得日）に分けて書く。1〜3 節は、第 1 部（2026-11-15〜18）で確かめた基盤の事実で、第 2 部でも使い続ける。1 節の一部はローカルの docker で、ほかは AWS の東京リージョンで確かめた。第 2 部で確かめたことは、4 節から足す。環境は次のとおり。
+各項目は、**結論**（見出しと数行）と、**根拠**（コマンド・出典・取得日）に分けて書く。1〜3 節は、第 1 部（2026-11-15〜18）で確かめた基盤の事実で、第 2 部でも使い続ける。1 節の一部はローカルの docker で、ほかは AWS の東京リージョンで確かめた。第 2 部で確かめたことは、4 節から足す（4 節は段 C）。環境は次のとおり。
 
 | 部品 | 版 |
 |---|---|
@@ -29,6 +29,9 @@
 | 2-6 | CloudFormation は、YAML のエイリアスを受け付けなかった |
 | 2-7 | AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、--output text は末尾に改行を付けた |
 | 2-8 | RUN のない Dockerfile なら、エミュレーションなしで arm64 のイメージを作れた |
+| 2-9 | CloudFormation は、テンプレートに書いていない項目を、外から変えても戻さなかった |
+| 2-10 | CloudFormation が更新しているサービスに新しいデプロイを強制すると、スタックの更新が失敗して巻き戻った |
+| 2-11 | IPv6 だけの台は、Session Manager に登録されなかった |
 | 3-1 | agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた |
 | 3-2 | 0 台から起こすとき、マネージドスケーリングは 2 台を起こした |
 | 3-3 | 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った |
@@ -36,6 +39,9 @@
 | 3-5 | SPIRE server を別の AZ へ移すと、server は 24 秒いなかったが、連鎖の失敗は 0 件で、CA も変わらなかった |
 | 3-6 | SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない |
 | 3-7 | Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない |
+| 4-1 | CloudFront は、送り先の IP の種類を ipv6 にすると、IPv6 だけの台に届いた。既定の ipv4 では届かなかった |
+| 4-2 | 台が入れ替わると、送り先を向け直すまで届かず、向け直してから約 100 秒で届いた |
+| 4-3 | ある台で、IPv6 で公開したポートが、ある時間だけ拒まれた。原因は分からない |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -126,7 +132,7 @@
 - **docker の awslogs:** デーモンに、`AWS_USE_DUALSTACK_ENDPOINT` と `AWS_ENDPOINT_URL_CLOUDWATCH_LOGS` を渡した（2-4）。
 - **SPIRE server:** `AWS_USE_DUALSTACK_ENDPOINT=true` を渡した。
 
-Cognito（`cognito-idp` と、マネージドログインのドメイン）は、既定の名前に IPv6 のアドレスがあった。Session Manager で台に入れるかは、確かめていない。
+Cognito（`cognito-idp` と、マネージドログインのドメイン）は、既定の名前に IPv6 のアドレスがあった。Session Manager には登録されなかった（2-11）。
 
 <details>
 <summary>根拠</summary>
@@ -191,6 +197,38 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 - コマンド: `docker buildx build --platform linux/arm64 -f Dockerfile <scripts/stage-image.sh の出力>`
 - 結果: イメージができた。`docker buildx ls` の対応は `linux/amd64 (+3)` で、arm64 の実行は含まない。
+
+</details>
+
+### 2-9. CloudFormation は、テンプレートに書いていない項目を、外から変えても戻さなかった
+**結論:** 入れ替えの試験（3-5）で、spire-server のサービスに「今の AZ 以外に置く」置き方の制約を外から付けた。そのあと 1 つの AZ の作りに戻してスタックを更新しても、テンプレートに制約の項目を書いていないので、CloudFormation は制約を残したままにした。制約に合う台がないので、server のタスクは置き場を待ち続け（`PROVISIONING`）、スタックの更新もサービスの安定を待ち続けた。外から変える項目は、変えた手順の側で元に戻す。`aws/run-scenarios.sh` は、server を移し終えたらすぐに制約を外し、`aws/deploy.sh` は、更新の前に制約が残っていれば外す。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws ecs describe-services --services spire-server --query 'services[0].placementConstraints'`（2026-11-18）
+- 結果: `memberOf`、`attribute:ecs.availability-zone != ap-northeast-1a` が残っていた。台は 2 台とも ap-northeast-1a で、メモリと ENI には空きがあった。
+
+</details>
+
+### 2-10. CloudFormation が更新しているサービスに新しいデプロイを強制すると、スタックの更新が失敗して巻き戻った
+**結論:** CloudFormation が spire-server のサービスを更新している最中に、`aws ecs update-service --force-new-deployment` で新しいデプロイを強制した。CloudFormation は、自分が始めたデプロイが置き換えられたとみなし、サービスの更新を失敗にして、スタック全体を巻き戻した。スタックの更新の最中は、そのスタックのサービスに手を出さない。
+
+<details>
+<summary>根拠</summary>
+
+- 結果: `SpireServerService UPDATE_FAILED Error occurred during operation 'Replaced by a new service deployment.'`、続けて `UPDATE_ROLLBACK_COMPLETE`（2026-11-18）。巻き戻しのあと、同じ更新を回し直すと通った。
+
+</details>
+
+### 2-11. IPv6 だけの台は、Session Manager に登録されなかった
+**結論:** IPv6 だけの台の SSM Agent は、インスタンスプロファイルの認証情報を取れず、Systems Manager に登録されなかった。Session Manager で台に入ることはできない。台の中を見る必要があるときは、作業の間だけ公開 IPv4 を付けるなどの手が要る（未確認）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws ssm describe-instance-information`（2026-11-18）
+- 結果: 登録された台は 0 台。台のコンソールの出力に、`SSM Agent unable to acquire credentials` が出ていた。
 
 </details>
 
@@ -275,8 +313,44 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-## 4. 未確認
+## 4. 段 C
+### 4-1. CloudFront は、送り先の IP の種類を ipv6 にすると、IPv6 だけの台に届いた。既定の ipv4 では届かなかった
+**結論:** 台の公開 IPv6 のアドレスを、AAAA だけを返す名前（sslip.io）にして、CloudFront のカスタムの送り先にした。送り先の IP の種類（`CustomOriginConfig` の `IpAddressType`）が既定の `ipv4` のままでは、CloudFront は 502「送り先の名前を解決できなかった」を返した。`ipv6` にすると、台の上のサービスに届いた。台から見た送り主は、CloudFront の IPv6 のアドレス（`2600:9000:` で始まる）だった。CloudFront は 2025 年 9 月から IPv6 だけの送り先に対応している。持ち主の指摘で分かり、この検証の最初の調べでは見落とした。
+
+<details>
+<summary>根拠</summary>
+
+- 出典: [Amazon CloudFront now supports IPv6 origins](https://aws.amazon.com/about-aws/whats-new/2025/09/amazon-cloudfront-ipv6-origins/)（持ち主が示した。2025-09）
+- コマンド: `aws/edge-point.sh`、`curl https://<配信の名前>/`（2026-11-18）
+- 結果: `ipv4` のときは `502 … CloudFront wasn't able to resolve the origin domain name.`。`ipv6` のときは、確認用のサービスの JSON（`via_cloudfront: true`）。CloudFormation の型では、`IpAddressType` は `ipv4`、`ipv6`、`dualstack` から選ぶ。
+
+</details>
+
+### 4-2. 台が入れ替わると、送り先を向け直すまで届かず、向け直してから約 100 秒で届いた
+**結論:** 台を 0 にして起こし直すと、CloudFront の送り先は古い台の名前のままなので、届かなかった（15 秒待っても応答が返らず、のちに 504）。`aws/edge-point.sh` で送り先を新しい台の名前に書き換えると、書き換えを求めてから約 100 秒で届いた。ほぼすべてが、CloudFormation による配信の更新の時間で、更新が終わってからは 1 秒で届いた。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/scale.sh down`、`aws/scale.sh up`、`aws/edge-point.sh`（2026-11-18 22:09〜22:33）
+- 結果: 書き換えから届くまで、98 秒（1 回目）と 99 秒（台を入れ替えたあと）。どちらも、スタックの更新が 97〜98 秒、そのあと 1 秒。
+
+</details>
+
+### 4-3. ある台で、IPv6 で公開したポートが、ある時間だけ拒まれた。原因は分からない
+**結論:** 台を入れ替えたあと、確認用のサービスが置かれた台の IPv6 のアドレスの 8080 は、VPC の中の別の台からつないでも拒まれた（`ECONNREFUSED`）。同じ台に新しくタスクを起こしても、拒まれた。もう 1 台の台では届いた。2 台の起動の記録に違いはなかった。拒まれた台から SPIRE server（awsvpc）が出ていったあとは、届くようになった。ところが、server がいる別の台で新しくタスクを起こしても、再現しなかった。台の中に入れない（2-11）ので、原因は絞り込めていない。入口のタスクを CloudFront に向けるときは、実際に届くかを確かめてから終える必要がある。
+
+<details>
+<summary>根拠</summary>
+
+- 試し方: 拒まれた台を指定して確認用のタスクを起こし、別の台から、登録していないファミリーのタスク（rogue）の確認役で `fetch("http://[<IPv6>]:8080/")` を送った（2026-11-18 22:24〜22:39）。
+- 結果: 拒まれた台では、server がいる間に 2 回とも `ECONNREFUSED`。server が出ていったあとは届いた。server がいる別の台では、server が来る前に起きたタスクも、来たあとに起きたタスクも届いた。
+
+</details>
+
+## 5. 未確認
 - AZ がまるごと落ちたときと、server のタスクや台が突然消えたときに、server が何分で起き直すか（3-5）。移し先に台がなければ、台を起こすところから始まる。
 - 0 台から起こすとき、マネージドスケーリングがなぜ 2 台と見積もるか（3-2）。
-- IPv6 だけの台に、Session Manager で入れるか（2-3）。
+- CloudFront を通らずに、台の IPv6 の 8080 へ直接つなぐと拒まれるか（4-1）。手元から IPv6 で外に出られず、確かめていない。セキュリティグループは、CloudFront の送り先向けのアドレスからだけを受ける。
+- ある台で、IPv6 で公開したポートが拒まれた原因（4-3）。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。

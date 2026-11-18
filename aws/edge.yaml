@@ -45,9 +45,11 @@ Resources:
         Origins:
           - Id: edge
             DomainName: !Ref OriginDomain
+            # 送り先へつなぐ IP の種類。既定は ipv4 で、IPv6 だけの台には届かない（docs/findings.md）
             CustomOriginConfig:
               HTTPPort: !Ref OriginPort
               OriginProtocolPolicy: http-only
+              IpAddressType: ipv6
               OriginReadTimeout: 30
               OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:

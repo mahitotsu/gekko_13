@@ -54,6 +54,17 @@ aws/scale.sh down    # タスクを 0 にし、ASG の希望台数も 0 にし�
 
 期待する結果: `up` は数分で `安定した（台 2 台）` のように出る。0 台から起こすと、1 台で足りても 2 台が起きることがある（[findings 3-2](findings.md#3-2-0-台から起こすときマネージドスケーリングは-2-台を起こした)）。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の CA と登録は EFS に残るので、`up` のあとも作り直しは要らない（[findings 3-3](findings.md#3-3-台を-0-にして起こし直してもefs-の上の-spire-の-ca-と登録は残った)）。
 
+## 入口（CloudFront）を台に向ける
+CloudFront の配信（スタック `gekko13-edge`）の送り先を、確認用のサービス（edge-check）が動いている台に向ける。台を起こしたあとと、台が入れ替わったあとに実行する。配信がなければ作る。
+
+```sh
+aws/edge-point.sh
+```
+
+期待する結果: `届いた: 書き換えを求めてから … 秒` と、確認用のサービスの JSON（`"via_cloudfront":true`）が出る。書き換えてから届くまで、約 100 秒かかる（[findings 4-2](findings.md#4-2-台が入れ替わると送り先を向け直すまで届かず向け直してから約-100-秒で届いた)）。30 分で届かなければ止まる。そのときは、確認用のサービスを起こし直して（`aws ecs update-service --cluster gekko13 --service edge-check --force-new-deployment`）、もう一度実行する（[findings 4-3](findings.md#4-3-ある台でipv6-で公開したポートがある時間だけ拒まれた原因は分からない)）。
+
+配信の名前（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消しても配信が残る作り（`DeletionPolicy: Retain`）にしてある。
+
 ## 後片付け
 台を 0 にするだけなら、`aws/scale.sh down` で足りる。全部を消すときは、スタックを作った順の逆に消す。消す前に、対象を一覧で確かめる。
 
@@ -69,6 +80,8 @@ aws servicediscovery list-namespaces --region ap-northeast-1 --query 'Namespaces
 2. `gekko13-cognito`: 利用者と client が消える。
 3. `gekko13-network`: VPC と EFS が消える。EFS が消えると、SPIRE の CA と登録も消え、次に作るときは新しい CA になる。
 4. `gekko13-registry`: ECR のイメージは、リポジトリと一緒に消える（`EmptyOnDelete`）。
+
+`gekko13-edge` の CloudFront の配信は、スタックを消しても残る。配信を消すと、RP ID が使えなくなり、登録したパスキーも使えなくなる。消すときは、先に配信を無効にしてから、`aws cloudfront delete-distribution` で消す。
 
 SSM のパラメーター 4 つは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。BFF と transfer の client の秘密、リフレッシュトークン、プローブの動かし方（`/gekko13/probe/mode`）の 4 つ。最後に、`list-namespaces` に `svc.gekko13.internal` が残っていないかを確かめる。残っていれば、月額のかかるホストゾーンも残っている（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
 
@@ -87,6 +100,7 @@ SSM のパラメーター 4 つは、スタックの外で作ったので、`aws
 | EFS（Standard） | 1 GB あたり月 0.36 ドル。使うのは数 MB | network のスタックがある間 |
 | Cognito の M2M のトークン | 使った分（gekko_12 の実測では 15 件で 0.034 ドル） | 交換と client_credentials のたび |
 | ECR、CloudWatch Logs、SSM | ほぼ 0（保存と取り込みの従量。SSM の標準のパラメーターは無料） | 使った分 |
+| CloudFront の配信 | 月の固定費はない。リクエストと転送の従量（試しの分はごく小さい。推定） | 使った分 |
 
 ## つまずきやすい点
 - **`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`:** Node.js の型の取り除きは `node_modules` の中で動かない。パッケージは相対パスで読む。
