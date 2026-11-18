@@ -1,36 +1,33 @@
 # gekko_13
 
-ネットバンキングの試作「Gekko Bank」の内部の通信を、SPIFFE の mTLS で守れるかを、ECS on EC2 の構成で確かめる検証。台の数はキャパシティプロバイダーが決め、台の数と AZ を前提にしない。
+「AI による提案」と「人間による承認」を、当事者の自己申告に依らず第三者が確かめられる形にし、事後の監査に耐えさせる。その仕組みを、AWS の上で安く動かせるかを確かめる検証。題材は、AI が年金保険のプランを組み立て、人間が選んで署名し、保険会社と契約する流れ（gekko_11）。
 
-**読み手:** この検証に後から加わる開発者と、新しい会話の AI エージェント。AWS と OAuth の基礎は知っている前提。読むと、何が確かめられたかと、自分で回す方法が分かる。
+**読み手:** この検証に後から加わる開発者と、新しい会話の AI エージェント。AWS と OAuth の基礎は知っている前提。読むと、今どこまで確かめたかと、自分で回す方法が分かる。
 
 ## 答え
-- **身元の配り方:** docker の attestor は、ECS と同じ名前のコンテナのラベルで、サービスごとに別の SPIFFE ID を配れた。ローカルと、AWS の ECS on EC2（IPv6 だけ、2 台）で確かめた（[findings.md](docs/findings.md#1-spire-の身元の配り方)、[7-1](docs/findings.md#7-1-aws-でもシナリオは-1010-件が期待どおりだった)）。
-- **付け替えの防止:** 受け取る側は、mTLS の相手の SPIFFE ID とトークンの `act.client_id` を照合し、乗っ取られたサービスが別のサービスのトークンを使うのを拒めた。AWS では、本物の Cognito の token exchange で確かめた（[findings.md](docs/findings.md#2-mtls-とトークンの照合)、[7-2](docs/findings.md#7-2-本物の委任のトークンはact-に-sub-と-client_id-の両方を持っていた)）。
-- **入れ替え:** 有効期限 300 秒の SVID を 30 分の間に 12〜13 回入れ替えても、連鎖の呼び出しは失敗しなかった。ローカル、AWS の 1 つの AZ、2 つの AZ に各 2 タスクの配置で確かめた。SPIRE server を別の AZ へ移しても、通信は切れなかった（[findings.md](docs/findings.md#3-svid-の入れ替え)、[7-5](docs/findings.md#7-5-段-b-でも30-分の連鎖の呼び出し-1403-回は各タスクで-svid-の入れ替えを-13-回以上挟んで失敗-0-件だった)、[7-6](docs/findings.md#7-6-spire-server-を別の-az-へ移すとserver-は-24-秒いなかったが連鎖の失敗は-0-件でca-も変わらなかった)）。
+- **基盤（確かめた）:** ECS on EC2 と SPIRE で、ワークロードの身元と mTLS を、台の数と AZ に依らず作れた。台を 0 にすれば、費用は月 1 ドル未満の固定費だけになる（推定）。事実は [findings.md](docs/findings.md) の 1〜3 節。
+- **第 2 部（これから）:** gekko_11 が手元のクラスタで満たした 12 の要件を、この基盤の上でも満たせるか。進め方と合格の基準は [plan.md](docs/plan.md)。
+- **第 1 部の報告書:** 基盤を確かめた第 1 部の結論は [docs/phase1/report.md](docs/phase1/report.md) にある。第 1 部の文書は仮置きで、第 2 部が完成したら消す。
 
 ## 読む順番
 | 知りたいこと | 読む文書 |
 |---|---|
-| 結論と、信頼できる範囲、目的に対して足りないこと | [docs/report.md](docs/report.md) |
 | 何を確かめ、何を合格とするか | [docs/plan.md](docs/plan.md) |
 | 確かめた事実と、未確認の点 | [docs/findings.md](docs/findings.md) |
 | なぜその作りにしたか | [docs/design-decisions.md](docs/design-decisions.md) |
-| 動かし方と後片付け | [docs/runbook.md](docs/runbook.md) |
+| 基盤の動かし方と後片付け | [docs/runbook.md](docs/runbook.md) |
 | いつ何をしたか | [docs/log.md](docs/log.md) |
 | 用語の意味 | [docs/glossary.md](docs/glossary.md) |
 
 ## 最短の使い方
-前提: Node.js 24 以上、docker（buildx を含む）、openssl。
+前提: Node.js 24 以上、docker（buildx を含む）、openssl、AWS CLI v2。
 
 ```sh
 npm ci
-local/up.sh
-node scripts/scenarios.ts --target local
-local/down.sh
+npm test
 ```
 
-期待する結果: シナリオの最後に `11/11 件が期待どおり` と出る。AWS で回す手順は [docs/runbook.md](docs/runbook.md) にある。
+期待する結果: 型の検査と lint が通り、単体のテストが `11 passed` になる。AWS の基盤を作って動かす手順は [docs/runbook.md](docs/runbook.md) にある。今のアプリは第 1 部のもので、第 2 部の段 D で入れ替える。
 
 ## 持ち主と、更新のきっかけ
 - **持ち主:** このリポジトリの持ち主。質問はリポジトリの持ち主に送る。

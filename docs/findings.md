@@ -1,57 +1,43 @@
 # 実機で確かめた事実
 
-**この文書の読み手:** 実機で確かめた個別の事実を調べに来た開発者と AI エージェント。扱うのは、SPIRE の身元の配り方、mTLS の拒み方、SVID の入れ替え、Cognito の設定、AWS の段の作成。検証の計画と合格の基準は [plan.md](plan.md)、経過は [log.md](log.md)。用語は [用語集](glossary.md)。
+**この文書の読み手:** 実機で確かめた個別の事実を調べに来た開発者と AI エージェント。扱うのは、第 2 部の基盤（ECS on EC2、SPIRE、IPv6 だけの AWS）と、第 2 部で確かめたこと。検証の計画と合格の基準は [plan.md](plan.md)、経過は [log.md](log.md)、判断の理由は [design-decisions.md](design-decisions.md)。用語は [用語集](glossary.md)。
 
-各項目は、**結論**（見出しと数行）と、**根拠**（コマンド・出典・取得日）に分けて書く。1〜3 節はローカルの docker で 2026-11-15 に確かめた。環境は次のとおり。
+各項目は、**結論**（見出しと数行）と、**根拠**（コマンド・出典・取得日）に分けて書く。1〜3 節は、第 1 部（2026-11-15〜18）で確かめた基盤の事実で、第 2 部でも使い続ける。1 節の一部はローカルの docker で、ほかは AWS の東京リージョンで確かめた。第 2 部で確かめたことは、4 節から足す。環境は次のとおり。
 
 | 部品 | 版 |
 |---|---|
-| OS | WSL2（Linux 6.18） |
-| Docker | 29.1.3（cgroup v2） |
 | SPIRE | 1.15.3 |
 | spiffe-helper | 0.11.0 |
-| Node.js | 24.21.0 |
-
-5〜7 節は、AWS の東京リージョンで 2026-11-16〜18 に、AWS CLI 2.38.1 で確かめた。7-4〜7-6 は段 B（2 つの AZ、各サービス 2 タスク）の結果。未確認の点は [8 節](#8-未確認)。
+| Node.js | 24 |
+| AWS CLI | 2.38.1 |
+| ローカルの docker | 29.1.3（WSL2、cgroup v2） |
+| AWS の台 | t4g.small、ECS 用の Amazon Linux 2023（arm64）の推奨の AMI |
 
 ## 一覧
 | 項目 | 確かめた事実 |
 |---|---|
 | 1-1 | docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った |
 | 1-2 | 登録していないファミリーのコンテナには、SVID が出なかった |
-| 1-3 | ラベルを偽ったコンテナにも、SVID が出た |
+| 1-3 | ラベルを偽ったコンテナにも SVID が出る |
 | 1-4 | 有効期限 300 秒の SVID は、約 2.5 分ごとに入れ替わった |
-| 2-1 | アプリが終える mTLS は、証明書なしと、SPIRE 以外の認証局の証明書を、TLS で拒んだ |
-| 2-2 | 呼ぶ側は、相手の SPIFFE ID が違えば、接続を止めた |
-| 2-3 | 受け取る側は、SPIFFE ID とトークンの呼び出し元が対応しないとき、403 で拒んだ |
-| 3-1 | 30 分の連鎖の呼び出し 1,764 回は、SVID の入れ替えを 13 回挟んで、失敗 0 件だった |
-| 4-1 | Cognito の token exchange（委任）は、app client の `ExplicitAuthFlows` で許す |
-| 4-2 | 委任のトークンの形は、ドキュメントの例と gekko_12 の実測で食い違う |
-| 4-3 | cfn-lint 1.60.1 と AWS CLI 2.38.1 は、token exchange のフローの値をまだ知らない |
-| 4-4 | `RUN` のない Dockerfile なら、エミュレーションなしで arm64 のイメージを作れた |
-| 5-1 | CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた |
-| 5-2 | CloudFormation は、`ExplicitAuthFlows` の `ALLOW_TOKEN_EXCHANGE_DELEGATION` を受け付けた |
-| 5-3 | `ip6tables` を書いた `daemon.json` で、ECS 用の AMI の docker が起動しなかった |
-| 5-4 | 既定の AWS の名前は IPv4 だけで、デュアルスタックの名前に向けると、公開 IPv4 なしで動いた |
-| 5-5 | ECS は、タスク定義の `awslogs-endpoint` を受け付けなかった |
-| 5-6 | 作成中に巻き戻すと、Cloud Map の名前空間がスタックの外に残った |
-| 5-7 | CloudFormation は、YAML のエイリアスを受け付けなかった |
-| 5-8 | AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、`--output text` は末尾に改行を付けた |
-| 6-1 | agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた |
-| 6-2 | 0 台から起こすとき、マネージドスケーリングは 2 台を起こした |
-| 6-3 | 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った |
-| 6-4 | aws_iid のノードの確認は、インスタンスのタグのセレクターで通った |
-| 6-5 | server が 5 分ほどいないと、agent は自分の SVID が切れて止まった |
-| 6-6 | SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない |
-| 6-7 | Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない |
-| 7-1 | AWS でも、シナリオは 10/10 件が期待どおりだった |
-| 7-2 | 本物の委任のトークンは、`act` に `sub` と `client_id` の両方を持っていた |
-| 7-3 | AWS でも、30 分の連鎖の呼び出し 1,404 回は、SVID の入れ替えを 12〜13 回挟んで、失敗 0 件だった |
-| 7-4 | 段 B で、ECS は各サービスの 2 タスクを 2 つの AZ に分けて置き、シナリオは 11/11 件が期待どおりだった |
-| 7-5 | 段 B でも、30 分の連鎖の呼び出し 1,403 回は、各タスクで SVID の入れ替えを 13 回以上挟んで、失敗 0 件だった |
-| 7-6 | SPIRE server を別の AZ へ移すと、server は 24 秒いなかったが、連鎖の失敗は 0 件で、CA も変わらなかった |
+| 1-5 | aws_iid のノードの確認は、インスタンスのタグのセレクターで通った |
+| 2-1 | CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた |
+| 2-2 | ip6tables を書いた daemon.json で、ECS 用の AMI の docker が起動しなかった |
+| 2-3 | 既定の AWS の名前は IPv4 だけで、デュアルスタックの名前に向けると、公開 IPv4 なしで動いた |
+| 2-4 | ECS は、タスク定義の awslogs-endpoint を受け付けなかった |
+| 2-5 | 作成中に巻き戻すと、Cloud Map の名前空間がスタックの外に残った |
+| 2-6 | CloudFormation は、YAML のエイリアスを受け付けなかった |
+| 2-7 | AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、--output text は末尾に改行を付けた |
+| 2-8 | RUN のない Dockerfile なら、エミュレーションなしで arm64 のイメージを作れた |
+| 3-1 | agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた |
+| 3-2 | 0 台から起こすとき、マネージドスケーリングは 2 台を起こした |
+| 3-3 | 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った |
+| 3-4 | server が 5 分ほどいないと、agent は自分の SVID が切れて止まった |
+| 3-5 | SPIRE server を別の AZ へ移すと、server は 24 秒いなかったが、連鎖の失敗は 0 件で、CA も変わらなかった |
+| 3-6 | SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない |
+| 3-7 | Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない |
 
-## 1. SPIRE の身元の配り方
+## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
 **結論:** 各コンテナに `com.amazonaws.ecs.task-definition-family` と `com.amazonaws.ecs.container-name` のラベルを付けた。登録のセレクターをこの 2 つの組にすると、bff、transfer、ledger の svid-helper に、それぞれの SPIFFE ID の SVID が出た。agent は cgroup の名前空間を分けたまま（ホストのものを使わずに）、ホストの PID からコンテナを見分けた。ECS のタスクでは cgroup の名前空間を設定できないので、AWS でも同じ形で動く見込みがある（推定）。
 
@@ -97,98 +83,18 @@
 
 </details>
 
-## 2. mTLS とトークンの照合
-### 2-1. アプリが終える mTLS は、証明書なしと、SPIRE 以外の認証局の証明書を、TLS で拒んだ
-**結論:** Node.js の HTTPS の受け口（`requestCert` と `rejectUnauthorized`、信頼するのは SPIRE のバンドルだけ）は、証明書を示さない接続を TLS 1.3 の警告で拒んだ。別の信頼ドメインの証明書と、同じ SPIFFE ID を名乗る別の認証局の証明書は、接続を切った。どちらもアプリの処理には届かなかった。
+### 1-5. aws_iid のノードの確認は、インスタンスのタグのセレクターで通った
+**結論:** ASG が起こした台の agent は、どちらも aws_iid の確認を通った。登録のノードのセレクターは `aws_iid:tag:gekko13-role:ecs-host` の 1 つで、台がいくつでも足りた。agent は、Cloud Map の A レコードの名前（`spire-server.svc.gekko13.internal`）で、awsvpc の server に届いた。
 
 <details>
 <summary>根拠</summary>
 
-- コマンド: `node scripts/scenarios.ts --target local`（シナリオ 3-b、3-e、3-e2）
-- 結果: 3-b は `ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED`。3-e と 3-e2 は `ECONNRESET`。
+- 結果: server のログに、2 台の agent の `Agent attestation request completed`。続けて、agent が bff、transfer、ledger の SVID を作った（`Creating X509-SVID`）。
 
 </details>
 
-### 2-2. 呼ぶ側は、相手の SPIFFE ID が違えば、接続を止めた
-**結論:** 呼ぶ側は、ホスト名ではなく、相手の証明書の SPIFFE ID を確かめる（`checkServerIdentity`）。transfer のつもりで ledger につなぐと、要求を送る前に接続を止めた。SVID には DNS の SAN がないので、Node.js の既定のホスト名の確認は使えない。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `node scripts/scenarios.ts --target local`（シナリオ 3-g）
-- 結果: `相手の SPIFFE ID が違う: spiffe://gekko13.internal/svc/ledger`
-
-</details>
-
-### 2-3. 受け取る側は、SPIFFE ID とトークンの呼び出し元が対応しないとき、403 で拒んだ
-**結論:** ledger は、相手の SPIFFE ID に対応する client、トークンの `client_id`、`act.client_id` の 3 つが一致したときだけ記帳した。transfer の鍵で BFF が交換したトークンを送ると、`peer_actor_mismatch` で拒んだ。BFF の鍵で直接呼ぶと、`caller_not_allowed` で拒んだ。トークンの発行者は模擬なので、本物の Cognito のトークンで同じになるかは確かめていない。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `node scripts/scenarios.ts --target local`（シナリオ 3-a、3-c、3-d、3-f）
-- 結果: 3-a は 200、3-c と 3-d は 403、3-f（トークンなし）は 401。2 回の実行で同じ結果だった。
-
-</details>
-
-## 3. SVID の入れ替え
-### 3-1. 30 分の連鎖の呼び出し 1,764 回は、SVID の入れ替えを 13 回挟んで、失敗 0 件だった
-**結論:** BFF → transfer → ledger の連鎖を 1 秒の間隔で 30 分呼び続けた。その間に、3 つのサービスの SVID がそれぞれ 13 回入れ替わり、失敗は 0 件だった。受け口は、入れ替わるたびに新しい証明書へ差し替えた（`setSecureContext`）。呼ぶ側は要求ごとに接続をつなぎ直すので、古い証明書で示し続けることがない。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `node scripts/soak.ts 30 1000`（2026-11-15 13:42〜14:12 UTC）、`docker logs gekko13-<サービス> | grep -c svid_rotated`
-- 結果: 成功 1,764 件、失敗 0 件、入れ替えは各 13 回。各アプリの `svid_rotated` の記録は 13 件、エラーの記録は 0 件。
-
-</details>
-
-## 4. Cognito の設定とイメージ
-### 4-1. Cognito の token exchange（委任）は、app client の ExplicitAuthFlows で許す
-**結論:** ドキュメントによると、token exchange は Essentials か Plus の機能である。app client の認証フローに `ALLOW_TOKEN_EXCHANGE_DELEGATION`（委任）か `ALLOW_TOKEN_EXCHANGE_IMPERSONATION`（なりすまし）を入れて許す。委任は、要求に `actor_token` と `actor_token_type` を加えて選ぶ。CloudFormation で設定が通るかは確かめていない。
-
-<details>
-<summary>根拠</summary>
-
-- 出典: [Exchanging tokens for downstream services](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-token-exchange.html)（取得日 2026-11-15）
-- 結果: CloudFormation の `AWS::Cognito::UserPoolClient` の型（`aws cloudformation describe-type`、2026-11-15）には token exchange の専用の項目がなく、`ExplicitAuthFlows` は値を限らない文字列の配列だった。
-
-</details>
-
-### 4-2. 委任のトークンの形は、ドキュメントの例と gekko_12 の実測で食い違う
-**結論:** ドキュメントの例では、`act` は `{"sub": "<呼び出し元の client ID>"}` で、`client_id` のクレームはない。scope は、要求、交換元、client の許可の 3 つの共通部分が出る。gekko_12 の実測（1-2、1-5）では、`act.client_id` と `client_id` があり、許されない scope は削らずに拒まれた。この検証のコードは実測に合わせた。どちらが本物の挙動かは、AWS の段の実行役が残すトークンの形で決める。
-
-<details>
-<summary>根拠</summary>
-
-- 出典: 4-1 と同じページ（取得日 2026-11-15）。gekko_12 の `docs/research/aws-findings.md` の 1-2 と 1-5（2026-11-13〜15 の実測）。
-
-</details>
-
-### 4-3. cfn-lint 1.60.1 と AWS CLI 2.38.1 は、token exchange のフローの値をまだ知らない
-**結論:** cfn-lint は `ALLOW_TOKEN_EXCHANGE_DELEGATION` を `ExplicitAuthFlows` の値として認めず、E3030 を出した。AWS CLI のヘルプにも、この値はなかった。`aws/cognito.yaml` では、該当する 2 つの資源だけ E3030 を外した。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `cfn-lint --regions ap-northeast-1 -- aws/*.yaml`、`aws cognito-idp create-user-pool-client help`
-- 結果: `E3030 'ALLOW_TOKEN_EXCHANGE_DELEGATION' is not one of [...]`。外したあとは、4 つのテンプレートで誤り 0 件。
-
-</details>
-
-### 4-4. RUN のない Dockerfile なら、エミュレーションなしで arm64 のイメージを作れた
-**結論:** この環境の buildx には arm64 のエミュレーション（QEMU）がない。依存（`jose`。純粋な JavaScript）をホストで入れて写し、Dockerfile から `RUN` をなくすと、`--platform linux/arm64` のイメージを作れた。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `docker buildx build --platform linux/arm64 -f Dockerfile <scripts/stage-image.sh の出力>`
-- 結果: イメージができた。`docker buildx ls` の対応は `linux/amd64 (+3)` で、arm64 の実行は含まない。
-
-</details>
-
-## 5. AWS の段の作成
-### 5-1. CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた
+## 2. AWS で作るときに当たること
+### 2-1. CloudFormation は、テンプレートの ASCII 以外の文字を「?」に置き換えた
 **結論:** 日本語で書いたテンプレートの `Description`、パラメーターの `Description`、`Metadata` は、AWS の上では文字ごとに「?」になった。AWS CLI は UTF-8 のまま送っていた。JSON のテンプレートで日本語を `\u` のエスケープで書き、要求を ASCII だけにしても「?」が返ったので、置き換えは CloudFormation の側で起きている。YAML のコメントも、保存されたテンプレートの本文の中では同じく化ける。そのため、テンプレートの説明と Metadata は英語で書き、日本語の理由はリポジトリの `#` のコメントに置く。`scripts/check-templates.sh` が、コメント以外の行の ASCII 以外の文字を止める（`npm test` と `aws/deploy.sh` から呼ぶ）。
 
 <details>
@@ -200,18 +106,7 @@
 
 </details>
 
-### 5-2. CloudFormation は、ExplicitAuthFlows の ALLOW_TOKEN_EXCHANGE_DELEGATION を受け付けた
-**結論:** Cognito のスタックは作成に成功し、BFF と transfer の client の認証フローに `ALLOW_TOKEN_EXCHANGE_DELEGATION` が入った。4-1 で確かめていなかった、CloudFormation で設定が通るかの点は、これで決まった。交換が実際に動くかは、シナリオ 3-a で確かめる。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `aws cognito-idp describe-user-pool-client --query 'UserPoolClient.ExplicitAuthFlows'`（秘密を出さないように、この欄だけを読んだ）
-- 結果: 2 つの client とも `ALLOW_REFRESH_TOKEN_AUTH` と `ALLOW_TOKEN_EXCHANGE_DELEGATION`。
-
-</details>
-
-### 5-3. ip6tables を書いた daemon.json で、ECS 用の AMI の docker が起動しなかった
+### 2-2. ip6tables を書いた daemon.json で、ECS 用の AMI の docker が起動しなかった
 **結論:** ユーザーデータで `/etc/docker/daemon.json` に `ipv6`、`fixed-cidr-v6`、`ip6tables` を書いて docker を再起動すると、docker が起動に失敗した。docker が動かないので ECS のエージェントも動かず、インスタンスはクラスターに登録されなかった。`"experimental": true` を足すと、docker は起動し、台は ECS に登録された。原因は、AMI の docker が 27 より前の版で、`ip6tables` に experimental が要るためと推定している（docker の journal は見ていない）。
 
 <details>
@@ -224,11 +119,11 @@
 
 </details>
 
-### 5-4. 既定の AWS の名前は IPv4 だけで、デュアルスタックの名前に向けると、公開 IPv4 なしで動いた
+### 2-3. 既定の AWS の名前は IPv4 だけで、デュアルスタックの名前に向けると、公開 IPv4 なしで動いた
 **結論:** 東京リージョンの既定の名前（`ecs`、`logs`、`ec2`、`ssm` の `*.amazonaws.com`、イメージの取得先 `<アカウント>.dkr.ecr.*.amazonaws.com`）には、IPv6 のアドレスがなかった。デュアルスタックの名前（`*.api.aws`、`<アカウント>.dkr-ecr.*.on.aws`）には、あった。次のように向けると、公開 IPv4 も NAT もないまま動いた。動いたのは、台の登録、イメージの取得、ログの送信、Service Connect の Envoy、EFS、SPIRE server からの EC2 の API の呼び出し。
 - **ECS のエージェント:** `/etc/ecs/ecs.config` に `AWS_USE_DUALSTACK_ENDPOINT=true` を書いた。
 - **イメージ:** URI を `dkr-ecr.….on.aws` の形にした（`aws/deploy.sh`）。
-- **docker の awslogs:** デーモンに、`AWS_USE_DUALSTACK_ENDPOINT` と `AWS_ENDPOINT_URL_CLOUDWATCH_LOGS` を渡した（5-5）。
+- **docker の awslogs:** デーモンに、`AWS_USE_DUALSTACK_ENDPOINT` と `AWS_ENDPOINT_URL_CLOUDWATCH_LOGS` を渡した（2-4）。
 - **SPIRE server:** `AWS_USE_DUALSTACK_ENDPOINT=true` を渡した。
 
 Cognito（`cognito-idp` と、マネージドログインのドメイン）は、既定の名前に IPv6 のアドレスがあった。Session Manager で台に入れるかは、確かめていない。
@@ -242,7 +137,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 5-5. ECS は、タスク定義の awslogs-endpoint を受け付けなかった
+### 2-4. ECS は、タスク定義の awslogs-endpoint を受け付けなかった
 **結論:** ログの送り先を変える `awslogs-endpoint` をタスク定義の `LogConfiguration` に書くと、`Log driver awslogs disallows options: awslogs-endpoint` でタスク定義を作れなかった。awslogs のドライバーは docker のデーモンの中で動くので、ユーザーデータで docker の systemd の設定に `AWS_ENDPOINT_URL_CLOUDWATCH_LOGS=https://logs.<リージョン>.api.aws` を渡すと、IPv6 だけの台からログが届いた。
 
 <details>
@@ -252,7 +147,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 5-6. 作成中に巻き戻すと、Cloud Map の名前空間がスタックの外に残った
+### 2-5. 作成中に巻き戻すと、Cloud Map の名前空間がスタックの外に残った
 **結論:** ECS のスタックの作成が、別の資源で失敗して巻き戻った。このとき CloudFormation は、作成中だった Cloud Map のプライベート DNS 名前空間を「取り消し」にした。ところが Cloud Map の側では作成が最後まで進み、名前空間と、対になるプライベートのホストゾーン（月額がかかる）が残った。次の作成は、同じ名前のホストゾーンとぶつかって失敗した（`ConflictingDomainExists`）。巻き戻したあとは、`aws servicediscovery list-namespaces` で取り残しを確かめる。
 
 <details>
@@ -262,7 +157,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 5-7. CloudFormation は、YAML のエイリアスを受け付けなかった
+### 2-6. CloudFormation は、YAML のエイリアスを受け付けなかった
 **結論:** 同じ環境変数の並びを、YAML のアンカー（`&名前`）とエイリアス（`*名前`）で 3 つのタスク定義に使い回すと、`YAML aliases are not allowed in CloudFormation templates` で検証に通らなかった。同じ中身を書き出す。
 
 <details>
@@ -272,7 +167,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 5-8. AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、--output text は末尾に改行を付けた
+### 2-7. AWS CLI 2.38.1 は、標準入力からの値の渡し方の一部で失敗し、--output text は末尾に改行を付けた
 **結論:** 秘密を引数に載せずに渡すつもりで使った書き方の一部が、動かなかった。
 - **`--cli-input-json file:///dev/stdin`:** パイプから渡すと、`Invalid JSON received` になった。`file:///dev/fd/0` と `-` も同じだった。
 - **`--value file:///dev/stdin`:** Node.js の `execFileSync` の `input` で渡すと、`No such device or address: '/dev/stdin'` になった。シェルのパイプからなら読めた。
@@ -288,10 +183,19 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-## 6. AWS の段のスケールと身元
-6 節と 7 節は、コミット `ae821af` と `1bc38a8` の作りで確かめた。台は ECS のキャパシティプロバイダー（マネージドスケーリング、0〜2 台、t4g.small）が決める。アプリどうしは Service Connect で呼び、SPIRE server は awsvpc で動き、状態を EFS に置く。
+### 2-8. RUN のない Dockerfile なら、エミュレーションなしで arm64 のイメージを作れた
+**結論:** この環境の buildx には arm64 のエミュレーション（QEMU）がない。依存（`jose`。純粋な JavaScript）をホストで入れて写し、Dockerfile から `RUN` をなくすと、`--platform linux/arm64` のイメージを作れた。
 
-### 6-1. agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた
+<details>
+<summary>根拠</summary>
+
+- コマンド: `docker buildx build --platform linux/arm64 -f Dockerfile <scripts/stage-image.sh の出力>`
+- 結果: イメージができた。`docker buildx ls` の対応は `linux/amd64 (+3)` で、arm64 の実行は含まない。
+
+</details>
+
+## 3. スケールと SPIRE server
+### 3-1. agent の DAEMON だけが残った台を、マネージドスケーリングは空として縮めた
 **結論:** サービスのタスクを 0 にすると、agent（DAEMON）が 2 台で動いたままでも、`CapacityProviderReservation` はすぐに 0 % になった。台数を決めるこの指標は、DAEMON のタスクを数えない。ECS のコンソールの「実行中のタスク」は DAEMON も数えるので、見え方が違う。縮小のアラームは「100 % 未満が 1 分ごとに 15 回」で働き、1 回に 1 台ずつ（`MaximumScalingStepSize: 1`）縮めたので、0 台まで約 18 分かかった。`aws/scale.sh down` は、タスクが 0 になったら ASG の希望台数を直接 0 にして、この待ちを省く。
 
 <details>
@@ -302,7 +206,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 6-2. 0 台から起こすとき、マネージドスケーリングは 2 台を起こした
+### 3-2. 0 台から起こすとき、マネージドスケーリングは 2 台を起こした
 **結論:** 各サービスが 1 タスクで、1 台のメモリの約 2 割しか使わないのに、0 台から起こすと、2 回とも 2 台を起こした。作成の直後の `CapacityProviderReservation` は 200 % だった。なぜ 2 台と見積もるのかは、分かっていない。
 
 <details>
@@ -312,7 +216,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 6-3. 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った
+### 3-3. 台を 0 にして起こし直しても、EFS の上の SPIRE の CA と登録は残った
 **結論:** SPIRE server のデータストア（sqlite）と鍵を EFS に置くと、台が 2 台とも入れ替わったあとも、server は同じ CA を読み込んだ。registrar（server のタスクの中で登録を作るコンテナ）は、4 つの登録をどれも作り直さなかった。
 
 <details>
@@ -322,18 +226,8 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 6-4. aws_iid のノードの確認は、インスタンスのタグのセレクターで通った
-**結論:** ASG が起こした台の agent は、どちらも aws_iid の確認を通った。登録のノードのセレクターは `aws_iid:tag:gekko13-role:ecs-host` の 1 つで、台がいくつでも足りた。agent は、Cloud Map の A レコードの名前（`spire-server.svc.gekko13.internal`）で、awsvpc の server に届いた。
-
-<details>
-<summary>根拠</summary>
-
-- 結果: server のログに、2 台の agent の `Agent attestation request completed`。続けて、agent が bff、transfer、ledger の SVID を作った（`Creating X509-SVID`）。
-
-</details>
-
-### 6-5. server が 5 分ほどいないと、agent は自分の SVID が切れて止まった
-**結論:** server を 0 にして台が残っている間、agent は server に届かず（`no children to pick from`）、5 分ほどで `current SVID has already expired` で止まり、ECS の起こし直しを繰り返した。agent の SVID の有効期限も、server の `default_x509_svid_ttl`（5 分）に従う。`agent_ttl` を指定しなければ、この値になると資料にある（6-6）。ワークロードの SVID も 5 分なので、server が 1 つの今の作りでは、server が 5 分ほど止まると、どの台でも mTLS が続けられなくなる（推定）。台を起こし直すときも、agent が server より先に起き、server が起きるまでの約 1 分、止まっては起き直した。
+### 3-4. server が 5 分ほどいないと、agent は自分の SVID が切れて止まった
+**結論:** server を 0 にして台が残っている間、agent は server に届かず（`no children to pick from`）、5 分ほどで `current SVID has already expired` で止まり、ECS の起こし直しを繰り返した。agent の SVID の有効期限も、server の `default_x509_svid_ttl`（5 分）に従う。`agent_ttl` を指定しなければ、この値になると資料にある（3-6）。ワークロードの SVID も 5 分なので、server が 1 つの今の作りでは、server が 5 分ほど止まると、どの台でも mTLS が続けられなくなる（推定）。台を起こし直すときも、agent が server より先に起き、server が起きるまでの約 1 分、止まっては起き直した。
 
 <details>
 <summary>根拠</summary>
@@ -343,87 +237,7 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-### 6-6. SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない
-**結論:** SPIRE の資料によると、server を冗長にするには、同じ信頼ドメインの全部の server が、同じ 1 つのデータストアを読み書きする。データストアは組み込みの SQL のプラグインだけで、SQLite、PostgreSQL、MySQL に対応する。差し替える仕組みはもうないので、DynamoDB は使えない。SQLite は、複数の台で共有しにくく、本番には一般に勧めないとある。冗長の構成では、server ごとに自分の CA を持つ。`agent_ttl` の既定は `default_x509_svid_ttl` で、その既定は 1 時間。
-
-この資料に、EFS や NFS の上の SQLite についての記述はない。データストアが 1 つなら、server を複数にしても、データストアが止まれば全体が止まる。可用性が上がるのは、server の側（タスク、台、AZ、更新）が落ちる場合だけになる（推定）。
-
-<details>
-<summary>根拠</summary>
-
-- 出典: [Scaling SPIRE](https://spiffe.io/docs/latest/planning/scaling_spire/)、[Configuring SPIRE](https://spiffe.io/docs/latest/deploying/configuring/)、[SPIRE Server の資料](https://github.com/spiffe/spire/blob/main/doc/spire_server.md)（取得日 2026-11-17）
-- 結果: 「Pluggability for the DataStore is no longer supported. Only the built-in SQL plugin can be used.」「each server maintains its own Certificate Authority」。`agent_ttl` の既定は「The value of `default_x509_svid_ttl`」。
-
-</details>
-
-### 6-7. Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない
-**結論:** Aurora Serverless v2 は、最小の容量を 0 ACU にすると、つながりがなくなってから 5 分〜1 日で自動で一時停止する。止まっている間のインスタンスの料金は 0 で、保存とクラスターの費用は残る。再開はふつう約 15 秒で、24 時間を超えて止まると 30 秒以上かかることがある。利用者のつながりが 1 本でも開いていると、止まらない。SPIRE server はつながりを持ち続けるので、止まるのは server を 0 にしたあとだけになる（推定）。ライターは 1 つなので、データベースまで AZ の障害に耐えさせるには、別の AZ にリーダーが要る。
-
-<details>
-<summary>根拠</summary>
-
-- 出典: [Aurora Serverless v2 の自動の一時停止](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html)（取得日 2026-11-17）。対応する版は、Aurora PostgreSQL 16.3、15.7、14.12、13.15 以上、Aurora MySQL 3.08.0 以上。
-- 単価（料金の API、東京、2026-11-17）: Aurora PostgreSQL Serverless v2 は 1 ACU 1 時間 0.15 ドル、保存は 1 GB あたり月 0.12 ドル（どちらも標準）。
-
-</details>
-
-## 7. AWS のシナリオ
-### 7-1. AWS でも、シナリオは 10/10 件が期待どおりだった
-**結論:** AWS で、1-a、1-b、3-a〜3-g が期待どおりになった。攻撃する側は、乗っ取られたタスクを演じるプローブで、本物のファミリーの別の版として動き、自分の svid-helper が得た SVID だけを使う。1-b は、登録していないファミリーの rogue のタスクで確かめた。1-c はホストのシェルが要るので対象外。サービスは 2 台に分かれて置かれ、BFF → transfer → ledger の連鎖は、台をまたいで Service Connect を通った。シナリオ 2（入れ替え）の AWS の結果は、7-3 にある。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `aws/run-scenarios.sh`（2026-11-17 0:33）
-- 結果: `10/10 件が期待どおり（対象外 1 件）`。3-a は本物の Cognito の token exchange で 200。3-c は `403 peer_actor_mismatch`、3-d は `403 caller_not_allowed`。3-b、3-e、3-e2、3-g は TLS の段階で切れた。
-
-</details>
-
-### 7-2. 本物の委任のトークンは、act に sub と client_id の両方を持っていた
-**結論:** BFF が交換したトークンは、外側の `client_id` が BFF、`act` が `{sub, client_id, iss, token_type}` で、`act.sub` と `act.client_id` はどちらも BFF だった。`sub` は利用者のままで、scope は求めた `banking/transfer` だけになった。4-2 の食い違いは、ドキュメントの例（`act.sub`）と gekko_12 の実測（`act.client_id`）の両方が入っている形で決まった。今のコードの照合（`act.client_id`）は、このトークンで働いた。リフレッシュで得たアクセストークンも、交換元にできた。
-
-<details>
-<summary>根拠</summary>
-
-- 結果: プローブの transfer の役のログの `CLAIMS` の行。値は伏せ、どの client を指すかだけを、Cognito のスタックの出力と比べた。
-
-</details>
-
-### 7-3. AWS でも、30 分の連鎖の呼び出し 1,404 回は、SVID の入れ替えを 12〜13 回挟んで、失敗 0 件だった
-**結論:** 段 A の作り（1 AZ、2 台、各サービス 1 タスク）で、プローブの bff の役が、BFF → transfer → ledger の連鎖を 1 秒の間隔で 30 分呼び続けた。その間に、有効期限 300 秒の SVID が、本物の bff で 12 回、transfer と ledger で 13 回入れ替わり、失敗は 0 件だった。連鎖は Service Connect を通り、2 台のどちらかをまたいだ。ローカルの 3-1 と同じ結果で、2 台の作りと Service Connect の中継でも、入れ替えで通信が切れなかった。これは 1 つの AZ での結果で、2 つの AZ に複数のタスクを置いたとき（段 B）は確かめていない。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `aws/run-scenarios.sh soak 30`（2026-11-17 22:37:30〜23:07:31 JST）
-- 結果: `成功 1404 回、失敗 0 件。入れ替え bff 12 回、transfer 13 回、ledger 13 回（10 回以上が基準）。`。回数は、試験の時間の中の、各サービスのアプリのログの `svid_rotated` を数えた（`scripts/aws-collect.ts`）。
-- 途中の 3 分ごとの集計でも、失敗は一度も出なかった。台は 2 台とも ap-northeast-1a だった。
-
-</details>
-
-### 7-4. 段 B で、ECS は各サービスの 2 タスクを 2 つの AZ に分けて置き、シナリオは 11/11 件が期待どおりだった
-**結論:** 2 つの AZ のサブネットに台を置き、bff、transfer、ledger を各 2 タスクにした。マネージドスケーリングは、ap-northeast-1a と ap-northeast-1c に 1 台ずつ起こした。ECS は、置き方を指定しなくても、各サービスの 2 タスクを 2 つの AZ に 1 つずつ置いた（B-1）。この配置で、段 A と同じ 10 件のシナリオも期待どおりになった（B-2）。Service Connect は 2 つの AZ のタスクに振り分け、mTLS とトークンの照合は、どちらに届いても同じように働いた。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `GEKKO13_AZS=2 GEKKO13_TASKS=2 GEKKO13_MAX_HOSTS=4 aws/deploy.sh <接頭辞>`、`aws/run-scenarios.sh`（2026-11-17 23:54〜23:56 JST、コミット `7ae152e`）
-- 結果: タスクの置き場所は、どのサービスも ap-northeast-1a と ap-northeast-1c に 1 つずつ。`11/11 件が期待どおり（対象外 1 件）。`
-
-</details>
-
-### 7-5. 段 B でも、30 分の連鎖の呼び出し 1,403 回は、各タスクで SVID の入れ替えを 13 回以上挟んで、失敗 0 件だった
-**結論:** 段 B の配置で、プローブの bff の役が、連鎖を 1 秒の間隔で 30 分呼び続けた（B-3）。6 つのタスクのどれも、SVID が 13 回以上入れ替わり、失敗は 0 件だった。呼び出しは、Service Connect を通って、2 つの AZ のタスクに振り分けられた。
-
-<details>
-<summary>根拠</summary>
-
-- コマンド: `aws/run-scenarios.sh soak 30`（2026-11-17 23:57〜2026-11-18 0:28 JST）
-- 結果: `成功 1403 回、失敗 0 件。入れ替え bff 13 回（2 タスクの最少）、transfer 13 回（2 タスクの最少）、ledger 13 回（2 タスクの最少）`。3 分ごとの集計でも、失敗は一度も出なかった。
-
-</details>
-
-### 7-6. SPIRE server を別の AZ へ移すと、server は 24 秒いなかったが、連鎖の失敗は 0 件で、CA も変わらなかった
+### 3-5. SPIRE server を別の AZ へ移すと、server は 24 秒いなかったが、連鎖の失敗は 0 件で、CA も変わらなかった
 **結論:** 連鎖を呼び続けながら、server を ap-northeast-1a から ap-northeast-1c へ移した（B-4）。移し方は、spire-server のサービスに「今の AZ 以外に置く」制約を付けて、新しいデプロイを強制した。古いタスクが止まり終わってから、新しい server が応答する（registrar の `server is healthy`）まで約 24 秒で、入れ替えを求めてからは約 101 秒だった。新しい server は EFS から同じ CA と 4 件の登録を読み、agent は 1 つも止まらず、連鎖の失敗は 0 件だった。server が戻ったあと、6 つのタスクの SVID は、新しい server の下で入れ替わった。
 
 確かめたのは、計画して止めた入れ替えで、移し先の AZ に台がすでにあった場合に限る。AZ がまるごと落ちて台を起こすところから始まる場合と、server のタスクや台が突然消える場合は、確かめていない。CA の識別子は、前日の段 A のとき（`f29bcd7d…`）とは違っていた。`ca_ttl` が 24 時間なので、その間に SPIRE が CA を入れ替えたと推定している。
@@ -437,8 +251,32 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
-## 8. 未確認
-- AZ がまるごと落ちたときと、server のタスクや台が突然消えたときに、server が何分で起き直すか（7-6）。移し先に台がなければ、台を起こすところから始まる。
-- 0 台から起こすとき、マネージドスケーリングがなぜ 2 台と見積もるか（6-2）。
-- IPv6 だけの台に、Session Manager で入れるか（5-4）。
+### 3-6. SPIRE server を冗長にするには、全部の server が 1 つの SQL のデータストアを共有する。DynamoDB は使えない
+**結論:** SPIRE の資料によると、server を冗長にするには、同じ信頼ドメインの全部の server が、同じ 1 つのデータストアを読み書きする。データストアは組み込みの SQL のプラグインだけで、SQLite、PostgreSQL、MySQL に対応する。差し替える仕組みはもうないので、DynamoDB は使えない。SQLite は、複数の台で共有しにくく、本番には一般に勧めないとある。冗長の構成では、server ごとに自分の CA を持つ。`agent_ttl` の既定は `default_x509_svid_ttl` で、その既定は 1 時間。
+
+この資料に、EFS や NFS の上の SQLite についての記述はない。データストアが 1 つなら、server を複数にしても、データストアが止まれば全体が止まる。可用性が上がるのは、server の側（タスク、台、AZ、更新）が落ちる場合だけになる（推定）。
+
+<details>
+<summary>根拠</summary>
+
+- 出典: [Scaling SPIRE](https://spiffe.io/docs/latest/planning/scaling_spire/)、[Configuring SPIRE](https://spiffe.io/docs/latest/deploying/configuring/)、[SPIRE Server の資料](https://github.com/spiffe/spire/blob/main/doc/spire_server.md)（取得日 2026-11-17）
+- 結果: 「Pluggability for the DataStore is no longer supported. Only the built-in SQL plugin can be used.」「each server maintains its own Certificate Authority」。`agent_ttl` の既定は「The value of `default_x509_svid_ttl`」。
+
+</details>
+
+### 3-7. Aurora Serverless v2 は 0 ACU まで縮み、つながりが 1 本でもあると止まらない
+**結論:** Aurora Serverless v2 は、最小の容量を 0 ACU にすると、つながりがなくなってから 5 分〜1 日で自動で一時停止する。止まっている間のインスタンスの料金は 0 で、保存とクラスターの費用は残る。再開はふつう約 15 秒で、24 時間を超えて止まると 30 秒以上かかることがある。利用者のつながりが 1 本でも開いていると、止まらない。SPIRE server はつながりを持ち続けるので、止まるのは server を 0 にしたあとだけになる（推定）。ライターは 1 つなので、データベースまで AZ の障害に耐えさせるには、別の AZ にリーダーが要る。
+
+<details>
+<summary>根拠</summary>
+
+- 出典: [Aurora Serverless v2 の自動の一時停止](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html)（取得日 2026-11-17）。対応する版は、Aurora PostgreSQL 16.3、15.7、14.12、13.15 以上、Aurora MySQL 3.08.0 以上。
+- 単価（料金の API、東京、2026-11-17）: Aurora PostgreSQL Serverless v2 は 1 ACU 1 時間 0.15 ドル、保存は 1 GB あたり月 0.12 ドル（どちらも標準）。
+
+</details>
+
+## 4. 未確認
+- AZ がまるごと落ちたときと、server のタスクや台が突然消えたときに、server が何分で起き直すか（3-5）。移し先に台がなければ、台を起こすところから始まる。
+- 0 台から起こすとき、マネージドスケーリングがなぜ 2 台と見積もるか（3-2）。
+- IPv6 だけの台に、Session Manager で入れるか（2-3）。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。
