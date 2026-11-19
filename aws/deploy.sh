@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AWS の段の資源を、決まった順番で作る。実行すると費用が出る（EC2 は動いている間、1 時間ごと）。
-# 使い方: aws/deploy.sh <マネージドログインのドメインの接頭辞> [公開 IPv4 を付けるなら true]
+# 使い方: aws/deploy.sh <マネージドログインのドメインの接頭辞>
 #   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く（段 B）。既定は 1（段 A）。
 #   GEKKO13_TASKS で bff、transfer、ledger のタスク数を、GEKKO13_MAX_HOSTS で台の上限を変える（既定 1 と 2）。
 # 順番: registry → イメージを写す → network → cognito → client の秘密を SSM へ → ecs。
@@ -9,7 +9,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DOMAIN_PREFIX=${1:?マネージドログインのドメインの接頭辞を渡す}
-PUBLIC_IPV4=${2:-false}
+# サブネットはプライベートで IPv4 の経路がないので、公開 IPv4 を付けても使えない（段 C の C-1b）
+if [ "${2:-false}" != false ]; then echo "公開 IPv4 は付けられない。サブネットに IPv4 の経路がない（docs/design-decisions.md）" >&2; exit 1; fi
+PUBLIC_IPV4=false
 AZS=${GEKKO13_AZS:-1}
 TASKS=${GEKKO13_TASKS:-1}
 MAX_HOSTS=${GEKKO13_MAX_HOSTS:-2}
@@ -44,11 +46,9 @@ CTX=$(scripts/stage-image.sh)
 docker buildx imagetools inspect "$APP_REPO:$TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" -f Dockerfile -t "$APP_REPO:$TAG" --push "$CTX"
 
-# CloudFront の送り先向けの IPv6 のプレフィックスリスト（ID はリージョンで決まる）。台は、ここからだけ 8080 を受ける
-CF_PL=$(aws ec2 describe-managed-prefix-lists --region "$REGION" \
-  --filters Name=prefix-list-name,Values=com.amazonaws.global.ipv6.cloudfront.origin-facing \
-  --query 'PrefixLists[0].PrefixListId' --output text)
-cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml --parameter-overrides "CloudFrontIpv6PrefixList=$CF_PL"
+# CloudFront が VPC に作るグループ（最初の VPC origin でできる）。台は、ここからだけ入口のポートを受ける。
+# まだなければ空で渡し、aws/edge-point.sh が VPC origin を作ったあとで渡し直す
+cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml --parameter-overrides "CloudFrontVpcOriginSg=$(scripts/vpc-origin-sg.sh)"
 cfn --stack-name "$PREFIX-cognito" --template-file aws/cognito.yaml --parameter-overrides "DomainPrefix=$DOMAIN_PREFIX"
 
 POOL=$(out "$PREFIX-cognito" UserPoolId)
@@ -67,6 +67,12 @@ put_secret "$(out "$PREFIX-cognito" TransferClientId)" "/$PREFIX/transfer/client
 # プローブの動かし方。aws/run-scenarios.sh が書き換える。なければ作る（秘密ではない）
 aws ssm get-parameter --region "$REGION" --name "/$PREFIX/probe/mode" >/dev/null 2>&1 || \
   aws ssm put-parameter --region "$REGION" --name "/$PREFIX/probe/mode" --type String --value scenarios >/dev/null
+
+# パスキーの RP ID は、入口の配信の名前。配信がまだなければ空にする（aws/edge-point.sh が作ったあとで、もう一度実行する）
+rp_id() {
+  aws cloudformation describe-stacks --region "$REGION" --stack-name "$PREFIX-edge" \
+    --query "Stacks[0].Outputs[?OutputKey=='DomainName'].OutputValue" --output text 2>/dev/null || true
+}
 
 if [ "$AZS" = 2 ]; then
   SUBNETS=$(out "$PREFIX-network" SubnetIds)
@@ -102,6 +108,7 @@ cfn --stack-name "$PREFIX-ecs" --template-file aws/ecs.yaml --capabilities CAPAB
   "TokenUrl=$(out "$PREFIX-cognito" TokenUrl)" \
   "AppClientId=$(out "$PREFIX-cognito" AppClientId)" \
   "BffClientId=$(out "$PREFIX-cognito" BffClientId)" \
-  "TransferClientId=$(out "$PREFIX-cognito" TransferClientId)"
+  "TransferClientId=$(out "$PREFIX-cognito" TransferClientId)" \
+  "RpId=$(rp_id)"
 
 echo "作った。使い終わったら aws/scale.sh down で、タスクと台を 0 にする"

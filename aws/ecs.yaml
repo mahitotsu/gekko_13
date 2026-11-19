@@ -68,6 +68,10 @@ Parameters:
     Type: String
   TransferClientId:
     Type: String
+  RpId:
+    Type: String
+    Default: ""
+    Description: Passkey RP ID, the default domain of the entry CloudFront distribution (empty until the distribution exists)
   BffSecretParameter:
     Type: String
     Default: /gekko13/bff/client-secret
@@ -944,8 +948,10 @@ Resources:
     Type: AWS::ECS::TaskDefinition
     Metadata:
       com.aws.cloudformation.Context:
-        why: Stage C-1 check that CloudFront can reach a service on an IPv6-only host. Fixed host port because CloudFront targets a fixed port
-        must: Accept traffic only from the CloudFront origin-facing prefix list (network stack security group)
+        why: >-
+          Stage C-1b and C-2 check. CloudFront VPC origins reach the app listener (8080) and the login listener (8081).
+          Serves a passkey test page whose RP ID is the distribution domain. Fixed host ports because a VPC origin targets a fixed port
+        must: Accept traffic only from the CloudFront VPC origin security group (network stack)
     Properties:
       Family: !Sub "${Prefix}-edge-check"
       RequiresCompatibilities: [EC2]
@@ -955,10 +961,13 @@ Resources:
         - Name: app
           Image: !Ref AppImage
           Essential: true
-          MemoryReservation: 48
-          PortMappings: [{ ContainerPort: 8080, HostPort: 8080, Protocol: tcp }]
+          MemoryReservation: 64
+          PortMappings:
+            - { ContainerPort: 8080, HostPort: 8080, Protocol: tcp }
+            - { ContainerPort: 8081, HostPort: 8081, Protocol: tcp }
           Environment:
             - { Name: SERVICE, Value: edge-check }
+            - { Name: RP_ID, Value: !Ref RpId }
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: edge-check, mode: non-blocking }

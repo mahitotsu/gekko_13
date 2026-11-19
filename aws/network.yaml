@@ -1,10 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証のネットワークと、SPIRE server の状態を置く EFS。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
-# インスタンスには既定で公開 IPv4 を付けない。VPC の外からの通信は受けない（入口は検証の範囲外）。サブネットは 2 つの AZ に 1 つずつ。
+# サブネットはプライベートにする。IGW への経路を持たず、外へは Egress-only のインターネットゲートウェイ（EIGW）から IPv6 で出る。
+# 外からは、CloudFront の VPC origin からだけ受ける（段 C の C-1b）。サブネットは 2 つの AZ に 1 つずつ。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 network and the EFS that holds SPIRE server state. IPv6 first, with no NAT gateway and no VPC endpoints (no fixed monthly cost).
-  Hosts get no public IPv4 by default. No inbound traffic from outside the VPC (the ingress is out of scope). One subnet in each of two AZs.
+  Subnets are private: no route to the internet gateway; egress goes over IPv6 through an egress-only internet gateway.
+  The only inbound path from outside is CloudFront VPC origins. One subnet in each of two AZs.
 
 Metadata:
   AWSToolsMetrics:
@@ -23,13 +25,15 @@ Parameters:
   Subnet2Cidr:
     Type: String
     Default: 10.13.1.0/24
-  CloudFrontIpv6PrefixList:
+  CloudFrontVpcOriginSg:
     Type: String
     Default: ""
-    Description: ID of the managed prefix list com.amazonaws.global.ipv6.cloudfront.origin-facing. Empty means no CloudFront ingress
+    Description: >-
+      ID of the security group CloudFront-VPCOrigins-Service-SG that CloudFront creates in this VPC with the first VPC origin.
+      Empty means no CloudFront ingress
 
 Conditions:
-  AllowCloudFront: !Not [!Equals [!Ref CloudFrontIpv6PrefixList, ""]]
+  AllowCloudFront: !Not [!Equals [!Ref CloudFrontVpcOriginSg, ""]]
 
 Resources:
   Vpc:
@@ -100,22 +104,23 @@ Resources:
       VpcId: !Ref Vpc
       Tags: [{ Key: Name, Value: !Ref Prefix }]
 
+  # 外から始まる IPv6 の接続を通さない出口。ゲートウェイの料金はない（転送の分だけ）
+  EgressOnlyGateway:
+    Type: AWS::EC2::EgressOnlyInternetGateway
+    Properties:
+      VpcId: !Ref Vpc
+
+  # IGW への経路は置かない（VPC origin はプライベートのサブネットを求める）。IGW は VPC に付けたままにする（VPC origin の条件）
   Ipv6DefaultRoute:
     Type: AWS::EC2::Route
-    DependsOn: GatewayAttachment
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Egress over IPv6 only, through the egress-only internet gateway, so the subnets stay private for CloudFront VPC origins
+        must: Never add a route to the internet gateway (IPv4 or IPv6)
     Properties:
       RouteTableId: !Ref RouteTable
       DestinationIpv6CidrBlock: "::/0"
-      GatewayId: !Ref InternetGateway
-
-  # 公開 IPv4 を一時的に付けたときだけ使われる。付けていなければ、この経路で外へ出る IPv4 の通信はない
-  Ipv4DefaultRoute:
-    Type: AWS::EC2::Route
-    DependsOn: GatewayAttachment
-    Properties:
-      RouteTableId: !Ref RouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
+      EgressOnlyInternetGatewayId: !Ref EgressOnlyGateway
 
   SubnetRouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -145,7 +150,6 @@ Resources:
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: AWS APIs and ECR over IPv6 }
-        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: only used while a public IPv4 is attached }
         - { IpProtocol: udp, FromPort: 123, ToPort: 123, CidrIp: 169.254.169.123/32, Description: Amazon Time Sync }
       Tags: [{ Key: Name, Value: !Ref Prefix }]
 
@@ -169,22 +173,22 @@ Resources:
       ToPort: 65535
       Description: members of this group only
 
-  # 段 C の C-1: CloudFront の送り先向けの IPv6 のアドレスからだけ、確認用のサービスのポート（8080）を受ける。
-  # 外からの受信は、この規則のほかに足さない。
+  # 段 C の C-1b: CloudFront の VPC origin（CloudFront が VPC に作るグループ）からだけ、入口のポート（8080 と 8081）を受ける。
+  # グループは最初の VPC origin を作ったときにできるので、aws/edge-point.sh が引いて渡す。外からの受信は、この規則のほかに足さない。
   HostIngressFromCloudFront:
     Type: AWS::EC2::SecurityGroupIngress
     Condition: AllowCloudFront
     Metadata:
       com.aws.cloudformation.Context:
-        why: Stage C-1. Only CloudFront origin-facing IPv6 addresses may reach the edge port
+        why: Stage C-1b. Only this account's CloudFront VPC origins may reach the edge ports (app 8080, login 8081)
         must: Add no other inbound rule from outside the group
     Properties:
       GroupId: !Ref HostSecurityGroup
-      SourcePrefixListId: !Ref CloudFrontIpv6PrefixList
+      SourceSecurityGroupId: !Ref CloudFrontVpcOriginSg
       IpProtocol: tcp
       FromPort: 8080
-      ToPort: 8080
-      Description: CloudFront origin-facing IPv6 only
+      ToPort: 8081
+      Description: CloudFront VPC origins only
 
   # SPIRE server のデータストア（sqlite）と鍵、agent が最初に信じるバンドル。
   # ECS のスタックを作り直しても、台が入れ替わっても、CA と登録が残るように、ECS の外に置く。
@@ -237,6 +241,7 @@ Resources:
 
 Outputs:
   VpcId: { Value: !Ref Vpc }
+  RouteTableId: { Value: !Ref RouteTable }
   SubnetId: { Value: !Ref Subnet }
   # 段 A は 1 つめだけ、段 B は 2 つとも使う
   SubnetIds: { Value: !Join [",", [!Ref Subnet, !Ref Subnet2]] }

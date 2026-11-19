@@ -1,11 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の入口の CloudFront の配信（段 C の C-1）。配信の既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
+# gekko13 の入口の CloudFront の配信。配信の既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
 # 配信を作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消しても配信は残す（DeletionPolicy: Retain）。
-# 送り先は、確認用のサービスが動いている台。台が入れ替わったら、aws/edge-point.sh が OriginDomain を書き換える。
+# 送り先は VPC origin（段 C の C-1b）。プライベートのサブネットの台を、インスタンスの ARN で指す。外の DNS は使わない。
+# 顧客のアプリの役（8080）と、ログインサーバーの役（8081、パス /login/*）の 2 つに振り分ける（段 C の C-2）。
+# 台が入れ替わったら、aws/edge-point.sh が InstanceArn と OriginDomain を書き換える。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 entry CloudFront distribution. Its default domain (dXXXX.cloudfront.net) becomes the passkey RP ID,
-  so the distribution is retained even if the stack is deleted. aws/edge-point.sh points the origin at the current host.
+  so the distribution is retained even if the stack is deleted. Origins are VPC origins that point at the current host;
+  aws/edge-point.sh re-points them after host replacement.
 
 Metadata:
   AWSToolsMetrics:
@@ -15,16 +18,43 @@ Parameters:
   Prefix:
     Type: String
     Default: gekko13
+  InstanceArn:
+    Type: String
+    Description: ARN of the EC2 instance that runs the edge service
   OriginDomain:
     Type: String
-    Description: Public DNS name that resolves to the host running the edge service (AAAA only in stage C-1a)
-  OriginPort:
+    Description: Private DNS name of that instance (CloudFront requires a domain name for the origin)
+  AppPort:
     Type: Number
     Default: 8080
+  LoginPort:
+    Type: Number
+    Default: 8081
 
 Resources:
+  # 同じ台の 2 つのポートを、別々の VPC origin にする（VPC origin は、ポートを自分の設定に持つ）
+  AppVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${Prefix}-app"
+        Arn: !Ref InstanceArn
+        HTTPPort: !Ref AppPort
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
+  LoginVpcOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Name: !Sub "${Prefix}-login"
+        Arn: !Ref InstanceArn
+        HTTPPort: !Ref LoginPort
+        HTTPSPort: 443
+        OriginProtocolPolicy: http-only
+
   # キャッシュはしない（CachingDisabled）。送り先には、Host を除く利用者の値を渡す（AllViewerExceptHostHeader）。
-  # Host を渡すと、送り先の名前と食い違う。送り先へは平文の HTTP にする（台の上の TLS は、段 D で決める）。
+  # 送り先へは平文の HTTP にする（VPC の中の区間。台の上の TLS は、段 D で決める）。
   Distribution:
     Type: AWS::CloudFront::Distribution
     DeletionPolicy: Retain
@@ -32,8 +62,8 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader), because Host would not
-          match the origin name. HTTP to the origin for now; TLS on the host is decided in stage D
+          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader). HTTP to the origin inside
+          the VPC for now; TLS on the host is decided in stage D. /login/* goes to the login listener, the rest to the app listener
         must: Never replace or delete this distribution. Its domain is the passkey RP ID
     Properties:
       DistributionConfig:
@@ -43,24 +73,38 @@ Resources:
         IPV6Enabled: true
         PriceClass: PriceClass_200
         Origins:
-          - Id: edge
+          - Id: app
             DomainName: !Ref OriginDomain
-            # 送り先へつなぐ IP の種類。既定は ipv4 で、IPv6 だけの台には届かない（docs/findings.md）
-            CustomOriginConfig:
-              HTTPPort: !Ref OriginPort
-              OriginProtocolPolicy: http-only
-              IpAddressType: ipv6
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt AppVpcOrigin.Id
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+          - Id: login
+            DomainName: !Ref OriginDomain
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt LoginVpcOrigin.Id
               OriginReadTimeout: 30
               OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
-          TargetOriginId: edge
+          TargetOriginId: app
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
           CachedMethods: [GET, HEAD]
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
           OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
           Compress: true
+        CacheBehaviors:
+          - PathPattern: /login/*
+            TargetOriginId: login
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            Compress: true
 
 Outputs:
   DistributionId: { Value: !Ref Distribution }
   DomainName: { Value: !GetAtt Distribution.DomainName }
+  AppVpcOriginId: { Value: !GetAtt AppVpcOrigin.Id }
+  LoginVpcOriginId: { Value: !GetAtt LoginVpcOrigin.Id }

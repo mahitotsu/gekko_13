@@ -14,6 +14,7 @@
     "scenarios": "node scripts/scenarios.ts"
   },
   "dependencies": {
+    "@simplewebauthn/server": "13.3.3",
     "jose": "^6.2.17"
   },
   "devDependencies": {
