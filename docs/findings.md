@@ -47,6 +47,9 @@
 | 4-5 | Spring Authorization Server の交換は、元のトークンの保存に利用者がないと、説明なしの invalid_grant で拒んだ |
 | 4-6 | SVID が入れ替わると、前の証明書に結んだトークンは、交換の actor_token に使えなくなった |
 | 4-7 | SPIRE は、SVID を入れ替えるたびに、鍵の組も新しく作った |
+| 4-8 | CloudFront は、プライベートのサブネットの台に VPC origin で届き、パスで 2 つの受け口に振り分けた。台から見た送り主は、CloudFront の公開 IPv4 だった |
+| 4-9 | CloudFront は、配信が使っている VPC origin の更新を拒んだ。VPC origin を 2 組持って切り替えると、向け直しは 3〜6 分だった |
+| 4-10 | 配信の既定のドメインを RP ID にして、パスキーを登録し、別のパスの受け口で文書のハッシュに署名できた。cloudfront.net は RP ID にできなかった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -406,11 +409,60 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
+### 4-8. CloudFront は、プライベートのサブネットの台に VPC origin で届き、パスで 2 つの受け口に振り分けた。台から見た送り主は、CloudFront の公開 IPv4 だった
+**結論:** サブネットの経路表から、IGW への経路をなくした（IPv4 も IPv6 も）。外へは、Egress-only のインターネットゲートウェイ（EIGW）から IPv6 で出る。台の受信は、同じグループと、CloudFront が VPC に作るグループ（`CloudFront-VPCOrigins-Service-SG`）からだけにした。この作りで、CloudFront は VPC origin を通して台の上のサービスに届いた。`/login/*` はログインサーバーの役の受け口（8081）に、ほかは顧客のアプリの役の受け口（8080）に届いた。プライベートにしたあとも、台は ECS に登録され、イメージを取れ、SPIRE の agent と全サービスが安定し、SVID の入れ替わりも続いた。
+
+予測と違ったのは、台から見た送り主のアドレスである。VPC の中の IPv4 を予測したが、実際は CloudFront の公開 IPv4（`54.239.` で始まる）だった。CloudFront は、サブネットに自分が管理する ENI（プライベートの IPv4 と IPv6 を持ち、公開のアドレスは持たない）を 1 つ作っていた。この ENI を通るときに、送り主のアドレスを書き換えていないとみられる（推定）。台は公開 IPv4 を持たず、サブネットに IGW への経路がないので、インターネットから台に届く道はない（作りからの判断で、外から接続して試してはいない）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/deploy.sh`、`aws/scale.sh up`、`aws/edge-point.sh`、`aws ec2 describe-route-tables`、`describe-security-groups`、`describe-network-interfaces`（2026-11-19 23:23〜23:41）
+- 結果: 経路表は、VPC の中の 2 つと `::/0 → eigw-…` だけ。IGW は VPC に付いたまま（VPC origin の条件）。ENI は `InterfaceType: cloudfront_managed`、`Description: CloudFront configured ENI`。応答は `"listener":"app"`（`/edge-point`）と `"listener":"login"`（`/login/edge-point`）、`"remote":"::ffff:54.239.215.205"`。
+- 資料: [Restrict access with VPC origins](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html)（VPC に IGW が要る。東京は apne1-az3 を除く。この検証のサブネットは apne1-az4 と apne1-az1）、[Egress-only internet gateways](https://docs.aws.amazon.com/vpc/latest/userguide/egress-only-internet-gateway.html)（ゲートウェイの料金はない。外から始まる IPv6 の接続を通さない）。どちらも 2026-11-19 に読んだ。
+
+</details>
+
+### 4-9. CloudFront は、配信が使っている VPC origin の更新を拒んだ。VPC origin を 2 組持って切り替えると、向け直しは 3〜6 分だった
+**結論:** 台を入れ替えたあと、VPC origin の送り先（インスタンスの ARN）を CloudFormation で書き換えた。CloudFront は 409 で拒み、スタックは巻き戻った。CloudFormation の型の説明は、この更新を「中断なし」としているが、当たらなかった。資料の手順（配信から外してから更新する）のほうが正しかった。そこで VPC origin を A と B の 2 組持ち、使っていない組を新しい台に向けてから、同じスタックの更新で配信を切り替える形にした。この形で 2 回向け直し、どちらも届いた。
+
+| 回 | 中身 | 書き換えを求めてから届くまで |
+|---|---|---|
+| 最初の作り | VPC origin を新しく作り、配信の送り先にする | 596 秒 |
+| 1 回目の向け直し | 新しい B の組を作り、配信を B に切り替える | 192 秒 |
+| 2 回目の向け直し | 配信から外れた A の組を書き換え、配信を A に切り替える | 348 秒 |
+
+ほとんどが、VPC origin が `Deployed` になるまで（約 8 分、約 2 分、約 2.5 分）と、配信の切り替え（約 25 秒〜約 2.5 分）の時間だった。sslip.io の名前を書き換える方法（4-2、約 100 秒）より長い。向け直しの間は、前の組が前の台を指したままなので、台を入れ替えたときは、向け直しが終わるまで届かない。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/scale.sh down`、`aws/scale.sh up`、`aws/edge-point.sh`（2026-11-19 23:47〜2026-11-20 00:09）。2 回目は、edge-check のタスクを、置き方の制約でもう 1 台へ移してから行った。
+- 拒まれたときの理由: `The specified VPC origin is currently associated with one or more distributions. Please disassociate the VPC origin from all distributions before updating or deleting (Service: CloudFront, Status Code: 409 …)`
+- 結果: `edge-point.sh` の出力で、スタックの更新 551 秒・188 秒・343 秒、届くまで 596 秒・192 秒・348 秒。
+
+</details>
+
+### 4-10. 配信の既定のドメインを RP ID にして、パスキーを登録し、別のパスの受け口で文書のハッシュに署名できた。cloudfront.net は RP ID にできなかった
+**結論:** 配信の既定のドメイン（`dXXXX.cloudfront.net`）を RP ID にして、ログインサーバーの役の受け口（`/login/`）でパスキーを登録できた。同じ資格情報で、顧客のアプリの役の受け口（`/app/`）から、文書の SHA-256 を challenge にして署名できた。サーバーの検証（`@simplewebauthn/server` 13.3.3）は、どちらも RP ID のハッシュ、origin、ユーザーの確認、署名を通した。署名された clientDataJSON の challenge は、文書のハッシュと一致した。RP ID を `cloudfront.net` にして登録を求めると、ブラウザーが `SecurityError` で拒んだ。`cloudfront.net` は Public Suffix List にあるので、別の配信が同じ RP ID を名乗ることはできない。
+
+試しの署名の challenge は、毎回同じ文書のハッシュにした。そのため、同じ署名を出し直されても見分けられない。段 D で署名するハッシュには、申込みごとに変わる値（案や時刻）が入るので、この問題は起きない見込み（推定）。
+
+<details>
+<summary>根拠</summary>
+
+- 試した環境: Windows の Microsoft Edge、認証器は Windows Hello（持ち主が操作した。2026-11-19 23:45〜23:47）。
+- 結果: 登録は `verified: true`、`device_type: singleDevice`、`backed_up: false`、`user_verified: true`。署名は `verified: true`、`challenge_is_document_hash: true`、`new_counter: 1`。サーバーのログの `passkey_registered` と `passkey_signed` も同じ値。
+- `cloudfront.net` のとき: `SecurityError: The relying party ID is not a registrable domain suffix of, nor equal to the current domain. Subsequently, an attempt to fetch the .well-known/webauthn resource of the claimed RP ID failed.` Edge は、拒む前に、別の名前を許す仕組み（Related Origin Requests）のファイルを取りに行っていた。
+
+</details>
+
 ## 5. 未確認
 - AZ がまるごと落ちたときと、server のタスクや台が突然消えたときに、server が何分で起き直すか（3-5）。移し先に台がなければ、台を起こすところから始まる。
 - 0 台から起こすとき、マネージドスケーリングがなぜ 2 台と見積もるか（3-2）。
-- CloudFront を通らずに、台の IPv6 の 8080 へ直接つなぐと拒まれるか（4-1）。手元から IPv6 で外に出られず、確かめていない。セキュリティグループは、CloudFront の送り先向けのアドレスからだけを受ける。
-- ある台で、IPv6 で公開したポートが拒まれた原因（4-3）。
+- 台の IPv6 のアドレスへ、インターネットから直接つなぐと拒まれるか（4-8）。EIGW とセキュリティグループの作りから届かないと判断したが、手元から IPv6 で外に出られず、試していない。
+- VPC origin が `Deployed` になるまでの時間のばらつき（4-9 では約 2〜8 分）。回数が 3 回と少ない。
+- ある台で、IPv6 で公開したポートが拒まれた原因（4-3）。VPC origin に替えてからの 3 回の向け直しでは、起きなかった。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。
 - Java のサービスが外を呼ぶ側の mTLS（要求ごとにつなぎ直し、そのときの SVID で示すか）。C-4 では、呼び手は Node だった。段 D で、Java のサービスが別のサービスを呼ぶときに確かめる。
 - t4g.small（arm64）の上での、認可サーバーの起動の時間とメモリ（4-4 はローカルの x86 の値）。C-3 で確かめる。

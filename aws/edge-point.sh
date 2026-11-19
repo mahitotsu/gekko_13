@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 入口の CloudFront の配信（スタック gekko13-edge）の VPC origin を、確認用のサービス（edge-check）が動いている台に向け、
-# 効くまでの時間を測る（段 C の C-1b）。配信がなければ作り、あれば InstanceArn と OriginDomain を書き換える。配信は消さない（RP ID を保つため）。
+# 効くまでの時間を測る（段 C の C-1b）。配信がなければ作る。配信は消さない（RP ID を保つため）。
+# CloudFront は、配信に結び付いた VPC origin を更新させない（409）。そこで、使っていない組（A か B）を新しい台に向け、
+# 同じスタックの更新で、配信をその組に切り替える。台が変わっていなければ、何も変えない。
 # CloudFront が VPC に作るグループ（CloudFront-VPCOrigins-Service-SG）を、network のスタックに渡し、台がそこから受けるようにする。
 # 使い方: aws/edge-point.sh
 set -euo pipefail
@@ -20,9 +22,26 @@ read -r ARN_ACCOUNT DNS < <(aws ec2 describe-instances --region "$REGION" --inst
 ARN="arn:aws:ec2:$REGION:$ARN_ACCOUNT:instance/$HOST"
 echo "送り先の台: $HOST（タスク ${TASK##*/}）"
 
+# 今の組と、それぞれが指す台。最初の作り（組がひとつ、InstanceArn）からも引き継ぐ
+param() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
+  --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue|[0]" --output text 2>/dev/null || echo None; }
+ACTIVE=$(param ActiveSlot) A=$(param InstanceArnA) B=$(param InstanceArnB)
+if [ "$ACTIVE" = None ]; then ACTIVE=A A=$(param InstanceArn) B=None; fi
+CURRENT=$([ "$ACTIVE" = A ] && echo "$A" || echo "$B")
+if [ "$CURRENT" = "$ARN" ]; then
+  NEXT=$ACTIVE
+else
+  NEXT=$([ "$ACTIVE" = A ] && echo B || echo A)
+  if [ "$NEXT" = A ]; then A=$ARN; else B=$ARN; fi
+fi
+# まだ一度も使っていない組は、新しい台を指して作る（配信に結び付く前なので作れる）
+[ "$A" != None ] || A=$ARN
+[ "$B" != None ] || B=$ARN
+echo "組: $ACTIVE → $NEXT"
+
 START=$(date +%s)
 aws cloudformation deploy --region "$REGION" --stack-name "$STACK" --template-file aws/edge.yaml \
-  --no-fail-on-empty-changeset --parameter-overrides "InstanceArn=$ARN" "OriginDomain=$DNS" >/dev/null
+  --no-fail-on-empty-changeset --parameter-overrides "ActiveSlot=$NEXT" "InstanceArnA=$A" "InstanceArnB=$B" "OriginDomain=$DNS" >/dev/null
 CFN_DONE=$(date +%s)
 DOMAIN=$(out "$STACK" DomainName)
 echo "配信: $DOMAIN（スタックの更新に $((CFN_DONE - START)) 秒）"

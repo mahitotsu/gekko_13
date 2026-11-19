@@ -2,11 +2,12 @@
 
 **この文書の読み手:** この検証が、いつ、何をして、何を決めたかを知りたい人。計画と合格の基準は [plan.md](plan.md)、確かめた事実は [findings.md](findings.md)、判断の理由は [design-decisions.md](design-decisions.md)。用語は [用語集](glossary.md)。新しい出来事は、年表の末尾に足す。
 
-## 現在の状況（2026-11-19）
+## 現在の状況（2026-11-20）
 - 第 2 部を始めた。題材は、gekko_11 の年金保険の申込みの流れで、これを第 1 部の基盤（ECS on EC2、SPIRE、IPv6 だけ）の上で動かす。
 - 第 2 部の計画（[plan.md](plan.md)）を書いた。段 C の C-1 は予測どおりだった。CloudFront から、IPv6 だけの台の上のサービスに届いた（[findings 4-1](findings.md#4-1-cloudfront-は送り先の-ip-の種類を-ipv6-にするとipv6-だけの台に届いた既定の-ipv4-では届かなかった)）。
-- C-4 も予測どおりだった。Spring Authorization Server は、Envoy なしで SVID の mTLS を終えた。交換したトークンは、呼び手の SVID の証明書に結ばれた（[findings 4-4](findings.md#4-4-spring-authorization-server-はenvoy-なしで-svid-の-mtls-を自分で終え交換したトークンを呼び手の-svid-の証明書に結んだ)）。次は C-2 と C-1b（VPC origin）を AWS で、そのあと C-3。
-- AWS のスタックは、第 1 部の 4 つに、CloudFront の `gekko13-edge` を足して 5 つ。台は 0 台。今の作りは、第 1 部のアプリと、確認用のサービス（edge-check）を載せたまま。
+- C-4 も予測どおりだった。Spring Authorization Server は、Envoy なしで SVID の mTLS を終えた。交換したトークンは、呼び手の SVID の証明書に結ばれた（[findings 4-4](findings.md#4-4-spring-authorization-server-はenvoy-なしで-svid-の-mtls-を自分で終え交換したトークンを呼び手の-svid-の証明書に結んだ)）。
+- C-2 と C-1b も予測どおりだった。入口を VPC origin に替え、台をプライベートのサブネットに移した（[findings 4-8](findings.md#4-8-cloudfront-はプライベートのサブネットの台に-vpc-origin-で届きパスで-2-つの受け口に振り分けた台から見た送り主はcloudfront-の公開-ipv4-だった)）。配信の名前を RP ID にして、パスキーの登録と署名ができた（[4-10](findings.md#4-10-配信の既定のドメインを-rp-id-にしてパスキーを登録し別のパスの受け口で文書のハッシュに署名できたcloudfrontnet-は-rp-id-にできなかった)）。次は C-3。
+- AWS のスタックは、第 1 部の 4 つに、CloudFront の `gekko13-edge` を足して 5 つ。台は 0 台。今の作りは、第 1 部のアプリと、確認用のサービス（edge-check）を載せたまま。入口は VPC origin（A の組が使われている）。
 
 ## 年表
 | 日付 | 実施 | 結果 | 費用 |
@@ -19,6 +20,9 @@
 | 2026-11-18 | C-1c: 台を入れ替えて、送り先を向け直した | 向け直してから約 100 秒で届いた。入れ替えた台の 1 つで、IPv6 のポートが拒まれた。原因は分からない（[findings 4-2](findings.md#4-2-台が入れ替わると送り先を向け直すまで届かず向け直してから約-100-秒で届いた)、[4-3](findings.md#4-3-ある台でipv6-で公開したポートがある時間だけ拒まれた原因は分からない)）。そのあと台を 0 にした | EC2 が 2 台で約 1 時間 40 分、約 0.07 ドル（推定）。CloudFront はごく小さい（推定） |
 | 2026-11-19 | C-4: ローカルで、最小の認可サーバー（`services/auth`）を立て、`scripts/c4-check.ts` で判定した | 1 回目は 6/7。交換（C4-5）が、元のトークンの保存に利用者がなくて拒まれた（[findings 4-5](findings.md#4-5-spring-authorization-server-の交換は元のトークンの保存に利用者がないと説明なしの-invalid_grant-で拒んだ)）。直して 7/7 | 0 |
 | 2026-11-19 | SVID の入れ替わりで、鍵も替わるかを確かめた | 3 回とも鍵が替わった。公開鍵に結ぶ方法でも、入れ替わりのあとは使えない（[findings 4-7](findings.md#4-7-spire-はsvid-を入れ替えるたびに鍵の組も新しく作った)） | 0 |
+| 2026-11-19 | C-1b: サブネットをプライベートにし（EIGW、IGW への経路なし）、入口を VPC origin に替えた（`aws/deploy.sh`、`aws/edge-point.sh`） | 届いた。最初の作りで 596 秒。台から見た送り主は、予測（VPC の IPv4）と違い、CloudFront の公開 IPv4 だった（[findings 4-8](findings.md#4-8-cloudfront-はプライベートのサブネットの台に-vpc-origin-で届きパスで-2-つの受け口に振り分けた台から見た送り主はcloudfront-の公開-ipv4-だった)） | — |
+| 2026-11-19 | C-2: 持ち主が、Windows の Edge と Windows Hello で、パスキーの登録と署名を試した | 4 件とも合格（[findings 4-10](findings.md#4-10-配信の既定のドメインを-rp-id-にしてパスキーを登録し別のパスの受け口で文書のハッシュに署名できたcloudfrontnet-は-rp-id-にできなかった)） | — |
+| 2026-11-19〜20 | B4: 台を入れ替えて、VPC origin を向け直した | 1 回目は、CloudFront が 409 で拒み、スタックが巻き戻った。VPC origin を A と B の 2 組にして、192 秒と 348 秒で届いた（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）。そのあと台を 0 にした | EC2 が 2 台で約 1 時間 20 分、約 0.06 ドル（推定）。CloudFront はごく小さい（推定） |
 
 ## 決めたこと
 - 2026-11-18: 持ち主の目的を、検証の軸にする。「AI による提案」と「人間による承認」を、当事者の自己申告に依らず第三者が認証でき、事後の監査に耐えるようにする。
@@ -31,7 +35,9 @@
 - 2026-11-18: 入口の経路（CloudFront から台の公開 IPv6 へ、AAAA だけの名前で）を、design-decisions に「提案」として書いた。送り先の名前に第三者の DNS（sslip.io）を使うかは、段 D で持ち主と決める。
 - 2026-11-19: 段 C の順を、C-4（ローカル）、C-2 と C-1b（AWS で一度に）、C-3 にした。入口は、第三者の DNS に頼らない VPC origin に替える方向で、C-1b で確かめる（2026-11-18 の「C-1b は行わない」を改める）。持ち主が承認した。
 - 2026-11-19: C-4 の認可サーバーは、java-spiffe を使わず、spiffe-helper の PEM を Spring Boot の SSL バンドルで読む。plan.md の予測の「java-spiffe など」の範囲なので、基準は変えない。
+- 2026-11-19: 入口を VPC origin にする。台を入れ替えたときの向け直しは、VPC origin の A と B の 2 組を切り替える形にする（計画で決めておいた代わりの形）。sslip.io の入口は廃止した。
+- 2026-11-19: サブネットに IPv4 の経路がなくなったので、`aws/deploy.sh` の公開 IPv4 の引数を止めた。
 
 ## 次の候補（未実施）
-- 段 C の C-2 と C-1b を、小さな計画にして承認を得てから、AWS で確かめる（[plan.md の 3 節](plan.md#3-段-c-のケースと予測)）。C-2（パスキーの RP ID）は、C-1 の配信の名前を使う。そのあと C-3。
+- 段 C の C-3 を、小さな計画にして承認を得てから、AWS で確かめる。C-3 では、Keycloak と Spring Authorization Server を載せ、台の大きさと、使えるまでの時間を測る（[plan.md の 3 節](plan.md#3-段-c-のケースと予測)）。
 - 段 C の結果を見て、段 D の作り（アプリの入れ替え）を計画する。
