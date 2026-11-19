@@ -25,7 +25,18 @@
 ```sh
 npm test
 ```
-期待する結果: 型の検査と lint が通り、単体のテストが `11 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。
+期待する結果: 型の検査と lint が通り、単体のテストが `11 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバー（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
+
+## 認可サーバーをローカルで確かめる
+`local/up.sh` は、第 1 部のサービスに加えて、認可サーバー（`services/auth`、Spring Authorization Server）を立てる。イメージは `services/auth/Dockerfile` から作り、ビルドの中で `mvn test` を回す。段 C の C-4 の判定は、次のとおりに回す。
+
+```sh
+SVID_TTL=120 local/up.sh
+node scripts/c4-check.ts
+local/down.sh
+```
+
+期待する結果: `7/7 合格` と出る。最後の C4-7 は、SVID が入れ替わるのを待つので、1〜2 分かかる。`SVID_TTL` を付けないと、待ちは約 3 分になる。判定の中身は [findings 4-4](findings.md#4-4-spring-authorization-server-はenvoy-なしで-svid-の-mtls-を自分で終え交換したトークンを呼び手の-svid-の証明書に結んだ)。
 
 ## AWS で作る
 作る前に、変更をコミットしておく。イメージのタグはコミットから作り、変更が残っていれば `-dirty` を付ける。同じ `-dirty` のタグでは、中身を直しても古いイメージが使われる（ECR のタグは変えられない）。

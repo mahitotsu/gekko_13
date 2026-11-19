@@ -9,6 +9,7 @@
 | SPIRE | 1.15.3 |
 | spiffe-helper | 0.11.0 |
 | Node.js | 24 |
+| Java、Spring Boot、Spring Authorization Server | 21（Eclipse Temurin）、3.5.16、1.5.8 |
 | AWS CLI | 2.38.1 |
 | ローカルの docker | 29.1.3（WSL2、cgroup v2） |
 | AWS の台 | t4g.small、ECS 用の Amazon Linux 2023（arm64）の推奨の AMI |
@@ -42,6 +43,9 @@
 | 4-1 | CloudFront は、送り先の IP の種類を ipv6 にすると、IPv6 だけの台に届いた。既定の ipv4 では届かなかった |
 | 4-2 | 台が入れ替わると、送り先を向け直すまで届かず、向け直してから約 100 秒で届いた |
 | 4-3 | ある台で、IPv6 で公開したポートが、ある時間だけ拒まれた。原因は分からない |
+| 4-4 | Spring Authorization Server は、Envoy なしで SVID の mTLS を自分で終え、交換したトークンを呼び手の SVID の証明書に結んだ |
+| 4-5 | Spring Authorization Server の交換は、元のトークンの保存に利用者がないと、説明なしの invalid_grant で拒んだ |
+| 4-6 | SVID が入れ替わると、前の証明書に結んだトークンは、交換の actor_token に使えなくなった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -348,9 +352,53 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 </details>
 
+### 4-4. Spring Authorization Server は、Envoy なしで SVID の mTLS を自分で終え、交換したトークンを呼び手の SVID の証明書に結んだ
+**結論:** 認可サーバー（`services/auth`）は、spiffe-helper が書いた PEM を Spring Boot の SSL バンドルで読み、Tomcat で mTLS を終えた。C-4 の判定の 7 件（C4-1〜C4-7）は、すべて合格した。
+
+- 証明書を示さない呼び手と、別の SVID で名乗った呼び手は、`401 invalid_client` で拒まれた。SPIRE 以外の CA の証明書は、TLS の握手で拒まれた。
+- bff の SVID で得たトークンと、交換で得たトークンには、bff の証明書の拇印の `cnf.x5t#S256` が入った。交換で得たトークンには、`act.sub`（`bff-client`）も入った。
+- bff のトークンを盗んだ transfer が交換を求めると、自分の SVID で正しく認証しても、`invalid_grant` で拒まれた。
+- SVID が入れ替わると、認可サーバーは再起動なしで新しい証明書を示した。新しい SVID で得たトークンは、新しい拇印に結ばれた。
+
+`act.sub` は SPIFFE ID ではなく、窓口の client_id になる。SPIFFE ID は、窓口の登録で client_id に結ぶ。起動の時間とメモリは、C-3 の見当にする。ローカルの x86 の機械では、Spring の起動が 5〜7 秒、メモリは約 240 MB（上限 512 MB）、イメージは約 510 MB だった。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `SVID_TTL=120 local/up.sh`、`node scripts/c4-check.ts`（2026-11-19）
+- 結果: `7/7 合格`。C4-4 は `SSL alert number 46`（certificate unknown）。C4-6 は `subject_token does not allow the requester to act`。C4-7 は、auth の SVID のシリアルが変わったあと、示す証明書のシリアルが新しいファイルと一致した。読み直しは、Tomcat のログ `certificate … configured from keystore`（`ssl-bundle-watcher` のスレッド）で分かる。
+- 起動の時間は `Started AuthApplication in 5.116 seconds` と `7.175 seconds`。メモリは `docker stats` で 236 MiB。
+- Tomcat は起動のとき、「JSSE の TLS 1.3 は、握手のあとの認証（PHA）に対応しないので、任意のクライアント証明書（`client-auth: want`）と両立しない」と警告した。証明書は最初の握手で求めるので、判定には影響しなかった。
+
+</details>
+
+### 4-5. Spring Authorization Server の交換は、元のトークンの保存に利用者がないと、説明なしの invalid_grant で拒んだ
+**結論:** client_credentials で出したトークンを、交換の元（subject_token）にすると、標準の交換の部品は、説明のない `invalid_grant` を返した。部品は、元のトークンの保存に利用者（`java.security.Principal` の属性）があることを求める。client_credentials の保存には、その属性が入らない。C-4 では、仮の窓口（user-standin）のトークンに限り、交換の前にこの属性を足した（`StandinSubjectPrincipal`）。段 D では、ログインサーバーのトークンを取り込むときに入れる。gekko_11 の認可サーバーも、取り込むときにこの属性を入れていた。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `node scripts/c4-check.ts` の C4-5（2026-11-19）。`javap -c` で `OAuth2TokenExchangeAuthenticationProvider`（1.5.8）を読んだ。
+- 結果: 属性を足す前は `400 {"error":"invalid_grant"}`。部品は、`OAuth2Authorization.getAttribute(Principal)` が空なら、`invalid_grant` を投げていた。足したあとは 200。
+
+</details>
+
+### 4-6. SVID が入れ替わると、前の証明書に結んだトークンは、交換の actor_token に使えなくなった
+**結論:** bff の SVID が入れ替わったあと、入れ替わる前に得た bff のトークンを actor_token にして、新しい SVID で交換を求めると、`actor_token is not bound to the requester certificate` で拒まれた。actor_token は、いま示す証明書に結ばれていることを確かめる作りなので、意図どおりである。段 D の呼び手は、SVID が入れ替わったら、自分のトークンを取り直す必要がある。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `node scripts/c4-check.ts` の C4-7 の参考の行（2026-11-19、`SVID_TTL=120`）
+- 結果: `400 {"error_description":"actor_token is not bound to the requester certificate","error":"invalid_grant"}`
+
+</details>
+
 ## 5. 未確認
 - AZ がまるごと落ちたときと、server のタスクや台が突然消えたときに、server が何分で起き直すか（3-5）。移し先に台がなければ、台を起こすところから始まる。
 - 0 台から起こすとき、マネージドスケーリングがなぜ 2 台と見積もるか（3-2）。
 - CloudFront を通らずに、台の IPv6 の 8080 へ直接つなぐと拒まれるか（4-1）。手元から IPv6 で外に出られず、確かめていない。セキュリティグループは、CloudFront の送り先向けのアドレスからだけを受ける。
 - ある台で、IPv6 で公開したポートが拒まれた原因（4-3）。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。
+- Java のサービスが外を呼ぶ側の mTLS（要求ごとにつなぎ直し、そのときの SVID で示すか）。C-4 では、呼び手は Node だった。段 D で、Java のサービスが別のサービスを呼ぶときに確かめる。
+- t4g.small（arm64）の上での、認可サーバーの起動の時間とメモリ（4-4 はローカルの x86 の値）。C-3 で確かめる。

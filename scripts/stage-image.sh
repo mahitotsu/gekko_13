@@ -6,6 +6,8 @@ OUT=local/run/image
 rm -rf "$OUT" && mkdir -p "$OUT"
 cp package.json package-lock.json "$OUT/"
 cp -r packages services "$OUT/"
+# 認可サーバー（Java）は、services/auth/Dockerfile で別のイメージにする
+rm -rf "$OUT/services/auth"
 find "$OUT" -type d -name test -prune -exec rm -rf {} +
 # AWS でシナリオを回す実行役（ECS のタスク gekko13-probe）と、3-e の偽の証明書
 mkdir -p "$OUT/scripts" && cp scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh "$OUT/scripts/"

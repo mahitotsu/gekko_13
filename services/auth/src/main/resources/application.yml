@@ -1,0 +1,28 @@
+# 認可サーバーは、SVID で TLS を自分で終える。spiffe-helper が SVID_DIR に書き、入れ替わったら読み直す（reload-on-update）。
+# 証明書を示さない呼び手（client_secret の窓口）も受けるので、client-auth は want にする。示された証明書は、SPIRE のバンドルで確かめる。
+server:
+  port: 8443
+  ssl:
+    bundle: svid
+    client-auth: want
+spring:
+  ssl:
+    bundle:
+      watch:
+        file:
+          quiet-period: 1s
+      pem:
+        svid:
+          reload-on-update: true
+          keystore:
+            certificate: file:${SVID_DIR:/svid}/svid.pem
+            private-key: file:${SVID_DIR:/svid}/svid_key.pem
+          truststore:
+            certificate: file:${SVID_DIR:/svid}/svid_bundle.pem
+gekko:
+  issuer: ${ISSUER:https://auth:8443}
+  trust-domain: ${TRUST_DOMAIN:gekko13.internal}
+  standin-secret: ${STANDIN_SECRET}
+logging:
+  level:
+    org.springframework.boot.ssl: info

@@ -15,10 +15,13 @@ NET=gekko13
 SPIRE=1.15.3
 HELPER=ghcr.io/spiffe/spiffe-helper:0.11.0
 IMAGE=gekko13/node:local
+AUTH_IMAGE=gekko13/auth:local
 SERVICES=(bff transfer ledger)
+# 認可サーバー（Java。段 C の C-4）。Node のサービスとはイメージが違うので、別に立てる
+JAVA_SERVICES=(auth)
 
 mkdir -p run/bundle
-for s in "${SERVICES[@]}"; do mkdir -p "run/svid/$s"; done
+for s in "${SERVICES[@]}" "${JAVA_SERVICES[@]}"; do mkdir -p "run/svid/$s"; done
 
 # 模擬の発行者の client の秘密。local/down.sh で消える
 if [ ! -f run/issuer.env ]; then
@@ -41,8 +44,11 @@ EOF
   printf 'CLIENT_ID=transfer-client\nCLIENT_SECRET=%s\n' "$TRANSFER_SECRET" > run/transfer.env
   : > run/ledger.env
 fi
+# 認可サーバーの、利用者の代わりの窓口（user-standin）の client_secret
+[ -f run/auth.env ] || printf 'STANDIN_SECRET=%s\n' "$(openssl rand -hex 16)" > run/auth.env
 
 docker build -q -t "$IMAGE" -f ../Dockerfile "$(../scripts/stage-image.sh)" >/dev/null
+docker buildx build -q --load -t "$AUTH_IMAGE" ../services/auth >/dev/null
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 docker volume create gekko13-agent-sockets >/dev/null
 
@@ -59,7 +65,7 @@ until srv healthcheck >/dev/null 2>&1; do sleep 1; done
 srv bundle show > run/bundle/bundle.crt
 JOIN_TOKEN=$(srv token generate -spiffeID "$NODE_ID" -ttl 600 | awk '/^Token:/ {print $2}')
 
-for s in "${SERVICES[@]}"; do
+for s in "${SERVICES[@]}" "${JAVA_SERVICES[@]}"; do
   srv entry create -parentID "$NODE_ID" -spiffeID "spiffe://$TD/svc/$s" -x509SVIDTTL "$SVID_TTL" \
     -selector "docker:label:com.amazonaws.ecs.task-definition-family:gekko13-$s" \
     -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper" >/dev/null
@@ -73,27 +79,41 @@ run --name gekko13-spire-agent --pid host \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   "ghcr.io/spiffe/spire-agent:$SPIRE" -config /etc/spire/agent.conf -joinToken "$JOIN_TOKEN"
 
-declare -A PORT=([bff]=18080 [transfer]=18443 [ledger]=28443)
-declare -A INNER=([bff]=8080 [transfer]=8443 [ledger]=8443)
+declare -A PORT=([bff]=18080 [transfer]=18443 [ledger]=28443 [auth]=19443)
+declare -A INNER=([bff]=8080 [transfer]=8443 [ledger]=8443 [auth]=8443)
 declare -A EXTRA=(
   [bff]="-e NEXT_URL=https://transfer:8443 -e NEXT_ID=spiffe://$TD/svc/transfer"
   [transfer]="-e NEXT_URL=https://ledger:8443 -e NEXT_ID=spiffe://$TD/svc/ledger -e CALLERS={\"spiffe://$TD/svc/bff\":\"bff-client\"}"
   [ledger]="-e CALLERS={\"spiffe://$TD/svc/transfer\":\"transfer-client\"}"
 )
 
-for s in "${SERVICES[@]}"; do
-  # ホストの利用者で書く。シナリオの実行役が「盗まれた鍵」として読めるようにするため（検証でだけ）
+# 各サービスの svid-helper。ホストの利用者で書く。シナリオの実行役が「盗まれた鍵」として読めるようにするため（検証でだけ）
+helper() {
+  local s=$1
   run --name "gekko13-$s-helper" --user "$(id -u):$(id -g)" \
     --label "com.amazonaws.ecs.task-definition-family=gekko13-$s" --label "com.amazonaws.ecs.container-name=svid-helper" \
     -v gekko13-agent-sockets:/run/spire/sockets:ro \
     -v "$HERE/helper/helper.conf:/etc/helper/helper.conf:ro" \
     -v "$HERE/run/svid/$s:/svid" \
     "$HELPER" -config /etc/helper/helper.conf
+}
+
+for s in "${SERVICES[@]}"; do
+  helper "$s"
   # shellcheck disable=SC2086
   run --name "gekko13-$s" --network-alias "$s" \
     --label "com.amazonaws.ecs.task-definition-family=gekko13-$s" --label "com.amazonaws.ecs.container-name=app" \
     --env-file run/common.env --env-file "run/$s.env" -e "SERVICE=$s" ${EXTRA[$s]} \
     -v "$HERE/run/svid/$s:/svid:ro" \
     -p "127.0.0.1:${PORT[$s]}:${INNER[$s]}" "$IMAGE"
+done
+# 認可サーバーは、メモリを 512 MB に絞って動かす（段 C の C-3 の見当にする）
+for s in "${JAVA_SERVICES[@]}"; do
+  helper "$s"
+  run --name "gekko13-$s" --network-alias "$s" --memory 512m \
+    --label "com.amazonaws.ecs.task-definition-family=gekko13-$s" --label "com.amazonaws.ecs.container-name=app" \
+    --env-file "run/$s.env" -e SVID_DIR=/svid -e ISSUER=https://auth:8443 \
+    -v "$HERE/run/svid/$s:/svid:ro" \
+    -p "127.0.0.1:${PORT[$s]}:${INNER[$s]}" "$AUTH_IMAGE"
 done
 echo "立ち上げた。SVID が届くまで数秒かかる: ls local/run/svid/*"
