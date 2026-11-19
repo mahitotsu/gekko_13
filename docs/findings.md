@@ -46,6 +46,7 @@
 | 4-4 | Spring Authorization Server は、Envoy なしで SVID の mTLS を自分で終え、交換したトークンを呼び手の SVID の証明書に結んだ |
 | 4-5 | Spring Authorization Server の交換は、元のトークンの保存に利用者がないと、説明なしの invalid_grant で拒んだ |
 | 4-6 | SVID が入れ替わると、前の証明書に結んだトークンは、交換の actor_token に使えなくなった |
+| 4-7 | SPIRE は、SVID を入れ替えるたびに、鍵の組も新しく作った |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -391,6 +392,17 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 - コマンド: `node scripts/c4-check.ts` の C4-7 の参考の行（2026-11-19、`SVID_TTL=120`）
 - 結果: `400 {"error_description":"actor_token is not bound to the requester certificate","error":"invalid_grant"}`
+
+</details>
+
+### 4-7. SPIRE は、SVID を入れ替えるたびに、鍵の組も新しく作った
+**結論:** bff の SVID が 3 回入れ替わる間、証明書の公開鍵を比べると、3 回とも前と違った。秘密鍵のファイルの公開鍵も、毎回証明書と一致した。証明書だけでなく鍵も替わるので、トークンを証明書（`x5t#S256`）ではなく公開鍵（DPoP の `jkt` など）に結んでも、入れ替わりのあとは使えない。SVID に結んだトークンは、入れ替わるたびに取り直す必要がある（4-6）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `openssl x509 -noout -pubkey` と `openssl pkey -pubout` の SHA-256 を、`local/run/svid/bff/` のシリアルが変わるたびに比べた（2026-11-19、ローカル、`SVID_TTL=120`）。
+- 結果: 入れ替わりは約 55 秒ごとに 3 回。公開鍵の SHA-256 は 4 つとも違い、毎回 `svid.pem` と `svid_key.pem` の公開鍵は一致した。鍵は EC の P-256。
 
 </details>
 
