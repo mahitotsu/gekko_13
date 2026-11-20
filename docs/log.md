@@ -43,7 +43,9 @@
   - 終点: CloudFront を通して Keycloak のレルムの discovery が配信の名前を issuer にして返り、かつ auth のログに起動の完了が出た時刻。VPC origin の向け直しも含める（0 台から起こすと、いつも新しい台になるため）。
   - 判定: 3 回測り、3 回とも 600 秒以内なら予測どおり。台は t4g.medium の 1 台（`GEKKO13_MAX_HOSTS=1`）。30 分置いて、メモリの不足で止まったタスクがないことも見る。
 - 2026-11-20: C-3 では、Keycloak の保存先を使い捨て（dev-file）にする。CloudFront の `/login/*`（台の 8081）は Keycloak に充てる（[design-decisions](design-decisions.md)）。C-2 のパスキーの試しの画面は使えなくなる。持ち主が承認した。
+- 2026-11-20: 段 D の入口は、VPC origin から内部向けの ALB を指す形にする。VPC origin が 1 つの資源しか指せず、台を直接指す今の形では、冗長、可用性、伸縮のどれも満たせないため（持ち主の指摘）。ALB の固定費（月約 17.7 ドル、料金の API、2026-11-20）は、持ち主が承認した。C-3 は、今の入口（台を直接指す形）のまま測る（[design-decisions](design-decisions.md)）。
 
 ## 次の候補（未実施）
 - 持ち主に確かめてから、C-3 を AWS で測る（[runbook の C-3 の節](runbook.md#段-c-の-c-3-を測る)）。結果は findings の 4-11 に書く。
+- 段 D の計画で、入口の ALB の作り（2 つの AZ のサブネット、リスナーの規則、ECS のターゲットの登録）を決める。
 - 段 C の結果を見て、段 D の作り（アプリの入れ替え）を計画する。
