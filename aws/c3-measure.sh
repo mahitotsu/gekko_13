@@ -40,9 +40,11 @@ mark() { [ -n "${AT[$1]:-}" ] || { AT[$1]=$(( $(now) - T0 )); echo "  +${AT[$1]}
 # ログの時刻（ミリ秒）から、始点からの秒を出す
 log_time() {
   local ms
+  # CLI はページごとに --query を当てるので、空のページの「None」と時刻が混ざって出る。数字だけを取り、最も早いものを使う
   ms=$(aws logs filter-log-events --region "$REGION" --log-group-name "$LOG_GROUP" --log-stream-name-prefix "$1" \
-    --filter-pattern "\"$2\"" --start-time "$((T0 * 1000))" --query 'events[0].timestamp' --output text 2>/dev/null || echo None)
-  [ "$ms" = None ] || echo $(( ms / 1000 - T0 ))
+    --filter-pattern "\"$2\"" --start-time "$((T0 * 1000))" --query 'events[].timestamp' --output text 2>/dev/null |
+    tr -s '\t ' '\n' | grep -E '^[0-9]+$' | sort -n | head -1 || true)
+  [ -z "$ms" ] || echo $(( ms / 1000 - T0 ))
 }
 
 DEADLINE=$((T0 + 2400))
