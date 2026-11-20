@@ -54,6 +54,8 @@
 | 4-12 | 日本語のコメントを含めた ECS のテンプレートは、直接送れる大きさ（51,200 バイト）を超えた |
 | 4-13 | spiffe-helper は root で動き、鍵を 0600 で書いたので、root でない利用者のアプリは鍵を読めなかった |
 | 4-14 | ECS のスタックの更新が止まる前に起きた台は、古い起動テンプレートのまま残った |
+| 4-15 | 入口を内部向けの ALB にすると、台が 0 の状態から約 3 分で使え、2 つの AZ のどちらの台にも届いた |
+| 4-16 | ALB を指す VPC origin を作るのに約 9 分、配信の切り替えに約 1 分、古い VPC origin を消すのに約 7 分かかった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -518,6 +520,40 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 - 2026-11-20。ECS のサービスのイベント: `was unable to place a task. Reason: TaskFailedToStart: RESOURCE:MEMORY`。台の登録メモリは 1,846 MiB、残りは 182 MiB だった。
 - `aws/scale.sh down` のあと、`Successfully created/updated stack - gekko13-ecs`。
+
+</details>
+### 4-15. 入口を内部向けの ALB にすると、台が 0 の状態から約 3 分で使え、2 つの AZ のどちらの台にも届いた
+**結論:** 段 D の D0 を 3 回測り、3 回とも予測（300 秒以内）に収まった。終点は 193 秒、178 秒、166 秒で、C-3（369〜402 秒、[4-11](#4-11-t4gmedium-1-台に-keycloak-と認可サーバーが載り台が-0-の状態から約-67-分で使えたいちばん長いのは-vpc-origin-の向け直しだった)）の半分ほどになった。VPC origin の向け直しがなくなったためである。どの回も、CloudFront を通した edge-check の応答に、2 つの AZ（ap-northeast-1a と ap-northeast-1c）が現れた。
+
+最後に待ったのは、3 回とも auth の起動だった。auth は、SPIRE server が動き、SVID が書かれてから起動するので、server の起動を待つ分だけ遅れる（推定）。Keycloak は、ALB が健康と判定するより前に、CloudFront から応えることがあった。ALB は、健康なターゲットが 1 つもないとき、全部のターゲットに送る（fail open）ためとみられる（推定）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `GEKKO13_AZS=2 GEKKO13_INSTANCE_TYPE=t4g.medium GEKKO13_MAX_HOSTS=2 aws/deploy.sh`、`aws/d0-measure.sh`（2026-11-20〜21、コミット `9637703`）。測り方の定義は [log.md](log.md#決めたこと) の 2026-11-21 の決定。
+- 結果（始点からの秒）:
+
+| 回 | 台が ASG に加わった | Keycloak が応えた | 2 つめの AZ が応えた | 終点（auth の起動） |
+|---|---|---|---|---|
+| 1 | 109 | 182 | 183 | 193 |
+| 2 | 89 | 162 | 153 | 178 |
+| 3 | 70 | 155 | 125 | 166 |
+
+- 0 台から起こすと、どの回も 2 台が同じ時刻に ASG に加わった。edge-check の 2 タスクを別の台に置く制約（distinctInstance）で、2 台が要ると見積もられたとみられる（推定）。
+- 1 回目は、Keycloak が CloudFront から応えたのが 182 秒で、ALB のターゲットが健康になったのは 202 秒だった（`describe-target-health`）。
+- ECS が RUNNING を返す時刻は、CloudFront から応えた時刻より遅いことがあった（4-11 と同じ）。
+- デプロイのあとの確かめで、`/edge-point` を 8 回呼ぶと、2 つの AZ に 4 回ずつ届いた。
+
+</details>
+
+### 4-16. ALB を指す VPC origin を作るのに約 9 分、配信の切り替えに約 1 分、古い VPC origin を消すのに約 7 分かかった
+**結論:** 入口を、台を指す VPC origin の 4 つ（A と B の組）から、ALB を指す VPC origin 1 つに作り替えた。1 回のスタックの更新で、CloudFormation は新しい VPC origin を作り、配信を切り替え、古い 4 つを並べて消した。切り替えの間も、配信の名前（RP ID）は変わらなかった。VPC origin を作るのと消すのは、どちらも数分かかるので、ALB は作り直さない（[design-decisions](design-decisions.md)）。
+
+<details>
+<summary>根拠</summary>
+
+- スタック `gekko13-edge` の出来事（2026-11-20、UTC）: `AlbVpcOrigin` の作成 15:27:18〜15:36:30、`Distribution` の更新 15:36:32〜15:37:37、古い 4 つの削除 15:37:39〜15:44:48。
+- 切り替えのあとも、`DomainName` は前と同じだった。
 
 </details>
 
