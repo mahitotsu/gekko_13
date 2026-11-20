@@ -92,10 +92,10 @@ aws/edge-point.sh
 
 ```sh
 aws/scale.sh down
-aws/c3-measure.sh        # 30 分置く分を含めて、約 40 分。引数に 0 を渡すと、置かずに終わる
+aws/c3-measure.sh 10     # 10 分置く分を含めて、約 20 分。引数に 0 を渡すと、置かずに終わる
 ```
 
-期待する結果: `+N 秒: …` の行が、出来事の順に出る（台が ASG に加わる、各サービスが RUNNING になる、向け直し、Keycloak が応える、auth が起動する）。最後に表と `判定（600 秒以内か）` が出て、`local/run/c3/<時刻>/result.md` に残る。30 分置いたあとは、止まったタスクと、サービスごとのメモリの最大が出る。台は動いたままなので、次の回の前と、終わったあとに `aws/scale.sh down` を回す。測り終えたら、`GEKKO13_CONTAINER_INSIGHTS` を付けずに `aws/deploy.sh` を回して、メモリの測定を止める。`local/down.sh` は `local/run/` を消すので、結果は先に写す。
+期待する結果: `+N 秒: …` の行が、出来事の順に出る（台が ASG に加わる、各サービスが RUNNING になる、向け直し、Keycloak が応える、auth が起動する）。最後に表と `判定（600 秒以内か）` が出て、`local/run/c3/<時刻>/result.md` に残る。置いたあとは、止まったタスクと、サービスごとのメモリの最大が出る。台は動いたままなので、次の回の前と、終わったあとに `aws/scale.sh down` を回す。測り終えたら、`GEKKO13_CONTAINER_INSIGHTS` を付けずに `aws/deploy.sh` を回して、メモリの測定を止める。`local/down.sh` は `local/run/` を消すので、結果は先に写す。
 
 ## 後片付け
 台を 0 にするだけなら、`aws/scale.sh down` で足りる。全部を消すときは、スタックを作った順の逆に消す。消す前に、対象を一覧で確かめる。
@@ -147,4 +147,7 @@ SSM のパラメーター 5 つは、スタックの外で作ったので、`aws
 - **BFF や transfer のトークンの交換が `400 invalid_client` で落ちる:** SSM の client の秘密が、Cognito の値と違う。`aws/deploy.sh` をもう一度実行して入れ直し、bff と transfer を起こし直す（`aws ecs update-service --force-new-deployment`）。ECS は、秘密をタスクの起動のときに読む（[findings 2-7](findings.md#2-7-aws-cli-2381-は標準入力からの値の渡し方の一部で失敗し--output-text-は末尾に改行を付けた)）。
 - **実行役が「利用者のトークンを得られない」で止まる:** リフレッシュトークンの有効期限（60 分）が切れた。`node scripts/aws-login.ts` からやり直す。
 - **ホストの中を見たい:** IPv6 だけの台は、Session Manager に登録されなかった（[findings 2-11](findings.md#2-11-ipv6-だけの台はsession-manager-に登録されなかった)）。サブネットに IPv4 の経路がないので、公開 IPv4 を付けて入る逃げ道もない（`aws/deploy.sh` は 2 つめの引数を受け付けない）。中の様子は、CloudWatch Logs と ECS の API で見る。
+- **`aws/deploy.sh` が「Templates with a size greater than 51,200 bytes」で止まる:** 送る前のコメントの除去が効いていない。`aws/deploy.sh` は ECS のテンプレートの行頭のコメントを除いてから送る。コメントでない行が増えて 51,200 バイトを超えたら、テンプレートを分ける（[findings 4-12](findings.md#4-12-日本語のコメントを含めた-ecs-のテンプレートは直接送れる大きさ51200-バイトを超えた)）。
+- **起動テンプレートを変えたのに、台が古いまま:** スタックの更新の前から起きていた台は、古い起動テンプレートのまま残る。台の大きさを変えたときは、`aws/scale.sh down` で 0 にしてから起こす（[findings 4-14](findings.md#4-14-ecs-のスタックの更新が止まる前に起きた台は古い起動テンプレートのまま残った)）。
+- **auth が「Error reading certificate or key from file」で起きない:** 台の helper の設定（`/etc/gekko13/spire/helper.conf`）に `key_file_mode = 0640` がない。古い起動テンプレートの台で起きる。台を入れ替える（[findings 4-13](findings.md#4-13-spiffe-helper-は-root-で動き鍵を-0600-で書いたのでroot-でない利用者のアプリは鍵を読めなかった)）。
 - **`aws/edge-point.sh` が「VPC origin is currently associated」で巻き戻る:** 配信が使っている組を書き換えようとした。スタックのパラメーター（`ActiveSlot`、`InstanceArnA`、`InstanceArnB`）が、手で変えられて食い違っていないかを確かめる（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）。

@@ -50,6 +50,10 @@
 | 4-8 | CloudFront は、プライベートのサブネットの台に VPC origin で届き、パスで 2 つの受け口に振り分けた。台から見た送り主は、CloudFront の公開 IPv4 だった |
 | 4-9 | CloudFront は、配信が使っている VPC origin の更新を拒んだ。VPC origin を 2 組持って切り替えると、向け直しは 3〜6 分だった |
 | 4-10 | 配信の既定のドメインを RP ID にして、パスキーを登録し、別のパスの受け口で文書のハッシュに署名できた。cloudfront.net は RP ID にできなかった |
+| 4-11 | t4g.medium 1 台に Keycloak と認可サーバーが載り、台が 0 の状態から約 6〜7 分で使えた。いちばん長いのは VPC origin の向け直しだった |
+| 4-12 | 日本語のコメントを含めた ECS のテンプレートは、直接送れる大きさ（51,200 バイト）を超えた |
+| 4-13 | spiffe-helper は root で動き、鍵を 0600 で書いたので、root でない利用者のアプリは鍵を読めなかった |
+| 4-14 | ECS のスタックの更新が止まる前に起きた台は、古い起動テンプレートのまま残った |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -456,6 +460,66 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 - `cloudfront.net` のとき: `SecurityError: The relying party ID is not a registrable domain suffix of, nor equal to the current domain. Subsequently, an attempt to fetch the .well-known/webauthn resource of the claimed RP ID failed.` Edge は、拒む前に、別の名前を許す仕組み（Related Origin Requests）のファイルを取りに行っていた。
 
 </details>
+### 4-11. t4g.medium 1 台に Keycloak と認可サーバーが載り、台が 0 の状態から約 6〜7 分で使えた。いちばん長いのは VPC origin の向け直しだった
+**結論:** 段 C の C-3 を 3 回測り、3 回とも予測（台を起こしてから使えるまで 10 分以内）の内に収まった。終点は 369 秒、370 秒、402 秒。測り方の定義は [log.md の 2026-11-20 の決定](log.md#決めたこと) のとおりで、VPC origin の向け直しを含む。全部のサービスが t4g.medium 1 台に載り、10 分置いても、メモリの不足で止まったタスクは 0 件だった。
+
+時間の内訳では、向け直し（約 3〜4 分）がいちばん長かった。台が ASG に加わるまでが約 2 分、Keycloak と auth の起動は、それぞれ台の上で数十秒だった。入口を内部向けの ALB にすると、向け直しが要らなくなる（[design-decisions](design-decisions.md)）。その場合、使えるまでは約 4 分になる見込み（推定。auth の起動の約 220 秒に、ALB のターゲットの登録と健康の確認の時間が足される）。
+
+メモリの最大は、Keycloak が約 530 MiB（上限 1 GiB）、auth が約 200 MiB（上限 512 MiB）だった。全部のタスクを合わせると約 1.1 GB で、t4g.small の物理のメモリには収まる値だった。ただし、今のメモリの上限（Keycloak 1 GiB、auth 512 MiB）では、t4g.small に置けない（4-14 の台で、auth が `RESOURCE:MEMORY` で置けなかった）。t4g.small は試していない。要求を流さずに置いただけなので、負荷をかけたときのメモリは分からない。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `GEKKO13_INSTANCE_TYPE=t4g.medium GEKKO13_MAX_HOSTS=1 GEKKO13_CONTAINER_INSIGHTS=enabled aws/deploy.sh …`、`aws/c3-measure.sh`（2026-11-20、コミット `20e83ce` のイメージ）。1 回目のあとに 10 分置いた（30 分から縮めた。[log.md](log.md#決めたこと)）。
+- 結果（始点からの秒）:
+
+| 回 | 台が ASG に加わった | Keycloak の起動（ログ） | auth の起動（ログ） | 終点 |
+|---|---|---|---|---|
+| 1 | 114 | 164 | 230 | 369 |
+| 2 | 112 | 175 | 213 | 370 |
+| 3 | 112 | 193 | 217 | 402 |
+
+- 向け直しは、edge-check が RUNNING になった時刻（160〜168 秒）に始め、スタックの更新が 192 秒、193 秒、223 秒だった。どの回も、更新が終わってから 5 秒以内に、Keycloak の discovery が配信の名前を issuer にして返った。
+- メモリの最大（Container Insights の `MemoryUtilized`、1 分ごとの最大、1 回目の 10 分）: keycloak 528、auth 205、bff・transfer・ledger 各 81、edge-check 41、spire-server 20（MiB）。spire-agent（DAEMON）は測っていない。
+- 止まったタスク: spire-agent が 1 件（`Essential container in task exited`）。台を起こした直後に、agent が server より先に起きて止まる既知の動き（推定。agent のログでは確かめていない）。
+- auth の起動は、ECS が RUNNING を返す時刻より早いことがあった（2 回目は 213 秒と 224 秒）。ECS の状態の取り込みが遅れるためとみられる（推定）。
+- Keycloak は `start --optimized` と dev-file で起きた。ローカルの x86 の機械では、起動から discovery が返るまで 27 秒、メモリは約 675 MiB だった（上限 1 GiB）。
+
+</details>
+
+### 4-12. 日本語のコメントを含めた ECS のテンプレートは、直接送れる大きさ（51,200 バイト）を超えた
+**結論:** auth と keycloak を足した ECS のテンプレートは 53,221 バイトで、`aws cloudformation deploy` は「51,200 バイトを超えるテンプレートは S3 のバケットから送る」と拒んだ。日本語は 1 文字 3 バイトなので、コメントが大きさの多くを占める。`aws/deploy.sh` は、送る前に行頭のコメントだけを除く（45,997 バイト）。S3 のバケットは足していない。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/deploy.sh`（2026-11-20、コミット `b5f2368`）。エラー: `Templates with a size greater than 51,200 bytes must be deployed via an S3 Bucket.`
+- 大きさは `wc -c` で測った。コメントを除くのは、`grep -v -E '^[[:space:]]*# '`（UserData のシバン `#!` は残る）。
+
+</details>
+
+### 4-13. spiffe-helper は root で動き、鍵を 0600 で書いたので、root でない利用者のアプリは鍵を読めなかった
+**結論:** AWS の上の auth（利用者 1000 で動く）は、`/svid/svid_key.pem` を読めずに起動に失敗した。spiffe-helper のイメージは root で動き、鍵を既定の 0600 で書く。ローカルでは helper を auth と同じ利用者で動かしていた（`local/up.sh`）ので、この食い違いが出なかった。helper の設定に `key_file_mode = 0640` を足して鍵のグループを root にし、auth を `1000:0` で動かすと、読めた。Node のサービスは root で動くので、影響しない。
+
+<details>
+<summary>根拠</summary>
+
+- エラー: `Unable to create key store: Error reading certificate or key from file 'file:/svid/svid_key.pem'`（2026-11-20）。
+- spiffe-helper 0.11.0 は `cert_file_mode` と `key_file_mode` を受け付けた（手元で、知らない設定だけを `unknown top level key(s)` で拒むことで確かめた）。
+- 直したあと: `Started AuthApplication in 5.477 seconds`。
+
+</details>
+
+### 4-14. ECS のスタックの更新が止まる前に起きた台は、古い起動テンプレートのまま残った
+**結論:** `aws/deploy.sh` は、ECS のスタックを更新する前に、spire-server のタスク数を 1 に戻す（2-9 の対策）。4-12 で更新が送られずに止まったときも、タスク数は 1 になったので、キャパシティプロバイダーが古い起動テンプレート（t4g.small）で台を起こした。そのあと更新が通っても、起きていた台は t4g.small のままで、上限 1 台の下で auth が `RESOURCE:MEMORY` で置けず、スタックの更新が待ち続けた。台を 0 にすると、更新は終わった。起動テンプレートを変える更新のあとは、台を 0 にしてから起こし直す。
+
+<details>
+<summary>根拠</summary>
+
+- 2026-11-20。ECS のサービスのイベント: `was unable to place a task. Reason: TaskFailedToStart: RESOURCE:MEMORY`。台の登録メモリは 1,846 MiB、残りは 182 MiB だった。
+- `aws/scale.sh down` のあと、`Successfully created/updated stack - gekko13-ecs`。
+
+</details>
 
 ## 5. 未確認
 - AZ がまるごと落ちたときと、server のタスクや台が突然消えたときに、server が何分で起き直すか（3-5）。移し先に台がなければ、台を起こすところから始まる。
@@ -465,4 +529,5 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 - ある台で、IPv6 で公開したポートが拒まれた原因（4-3）。VPC origin に替えてからの 3 回の向け直しでは、起きなかった。
 - ECS 用の AMI のルートの容量が 30 GB で足りるか、小さくできるか。
 - Java のサービスが外を呼ぶ側の mTLS（要求ごとにつなぎ直し、そのときの SVID で示すか）。C-4 では、呼び手は Node だった。段 D で、Java のサービスが別のサービスを呼ぶときに確かめる。
-- t4g.small（arm64）の上での、認可サーバーの起動の時間とメモリ（4-4 はローカルの x86 の値）。C-3 で確かめる。
+- t4g.small に、メモリの上限を下げて全部が載るか（4-11）。物理のメモリには収まる値だったが、試していない。
+- 要求を流したときの、Keycloak と auth のメモリ（4-11 は、置いただけの値）。段 D でシナリオを流すときに見る。

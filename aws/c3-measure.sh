@@ -4,14 +4,14 @@
 #   - CloudFront を通して、Keycloak のレルムの discovery が、配信の名前を issuer にして返る（aws/edge-point.sh が待つ）
 #   - auth のログに「Started AuthApplication」が出る
 # VPC origin の向け直し（aws/edge-point.sh）も含める。edge-check のタスクが動き出したら、すぐに向け直しを始める。
-# そのあと HOLD 分（既定 30）置いて、メモリの不足で止まったタスクがないかと、Container Insights のメモリの最大を見る。
+# そのあと HOLD 分（既定 10）置いて、メモリの不足で止まったタスクがないかと、Container Insights のメモリの最大を見る。
 # 結果は local/run/c3/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/c3-measure.sh [HOLD の分。0 で省く]
 # 実行すると費用が出る。終わっても台は動いたまま。使い終わったら aws/scale.sh down で 0 にする。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION=${AWS_REGION:-ap-northeast-1}
-HOLD=${1:-30}
+HOLD=${1:-10}
 CLUSTER=gekko13
 LOG_GROUP=/gekko13/ecs
 SERVICES="spire-server edge-check keycloak auth bff transfer ledger"
