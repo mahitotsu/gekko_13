@@ -346,6 +346,8 @@ Resources:
             svid_key_file_name    = "svid_key.pem"
             svid_bundle_file_name = "svid_bundle.pem"
             daemon_mode           = true
+            cert_file_mode        = 0644
+            key_file_mode         = 0640
             EOF
 
   # 台の数は、キャパシティプロバイダーのマネージドスケーリングが決める（タスクが 0 なら 0 台）。
@@ -885,6 +887,9 @@ Resources:
           Essential: true
           # JVM はこの上限の 75% をヒープにする（services/auth/Dockerfile の MaxRAMPercentage）
           Memory: 512
+          # svid-helper は root で動き、鍵を root のグループで 0640 にして書く（UserData の helper.conf）。
+          # app は root でない利用者のまま、グループだけ root にして鍵を読む（docs/findings.md）
+          User: "1000:0"
           PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
           Environment:
             - { Name: SVID_DIR, Value: /svid }
