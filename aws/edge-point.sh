@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 入口の CloudFront の配信（スタック gekko13-edge）の VPC origin を、確認用のサービス（edge-check）が動いている台に向け、
-# 効くまでの時間を測る（段 C の C-1b）。配信がなければ作る。配信は消さない（RP ID を保つため）。
+# 効くまでの時間を測る（段 C の C-1b）。/login/* は Keycloak（段 C の C-3）。配信がなければ作る。配信は消さない（RP ID を保つため）。
 # CloudFront は、配信に結び付いた VPC origin を更新させない（409）。そこで、使っていない組（A か B）を新しい台に向け、
 # 同じスタックの更新で、配信をその組に切り替える。台が変わっていなければ、何も変えない。
 # CloudFront が VPC に作るグループ（CloudFront-VPCOrigins-Service-SG）を、network のスタックに渡し、台がそこから受けるようにする。
@@ -52,16 +52,16 @@ SG=$(scripts/vpc-origin-sg.sh)
 aws cloudformation deploy --region "$REGION" --stack-name gekko13-network --template-file aws/network.yaml \
   --no-fail-on-empty-changeset --parameter-overrides "CloudFrontVpcOriginSg=$SG" >/dev/null
 
-# 2 つの受け口が、それぞれこの台のタスクを返すまで待つ（上限 30 分）
+# 2 つの受け口が応えるまで待つ（上限 30 分）。app（8080）は、この台の edge-check のタスクを返すこと。
+# login（8081）は Keycloak（段 C の C-3）で、レルムの discovery が、配信の名前を issuer にして返すこと
 wait_for() {
-  local path=$1 listener=$2 deadline=$((START + 1800)) last=""
-  until last=$(curl -s --max-time 15 "https://$DOMAIN$path") && grep -q "\"task\":\"${TASK##*/}\"" <<<"$last" &&
-    grep -q "\"listener\":\"$listener\"" <<<"$last"; do
+  local path=$1 pattern=$2 deadline=$((START + 1800)) last=""
+  until last=$(curl -s --max-time 15 "https://$DOMAIN$path") && grep -q "$pattern" <<<"$last"; do
     if [ "$(date +%s)" -ge "$deadline" ]; then echo "30 分で届かなかった（$path）。最後の応答: ${last:0:300}" >&2; exit 1; fi
-    sleep 10
+    sleep 5
   done
   echo "届いた $path: 書き換えを求めてから $(($(date +%s) - START)) 秒"
-  echo "応答: $last"
+  echo "応答: ${last:0:300}"
 }
-wait_for /edge-point app
-wait_for /login/edge-point login
+wait_for /edge-point "\"task\":\"${TASK##*/}\".*\"listener\":\"app\"\|\"listener\":\"app\".*\"task\":\"${TASK##*/}\""
+wait_for /login/realms/gekko13/.well-known/openid-configuration "\"issuer\":\"https://$DOMAIN/login/realms/gekko13\""

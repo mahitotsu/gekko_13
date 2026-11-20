@@ -6,7 +6,7 @@
 - AWS は `aws/deploy.sh` で作り、`aws/scale.sh up` で台を起こし、`aws/scale.sh down` でタスクと台を 0 にする。
 - 台が 0 の間も、月額の固定費（ホストゾーンとアラーム）と、保存の費用は残る（[AWS の費用の見込み](#aws-の費用の見込み)）。
 - 台はプライベートのサブネットに置き、外からは CloudFront の VPC origin でだけ届く。台を起こしたら、`aws/edge-point.sh` で入口を向ける。
-- 今の AWS の作りは、第 1 部のアプリ（bff、transfer、ledger）を載せたまま。第 2 部のアプリは、段 D で入れ替える。
+- 今の AWS の作りは、第 1 部のアプリ（bff、transfer、ledger）に、C-3 の keycloak と auth を足したもの。第 2 部のアプリは、段 D で入れ替える。
 
 ## 実行前の約束
 - AWS に資源を作る前に、持ち主に確かめる。費用は [AWS の費用の見込み](#aws-の費用の見込み) のとおり。
@@ -56,11 +56,17 @@ aws cloudformation describe-stacks --region ap-northeast-1 --stack-name gekko13-
 GEKKO13_AZS=2 GEKKO13_TASKS=2 GEKKO13_MAX_HOSTS=4 aws/deploy.sh <ドメインの接頭辞>
 ```
 
-期待する結果: 最後に `作った。使い終わったら aws/scale.sh down で、タスクと台を 0 にする` と出る。作った直後は、キャパシティプロバイダーが台を起こし、SPIRE server、bff、transfer、ledger が 1 タスクずつ（段 B は 2 タスクずつ）動いている。プローブの 3 つのサービス（probe-bff、probe-transfer、probe-ledger）は、タスク数 0 のままになる。
+4. 段 C の C-3 を測るときは、台を t4g.medium の 1 台にし、メモリの測定（Container Insights）を有効にする。
+
+```sh
+GEKKO13_INSTANCE_TYPE=t4g.medium GEKKO13_MAX_HOSTS=1 GEKKO13_CONTAINER_INSIGHTS=enabled aws/deploy.sh <ドメインの接頭辞>
+```
+
+期待する結果: 最後に `作った。使い終わったら aws/scale.sh down で、タスクと台を 0 にする` と出る。作った直後は、キャパシティプロバイダーが台を起こす。SPIRE server と 5 つのサービス（bff、transfer、ledger、auth、keycloak）が、1 タスクずつ動く。段 B では、bff、transfer、ledger が 2 タスクずつになる。keycloak は、入口の配信がまだなければ 0 タスクのままになる（配信の名前から、自分の URL を作るため）。プローブの 3 つのサービス（probe-bff、probe-transfer、probe-ledger）は、タスク数 0 のままになる。
 
 ## 台を起こす・0 にする
 ```sh
-aws/scale.sh up      # SPIRE server を 1、bff、transfer、ledger を 1（引数で数を変えられる）にして、安定するまで待つ
+aws/scale.sh up      # SPIRE server、edge-check、auth、keycloak を 1、bff、transfer、ledger を 1（引数で数を変えられる）にして、安定するまで待つ
 aws/scale.sh down    # タスクを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ
 ```
 
@@ -73,13 +79,23 @@ CloudFront の配信（スタック `gekko13-edge`）の送り先（VPC origin�
 aws/edge-point.sh
 ```
 
-期待する結果: `組: A → B` のように、切り替える組が出る。続けて `届いた /edge-point: …` と `届いた /login/edge-point: …` が出て、確認用のサービスの JSON（`"via_cloudfront":true`、`"listener":"app"` と `"login"`）が出る。書き換えを求めてから届くまで、3〜6 分かかる。その間は前の台を指したままなので、届かない（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）。台が変わっていなければ、何も変えずに確かめるだけで終わる。30 分で届かなければ止まる。
+期待する結果: `組: A → B` のように、切り替える組が出る。続けて `届いた /edge-point: …` が出て、確認用のサービスの JSON（`"via_cloudfront":true`、`"listener":"app"`）が出る。そのあと `届いた /login/realms/gekko13/.well-known/openid-configuration: …` が出て、Keycloak の JSON（`"issuer":"https://<配信の名前>/login/realms/gekko13"`）が出る。書き換えを求めてから届くまで、3〜6 分かかる。その間は前の台を指したままなので、届かない（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）。台が変わっていなければ、何も変えずに確かめるだけで終わる。30 分で届かなければ止まる。
 
 初めて VPC origin を作ったときは、CloudFront が VPC にグループ（`CloudFront-VPCOrigins-Service-SG`）を作る。`edge-point.sh` はこれを network のスタックに渡し、台がそこから 8080〜8081 を受けるようにする。`aws/deploy.sh` も、このグループがあれば渡し続ける。
 
 配信の名前（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消しても配信が残る作り（`DeletionPolicy: Retain`）にしてある。`aws/deploy.sh` は、この名前を edge-check の RP ID として渡す。配信を初めて作ったあとは、`aws/deploy.sh` をもう一度実行する。
 
-パスキーの試しの画面は、`https://<配信の名前>/login/`（登録）と `/app/`（文書のハッシュへの署名）にある。資格情報はタスクのメモリにあり、タスクが起き直すと消える。試したあとは、端末の側のパスキー（Windows なら、設定の「アカウント」の「パスキー」）から、`gekko13` の項目を消す。
+`/login/*` は Keycloak（台の 8081）に届く。Keycloak は、edge-check と同じ台にいないと届かない。台が 2 台以上のときは、`aws ecs describe-tasks` で 2 つのタスクの台を確かめる（[design-decisions](design-decisions.md)）。C-2 のパスキーの試しの画面（edge-check の 8081）は、もう CloudFront から届かない。端末の側に `gekko13` のパスキーが残っていれば、端末の設定（Windows なら「アカウント」の「パスキー」）から消す。
+
+## 段 C の C-3 を測る
+台が 0 の状態から、Keycloak と auth が使えるまでの時間を測る。測り方の定義（始点、終点、判定）は [log.md の 2026-11-20 の決定](log.md#決めたこと) にある。上の「AWS で作る」の 4 で作ってから、次のとおりに回す。
+
+```sh
+aws/scale.sh down
+aws/c3-measure.sh        # 30 分置く分を含めて、約 40 分。引数に 0 を渡すと、置かずに終わる
+```
+
+期待する結果: `+N 秒: …` の行が、出来事の順に出る（台が ASG に加わる、各サービスが RUNNING になる、向け直し、Keycloak が応える、auth が起動する）。最後に表と `判定（600 秒以内か）` が出て、`local/run/c3/<時刻>/result.md` に残る。30 分置いたあとは、止まったタスクと、サービスごとのメモリの最大が出る。台は動いたままなので、次の回の前と、終わったあとに `aws/scale.sh down` を回す。測り終えたら、`GEKKO13_CONTAINER_INSIGHTS` を付けずに `aws/deploy.sh` を回して、メモリの測定を止める。`local/down.sh` は `local/run/` を消すので、結果は先に写す。
 
 ## 後片付け
 台を 0 にするだけなら、`aws/scale.sh down` で足りる。全部を消すときは、スタックを作った順の逆に消す。消す前に、対象を一覧で確かめる。
@@ -101,7 +117,7 @@ aws servicediscovery list-namespaces --region ap-northeast-1 --query 'Namespaces
 
 `gekko13-edge` のスタック（VPC origin の 4 つ）は、`gekko13-network` より先に消す。CloudFront は、VPC origin のために VPC の中にグループと ENI を作るので、VPC origin が残っていると VPC を消せない（推定）。配信が使っている VPC origin は消せない（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）ので、配信を先に消すか、配信から外してから消す。
 
-SSM のパラメーター 4 つは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。BFF と transfer の client の秘密、リフレッシュトークン、プローブの動かし方（`/gekko13/probe/mode`）の 4 つ。最後に、`list-namespaces` に `svc.gekko13.internal` が残っていないかを確かめる。残っていれば、月額のかかるホストゾーンも残っている（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
+SSM のパラメーター 5 つは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。BFF と transfer の client の秘密、認可サーバーの利用者の代わりの窓口の秘密（`/gekko13/auth/standin-secret`）、リフレッシュトークン、プローブの動かし方（`/gekko13/probe/mode`）の 5 つ。最後に、`list-namespaces` に `svc.gekko13.internal` が残っていないかを確かめる。残っていれば、月額のかかるホストゾーンも残っている（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
 
 ローカルは `local/down.sh` で消す。消えるのは、`gekko13=1` のラベルを付けたコンテナ、`gekko13` のネットワークとボリューム、`local/run/` の全部。
 
@@ -111,12 +127,14 @@ SSM のパラメーター 4 つは、スタックの外で作ったので、`aws
 | 部品 | 費用 | いつかかるか |
 |---|---|---|
 | EC2（t4g.small） | 1 台 1 時間 0.0216 ドル | 台が動いている間 |
+| EC2（t4g.medium、C-3） | 1 台 1 時間 0.0432 ドル（料金の API、2026-11-20） | 台が動いている間 |
+| Container Insights（C-3） | CloudWatch のメトリクスの従量。数時間なら数セント（推定） | 有効にしている間 |
 | EBS（gp3 30 GB） | 1 台あたり月約 2.9 ドルの日割り（推定。gekko_12 の 20 GB で月約 1.9 ドルから比例で出した） | 台がある間。台が 0 なら 0 |
 | Cloud Map のホストゾーン | 月 0.5 ドル | ECS のスタックがある間（台が 0 でも） |
 | マネージドスケーリングのアラーム（2 つ） | 1 つ月 0.1 ドル | ECS のスタックがある間（台が 0 でも） |
 | EFS（Standard） | 1 GB あたり月 0.36 ドル。使うのは数 MB | network のスタックがある間 |
 | Cognito の M2M のトークン | 使った分（gekko_12 の実測では 15 件で 0.034 ドル） | 交換と client_credentials のたび |
-| ECR、CloudWatch Logs、SSM | ほぼ 0（保存と取り込みの従量。SSM の標準のパラメーターは無料） | 使った分 |
+| ECR、CloudWatch Logs、SSM | ほぼ 0（保存と取り込みの従量。SSM の標準のパラメーターは無料）。ECR は、Keycloak と auth のイメージで約 1 GB 増え、月約 0.1 ドル（推定） | 使った分 |
 | CloudFront の配信 | 月の固定費はない。リクエストと転送の従量（試しの分はごく小さい。推定） | 使った分 |
 | VPC origin、Egress-only のインターネットゲートウェイ | 追加の料金はない（資料。2026-11-19）。EC2 の転送の従量はかかる | — |
 

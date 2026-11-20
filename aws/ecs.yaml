@@ -1,11 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の検証の実行基盤。ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances 台）に SPIRE の server と agent、BFF、transfer、ledger を載せる。
+# gekko13 の検証の実行基盤。ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances 台）に SPIRE の server と agent、BFF、transfer、ledger、
+# 認可サーバー（auth、Spring Authorization Server）とログインサーバー（keycloak）を載せる。
 # 台の数と AZ を前提にしない。アプリどうしは Service Connect（TCP の中継だけ）で呼び、mTLS はアプリが終える。
 # agent は Cloud Map の DNS 名で server に届く。server の状態（sqlite と鍵）とバンドルは EFS に置く（network のスタック）。
 # 使わない間は aws/scale.sh down で、タスク数を 0 にし、台も 0 にする。AWS の名前は、IPv6 で届くデュアルスタックのものを使う。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 runtime on ECS (EC2) with a capacity provider (ASG, 0 to MaxInstances hosts): SPIRE server and agent, BFF, transfer and ledger.
+  gekko13 runtime on ECS (EC2) with a capacity provider (ASG, 0 to MaxInstances hosts): SPIRE server and agent, BFF, transfer, ledger,
+  the authorization server (auth) and the login server (keycloak).
   Nothing assumes a host count or AZ. Apps call each other through Service Connect (TCP only) and terminate mTLS themselves.
   Agents reach the server by a Cloud Map DNS name; server state and the bundle live on EFS. Scale to zero with aws/scale.sh down.
 
@@ -52,6 +54,12 @@ Parameters:
   AppImage:
     Type: String
     Description: URI and tag of the gekko13/node image in ECR
+  AuthImage:
+    Type: String
+    Description: URI and tag of the gekko13/auth image (Spring Authorization Server) in ECR
+  KeycloakImage:
+    Type: String
+    Description: URI and tag of the gekko13/keycloak image in ECR
   SpireServerImage:
     Type: String
   SpireAgentImage:
@@ -90,13 +98,25 @@ Parameters:
   SvidTtlSeconds:
     Type: Number
     Default: 300
+  AuthStandinParameter:
+    Type: String
+    Default: /gekko13/auth/standin-secret
+    Description: SSM SecureString holding the client secret of the user stand-in client of the authorization server. Created by the deploy script
+  ContainerInsights:
+    Type: String
+    Default: disabled
+    AllowedValues: [enabled, disabled]
+    Description: Turn on only while measuring memory (stage C-3). Billed per metric while on
+
+Conditions:
+  HasRpId: !Not [!Equals [!Ref RpId, ""]]
 
 Resources:
   Cluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Ref Prefix
-      ClusterSettings: [{ Name: containerInsights, Value: disabled }]
+      ClusterSettings: [{ Name: containerInsights, Value: !Ref ContainerInsights }]
 
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -174,6 +194,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TransferSecretParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeModeParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}"
 
   SpireServerTaskRole:
     Type: AWS::IAM::Role
@@ -833,6 +854,82 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-ledger, mode: non-blocking }
 
+  # 段 C の C-3: 認可サーバー（Spring Authorization Server）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
+  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。イメージは SVID が書かれるまで待ってから起動する。
+  AuthTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-auth"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid }
+      ContainerDefinitions:
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
+        - Name: app
+          Image: !Ref AuthImage
+          Essential: true
+          # JVM はこの上限の 75% をヒープにする（services/auth/Dockerfile の MaxRAMPercentage）
+          Memory: 512
+          PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
+          Environment:
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: ISSUER, Value: https://auth:8443 }
+            - { Name: TRUST_DOMAIN, Value: gekko13.internal }
+          Secrets:
+            - { Name: STANDIN_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}" }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
+
+  # 段 C の C-3: ログインサーバー（Keycloak）。CloudFront の /login/* が、台の 8081 に届く（gekko13-edge の login の VPC origin）。
+  # 保存先は dev-file の使い捨てで、起動のたびにレルムを取り込む。管理者の利用者は作らない（管理画面は CloudFront から誰でも見えるため）。
+  # Host は CloudFront が送り先の名前に替えるので、KC_HOSTNAME に完全な URL を渡し、Host に頼らない。
+  KeycloakTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Stage C-3 login server. CloudFront /login/* reaches host port 8081 through the login VPC origin.
+          Disposable dev-file storage, realm imported at every start. The full URL in KC_HOSTNAME because CloudFront rewrites Host
+        must: Never add a bootstrap admin user while the admin console is reachable through CloudFront
+    Properties:
+      Family: !Sub "${Prefix}-keycloak"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref KeycloakImage
+          Essential: true
+          # Keycloak の JVM は、既定で上限の 70% をヒープにする
+          Memory: 1024
+          PortMappings:
+            - { ContainerPort: 8080, HostPort: 8081, Protocol: tcp }
+          Environment:
+            - { Name: KC_HOSTNAME, Value: !Sub "https://${RpId}/login" }
+            - { Name: KC_HTTP_ENABLED, Value: "true" }
+            - { Name: RP_ID, Value: !Ref RpId }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: keycloak, mode: non-blocking }
+
   SpireServerService:
     Type: AWS::ECS::Service
     DependsOn: CapacityProviderAssociation
@@ -949,8 +1046,8 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Stage C-1b and C-2 check. CloudFront VPC origins reach the app listener (8080) and the login listener (8081).
-          Serves a passkey test page whose RP ID is the distribution domain. Fixed host ports because a VPC origin targets a fixed port
+          Stage C-1b and C-2 check on the app listener (8080). The login listener (8081) now belongs to keycloak (stage C-3).
+          Fixed host port because a VPC origin targets a fixed port
         must: Accept traffic only from the CloudFront VPC origin security group (network stack)
     Properties:
       Family: !Sub "${Prefix}-edge-check"
@@ -962,9 +1059,9 @@ Resources:
           Image: !Ref AppImage
           Essential: true
           MemoryReservation: 64
+          # 8081 は C-3 から Keycloak が使う。C-2 のパスキーの試しの画面（8081）は、もう CloudFront から届かない
           PortMappings:
             - { ContainerPort: 8080, HostPort: 8080, Protocol: tcp }
-            - { ContainerPort: 8081, HostPort: 8081, Protocol: tcp }
           Environment:
             - { Name: SERVICE, Value: edge-check }
             - { Name: RP_ID, Value: !Ref RpId }
@@ -981,6 +1078,33 @@ Resources:
       TaskDefinition: !Ref EdgeCheckTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
       DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+
+  AuthService:
+    Type: AWS::ECS::Service
+    DependsOn: CapacityProviderAssociation
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: auth
+      TaskDefinition: !Ref AuthTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !GetAtt Namespace.Arn
+        Services: [{ PortName: app, DiscoveryName: auth, ClientAliases: [{ Port: 8443, DnsName: auth }] }]
+
+  # 配信の名前（RpId）がまだないと、KC_HOSTNAME が作れないので、タスク数を 0 にしておく
+  KeycloakService:
+    Type: AWS::ECS::Service
+    DependsOn: CapacityProviderAssociation
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: keycloak
+      TaskDefinition: !Ref KeycloakTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
+      DesiredCount: !If [HasRpId, 1, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
 
 Outputs:

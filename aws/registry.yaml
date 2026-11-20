@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージと、SPIRE と spiffe-helper の写しを置く。
+# gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージ、認可サーバーとログインサーバーのイメージ、SPIRE と spiffe-helper の写しを置く。
 # ghcr.io は IPv6 で届かない恐れがあるので、インスタンスはここからだけ取る。ほかのスタックより先に作る。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 container registry (ECR): the app image and copies of SPIRE and spiffe-helper.
+  gekko13 container registry (ECR): the app image, the authorization server and login server images, and copies of SPIRE and spiffe-helper.
   Hosts pull only from here because ghcr.io may be unreachable over IPv6. Create before the other stacks.
 
 Metadata:
@@ -34,6 +34,27 @@ Resources:
       LifecyclePolicy:
         LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 10","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
 
+  # 認可サーバー（Spring Authorization Server）とログインサーバー（Keycloak）。タグは git のコミットにする（段 C の C-3）
+  AuthRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/auth"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
+  KeycloakRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/keycloak"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
   SpireServerRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -60,6 +81,8 @@ Resources:
 
 Outputs:
   AppRepositoryUri: { Value: !GetAtt AppRepository.RepositoryUri }
+  AuthRepositoryUri: { Value: !GetAtt AuthRepository.RepositoryUri }
+  KeycloakRepositoryUri: { Value: !GetAtt KeycloakRepository.RepositoryUri }
   SpireServerRepositoryUri: { Value: !GetAtt SpireServerRepository.RepositoryUri }
   SpireAgentRepositoryUri: { Value: !GetAtt SpireAgentRepository.RepositoryUri }
   SpiffeHelperRepositoryUri: { Value: !GetAtt SpiffeHelperRepository.RepositoryUri }

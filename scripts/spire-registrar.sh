@@ -30,7 +30,8 @@ ensure() {
 
 # ノード: タグ gekko13-role=ecs-host を持つインスタンスの agent。台がいくつでも、この 1 つで足りる
 ensure "$NODE" -node -selector aws_iid:tag:gekko13-role:ecs-host
-for s in bff transfer ledger; do
+# auth は認可サーバー（段 C の C-3）
+for s in bff transfer ledger auth; do
   ensure "spiffe://$TD/svc/$s" -parentID "$NODE" -x509SVIDTTL "$TTL" \
     -selector "docker:label:com.amazonaws.ecs.task-definition-family:$PREFIX-$s" \
     -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper"

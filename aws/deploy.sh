@@ -3,6 +3,7 @@
 # 使い方: aws/deploy.sh <マネージドログインのドメインの接頭辞>
 #   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く（段 B）。既定は 1（段 A）。
 #   GEKKO13_TASKS で bff、transfer、ledger のタスク数を、GEKKO13_MAX_HOSTS で台の上限を変える（既定 1 と 2）。
+#   GEKKO13_INSTANCE_TYPE で台の大きさを（既定 t4g.small）、GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする（段 C の C-3）。
 # 順番: registry → イメージを写す → network → cognito → client の秘密を SSM へ → ecs。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -15,6 +16,8 @@ PUBLIC_IPV4=false
 AZS=${GEKKO13_AZS:-1}
 TASKS=${GEKKO13_TASKS:-1}
 MAX_HOSTS=${GEKKO13_MAX_HOSTS:-2}
+INSTANCE_TYPE=${GEKKO13_INSTANCE_TYPE:-t4g.small}
+CONTAINER_INSIGHTS=${GEKKO13_CONTAINER_INSIGHTS:-disabled}
 PREFIX=gekko13
 REGION=${AWS_REGION:-ap-northeast-1}
 SPIRE=1.15.3
@@ -46,6 +49,14 @@ CTX=$(scripts/stage-image.sh)
 docker buildx imagetools inspect "$APP_REPO:$TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" -f Dockerfile -t "$APP_REPO:$TAG" --push "$CTX"
 
+# 認可サーバーとログインサーバー（Java）。どちらも、ビルドの段はビルドする側の CPU で動くので、エミュレーションは要らない
+AUTH_REPO=$(out "$PREFIX-registry" AuthRepositoryUri)
+KEYCLOAK_REPO=$(out "$PREFIX-registry" KeycloakRepositoryUri)
+docker buildx imagetools inspect "$AUTH_REPO:$TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 -t "$AUTH_REPO:$TAG" --push services/auth
+docker buildx imagetools inspect "$KEYCLOAK_REPO:$TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 -t "$KEYCLOAK_REPO:$TAG" --push services/keycloak
+
 # CloudFront が VPC に作るグループ（最初の VPC origin でできる）。台は、ここからだけ入口のポートを受ける。
 # まだなければ空で渡し、aws/edge-point.sh が VPC origin を作ったあとで渡し直す
 cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml --parameter-overrides "CloudFrontVpcOriginSg=$(scripts/vpc-origin-sg.sh)"
@@ -64,6 +75,13 @@ put_secret() {
 }
 put_secret "$(out "$PREFIX-cognito" BffClientId)" "/$PREFIX/bff/client-secret"
 put_secret "$(out "$PREFIX-cognito" TransferClientId)" "/$PREFIX/transfer/client-secret"
+# 認可サーバーの、利用者の代わりの窓口（user-standin）の秘密。なければ乱数で作る。値は画面にもファイルにも残さない
+if ! aws ssm get-parameter --region "$REGION" --name "/$PREFIX/auth/standin-secret" >/dev/null 2>&1; then
+  dir=$(umask 077 && mktemp -d -p /dev/shm gekko13-secret.XXXXXX)
+  openssl rand -hex 16 | tr -d '\n' > "$dir/value"
+  aws ssm put-parameter --region "$REGION" --name "/$PREFIX/auth/standin-secret" --type SecureString --value "file://$dir/value" >/dev/null
+  rm -rf "$dir"
+fi
 # プローブの動かし方。aws/run-scenarios.sh が書き換える。なければ作る（秘密ではない）
 aws ssm get-parameter --region "$REGION" --name "/$PREFIX/probe/mode" >/dev/null 2>&1 || \
   aws ssm put-parameter --region "$REGION" --name "/$PREFIX/probe/mode" --type String --value scenarios >/dev/null
@@ -100,6 +118,10 @@ cfn --stack-name "$PREFIX-ecs" --template-file aws/ecs.yaml --capabilities CAPAB
   "AssignPublicIpv4=$PUBLIC_IPV4" \
   "TaskCount=$TASKS" \
   "MaxInstances=$MAX_HOSTS" \
+  "InstanceType=$INSTANCE_TYPE" \
+  "ContainerInsights=$CONTAINER_INSIGHTS" \
+  "AuthImage=$(dualstack "$AUTH_REPO"):$TAG" \
+  "KeycloakImage=$(dualstack "$KEYCLOAK_REPO"):$TAG" \
   "AppImage=$(dualstack "$APP_REPO"):$TAG" \
   "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \
   "SpireAgentImage=$(dualstack "$(out "$PREFIX-registry" SpireAgentRepositoryUri)"):$SPIRE" \
