@@ -4,7 +4,7 @@
 
 ## 要旨
 - AWS は `aws/deploy.sh` で作り、`aws/scale.sh up` で台を起こし、`aws/scale.sh down` でタスクと台を 0 にする。
-- 台が 0 の間も、月額の固定費（入口の ALB、ホストゾーン、アラーム）と、保存の費用は残る（[AWS の費用の見込み](#aws-の費用の見込み)）。
+- 台が 0 の間も、月額の固定費（入口の ALB、ホストゾーン、アラーム）と、保存の費用は残る。しばらく使わないときは、`aws/park.sh` で固定費を止める（[使わない間に固定費を止める](#使わない間に固定費を止める)）。
 - 台はプライベートのサブネットに置き、外からは CloudFront の VPC origin から、内部向けの ALB を通してだけ届く。台が入れ替わっても、向け直しは要らない。
 - 今の AWS の作りは、keycloak、auth、確かめの受け口（edge-check）の 3 つのサービス。第 2 部のアプリは、段 D の D1 で載せる。
 
@@ -77,6 +77,19 @@ curl -s "https://$D/login/realms/gekko13/.well-known/openid-configuration" | hea
 期待する結果: `"az":"ap-northeast-1a"` と `"az":"ap-northeast-1c"` の 2 種類が出る（AZ の名前はアカウントで違う）。続けて、`{"issuer":"https://<配信の名前>/login/realms/gekko13"` で始まる JSON が出る。
 
 配信の名前（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消しても配信が残る作り（`DeletionPolicy: Retain`）にしてある。ALB も作り直さない。ALB の ARN が変わると、VPC origin を作り直すことになり、3〜6 分届かなくなる（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）。
+
+## 使わない間に固定費を止める
+台を 0 にしても、入口の ALB（月約 17.7 ドル）、Cloud Map のホストゾーン、アラーム、ECR のイメージの費用は残る。しばらく使わないときは、次のとおりに止める。スタックを消すので、回す前に持ち主の承認を得る。
+
+```sh
+aws/park.sh
+```
+
+`aws/park.sh` は、台を 0 にし、配信を止めて ALB から切り離してから（`gekko13-edge` の `Parked=true`）、`gekko13-apps`、`gekko13-ecs`、`gekko13-registry` を消す。残すのは、止めた配信（名前と RP ID は変わらない）、`gekko13-network`（VPC と EFS。SPIRE の CA と登録が残る）、`gekko13-cognito`、SSM の引数。どれも固定費がないか、月 0.001 ドル未満。
+
+期待する結果: 最後に `止めた。残る固定費は EFS の月 0.001 ドル未満だけ。…` と出る。止めている間は、CloudFront の配信に届かない。
+
+戻すときは、「AWS で作る」の 2 のとおりに `aws/deploy.sh` を回す。ECR のイメージと、ALB を指す VPC origin を作り直すので、30 分ほどかかる（推定。VPC origin だけで約 9 分。[findings 4-16](findings.md#4-16-alb-を指す-vpc-origin-を作るのに約-9-分配信の切り替えに約-1-分古い-vpc-origin-を消すのに約-7-分かかった)）。
 
 ## 段 D の D0 を測る
 台が 0 の状態から、入口を通して使えるまでの時間を測る。測り方の定義（始点、終点、判定）は [log.md の 2026-11-21 の決定](log.md#決めたこと) にある。
