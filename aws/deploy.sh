@@ -108,7 +108,12 @@ if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services s
     --placement-constraints '[]' >/dev/null
 fi
 
-cfn --stack-name "$PREFIX-ecs" --template-file aws/ecs.yaml --capabilities CAPABILITY_IAM --parameter-overrides \
+# ECS のテンプレートは、日本語のコメントを含めると、直接送れる大きさ（51,200 バイト）を超える。
+# 送る前に、行頭のコメント（「# 」で始まる行）だけを除く。シバン（#!）は残す。S3 のバケットは使わない（docs/findings.md）
+ECS_TEMPLATE=$(mktemp --suffix=.yaml)
+trap 'rm -f "$ECS_TEMPLATE"' EXIT
+grep -v -E '^[[:space:]]*# ' aws/ecs.yaml > "$ECS_TEMPLATE"
+cfn --stack-name "$PREFIX-ecs" --template-file "$ECS_TEMPLATE" --capabilities CAPABILITY_IAM --parameter-overrides \
   "VpcId=$(out "$PREFIX-network" VpcId)" \
   "SubnetIds=$SUBNETS" \
   "SecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
