@@ -142,8 +142,10 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
 
 # 入口の配信。送り先は ALB を指す VPC origin 1 つ。ALB は作り直さないので、台が入れ替わっても向け直しは要らない。
 # 配信を初めて作ったときは、RP ID がまだ空なので、もう一度この手順を回す（keycloak のタスク数が 0 のままになる）
+# aws/park.sh で止めていた配信は、ここで動かし直す（Parked=false。渡さないと、前の値の true が引き継がれる）
 cfn --stack-name "$PREFIX-edge" --template-file aws/edge.yaml --parameter-overrides \
   "AlbArn=$(out "$PREFIX-ecs" LoadBalancerArn)" \
-  "AlbDnsName=$(out "$PREFIX-ecs" LoadBalancerDnsName)"
+  "AlbDnsName=$(out "$PREFIX-ecs" LoadBalancerDnsName)" \
+  "Parked=false"
 
 echo "作った。入口: https://$(rp_id)/ 。使い終わったら aws/scale.sh down で、タスクと台を 0 にする"

@@ -3,11 +3,14 @@ AWSTemplateFormatVersion: "2010-09-09"
 # 配信を作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消しても配信は残す（DeletionPolicy: Retain）。
 # 送り先は、基盤（gekko13-ecs）の内部向けの ALB を指す VPC origin 1 つ（段 D の D0）。振り分けは ALB のリスナーの規則でする。
 # ALB は台が入れ替わっても変わらないので、台の入れ替えのたびの向け直しは要らない（段 C までの A と B の組はやめた）。
+# 使わない間は Parked=true で、配信を止め（Enabled: false）、VPC origin を消して ALB から切り離す（aws/park.sh）。
+# 止めている間の送り先は、届くことのない仮の名前（example.com。IANA が例のために取ってある）。配信は残すので、名前（RP ID）は変わらない。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 entry CloudFront distribution. Its default domain (dXXXX.cloudfront.net) becomes the passkey RP ID,
   so the distribution is retained even if the stack is deleted. The single origin is a VPC origin pointing at the internal ALB
-  of the base stack; the ALB routes by path. No re-pointing when hosts change.
+  of the base stack; the ALB routes by path. No re-pointing when hosts change. Parked=true disables the distribution and
+  removes the VPC origin so that the ALB can be deleted while unused; the domain stays.
 
 Metadata:
   AWSToolsMetrics:
@@ -19,14 +22,26 @@ Parameters:
     Default: gekko13
   AlbArn:
     Type: String
-    Description: ARN of the internal ALB (gekko13-ecs output LoadBalancerArn)
+    Default: ""
+    Description: ARN of the internal ALB (gekko13-ecs output LoadBalancerArn). Empty while parked
   AlbDnsName:
     Type: String
-    Description: DNS name of the internal ALB (CloudFront requires a domain name for the origin)
+    Default: ""
+    Description: DNS name of the internal ALB (CloudFront requires a domain name for the origin). Empty while parked
+  Parked:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: true disables the distribution and removes the VPC origin while the ALB does not exist (aws/park.sh)
+
+Conditions:
+  IsParked: !Equals [!Ref Parked, "true"]
+  IsLive: !Not [!Condition IsParked]
 
 Resources:
   AlbVpcOrigin:
     Type: AWS::CloudFront::VpcOrigin
+    Condition: IsLive
     Properties:
       VpcOriginEndpointConfig:
         Name: !Sub "${Prefix}-alb"
@@ -50,19 +65,24 @@ Resources:
     Properties:
       DistributionConfig:
         Comment: !Sub "${Prefix} entry"
-        Enabled: true
+        Enabled: !If [IsParked, false, true]
         HttpVersion: http2and3
         IPV6Enabled: true
         PriceClass: PriceClass_200
         Origins:
-          - Id: alb
-            DomainName: !Ref AlbDnsName
-            VpcOriginConfig:
-              VpcOriginId: !GetAtt AlbVpcOrigin.Id
-              OriginReadTimeout: 30
-              OriginKeepaliveTimeout: 5
+          - !If
+            - IsParked
+            - Id: parked
+              DomainName: example.com
+              CustomOriginConfig: { OriginProtocolPolicy: https-only, HTTPSPort: 443, HTTPPort: 80 }
+            - Id: alb
+              DomainName: !Ref AlbDnsName
+              VpcOriginConfig:
+                VpcOriginId: !GetAtt AlbVpcOrigin.Id
+                OriginReadTimeout: 30
+                OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
-          TargetOriginId: alb
+          TargetOriginId: !If [IsParked, parked, alb]
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
           CachedMethods: [GET, HEAD]
