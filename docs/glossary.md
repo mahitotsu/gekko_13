@@ -52,4 +52,7 @@
 | VPC origin | CloudFront の送り先の種類の 1 つ。プライベートのサブネットの EC2 のインスタンスなどを、ARN で指す。CloudFront が VPC の中に ENI とグループ（`CloudFront-VPCOrigins-Service-SG`）を作って届く |
 | VPC origin の組（A と B） | この検証で、VPC origin を 2 組持つ作り。CloudFront は配信が使っている VPC origin を書き換えさせないので、使っていない組を新しい台に向けてから、配信を切り替える |
 | EIGW | Egress-only のインターネットゲートウェイ。IPv6 で外へ出る通信だけを通し、外から始まる接続は通さない |
+| ALB | Application Load Balancer。HTTP の要求ごとに、送り先（ターゲット）へ振り分ける。この検証の段 D では、内部向けの ALB を CloudFront の VPC origin から指す |
+| ターゲットグループ | ALB の送り先の組。ECS は、動き出したタスクを、台と、台のポートの組で登録する |
+| token-guard | gekko_11 の部品。受け口でトークンと呼び手を確かめ、出口でトークンを替える。gekko_11 ではサイドカーで、段 D では各アプリが読むライブラリにする |
 | 直送 | 保険会社のシステムが、契約の内容を、AI を通さずに、本人が登録した宛先へ直接送ること。本人は、手元の写しと見比べる（gekko_11） |

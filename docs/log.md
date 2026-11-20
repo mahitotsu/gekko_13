@@ -2,12 +2,13 @@
 
 **この文書の読み手:** この検証が、いつ、何をして、何を決めたかを知りたい人。計画と合格の基準は [plan.md](plan.md)、確かめた事実は [findings.md](findings.md)、判断の理由は [design-decisions.md](design-decisions.md)。用語は [用語集](glossary.md)。新しい出来事は、年表の末尾に足す。
 
-## 現在の状況（2026-11-20）
+## 現在の状況（2026-11-21）
 - 第 2 部を始めた。題材は、gekko_11 の年金保険の申込みの流れで、これを第 1 部の基盤（ECS on EC2、SPIRE、IPv6 だけ）の上で動かす。
 - 第 2 部の計画（[plan.md](plan.md)）を書いた。段 C の C-1 は予測どおりだった。CloudFront から、IPv6 だけの台の上のサービスに届いた（[findings 4-1](findings.md#4-1-cloudfront-は送り先の-ip-の種類を-ipv6-にするとipv6-だけの台に届いた既定の-ipv4-では届かなかった)）。
 - C-4 も予測どおりだった。Spring Authorization Server は、Envoy なしで SVID の mTLS を終えた。交換したトークンは、呼び手の SVID の証明書に結ばれた（[findings 4-4](findings.md#4-4-spring-authorization-server-はenvoy-なしで-svid-の-mtls-を自分で終え交換したトークンを呼び手の-svid-の証明書に結んだ)）。
 - C-2 と C-1b も予測どおりだった。入口を VPC origin に替え、台をプライベートのサブネットに移した（[findings 4-8](findings.md#4-8-cloudfront-はプライベートのサブネットの台に-vpc-origin-で届きパスで-2-つの受け口に振り分けた台から見た送り主はcloudfront-の公開-ipv4-だった)）。配信の名前を RP ID にして、パスキーの登録と署名ができた（[4-10](findings.md#4-10-配信の既定のドメインを-rp-id-にしてパスキーを登録し別のパスの受け口で文書のハッシュに署名できたcloudfrontnet-は-rp-id-にできなかった)）。
 - C-3 も予測どおりだった。t4g.medium 1 台に全部が載り、台が 0 の状態から約 6〜7 分で使えた（[findings 4-11](findings.md#4-11-t4gmedium-1-台に-keycloak-と認可サーバーが載り台が-0-の状態から約-67-分で使えたいちばん長いのは-vpc-origin-の向け直しだった)）。段 C の 4 件がすべて予測どおりなので、合格の基準 (a) を満たし、段 D に進める。
+- 段 D の計画を書いた（[plan.md の 4 節](plan.md#4-段-d-gekko_11-の流れを-ecs-に載せ27-のシナリオで手口が止まるかを見る)）。次は D0 で、作りの判断（design-decisions の「提案」の行）を持ち主に確かめてから始める。
 - AWS のスタックは、第 1 部の 4 つに、CloudFront の `gekko13-edge` を足して 5 つ。台は 0 台。AWS の今の作りは、第 1 部のアプリと edge-check に、keycloak と auth を足したもの。起動テンプレートは t4g.medium、上限 1 台。Container Insights は止めた（CLI で止めたので、スタックの引数は enabled のまま。次の `aws/deploy.sh` で揃う）。入口は VPC origin（A の組が使われている）。
 
 ## 年表
@@ -46,7 +47,10 @@
 - 2026-11-20: C-3 では、Keycloak の保存先を使い捨て（dev-file）にする。CloudFront の `/login/*`（台の 8081）は Keycloak に充てる（[design-decisions](design-decisions.md)）。C-2 のパスキーの試しの画面は使えなくなる。持ち主が承認した。
 - 2026-11-20: 段 D の入口は、VPC origin から内部向けの ALB を指す形にする。VPC origin が 1 つの資源しか指せず、台を直接指す今の形では、冗長、可用性、伸縮のどれも満たせないため（持ち主の指摘）。ALB の固定費（月約 17.7 ドル、料金の API、2026-11-20）は、持ち主が承認した。C-3 は、今の入口（台を直接指す形）のまま測る（[design-decisions](design-decisions.md)）。
 - 2026-11-20: C-3 の「載る」の判定で、置いて見る時間を 30 分から 10 分に縮めた。持ち主が、待ち時間が長すぎると判断したため。1 回目の測定のあと、置き始めてから約 5 分の時点で変えた。メモリの不足で止まったタスクはまだ見ておらず、結果を見てからの変更ではない。10 分で、SVID の入れ替わりを約 4 回通す。弱い点は、30 分より後に起きるメモリの増え方を見落とすことと、要求を流さないので負荷をかけたときのメモリは分からないこと。どちらも段 D でシナリオを流すときに見る。
+- 2026-11-20: 段 D のデータは使い捨てにする（Keycloak の利用者とパスキー、保険会社のシステムの契約の記録、受信箱の連絡先）。監査の記録は CloudWatch Logs に残る。持ち主が決めた（[design-decisions](design-decisions.md)）。
+- 2026-11-21: 段 D の計画を書いた（[plan.md の 4 節](plan.md#4-段-d-gekko_11-の流れを-ecs-に載せ27-のシナリオで手口が止まるかを見る)）。作る順は D0（基盤の作り替え）、D1、D2。作りの判断は、design-decisions に「提案」として足した。
 
 ## 次の候補（未実施）
 - 段 D の計画で、入口の ALB の作り（2 つの AZ のサブネット、リスナーの規則、ECS のターゲットの登録）を決める。
-- 段 D を計画する。決めるのは、入口の ALB、Keycloak の保存先、アプリの入れ替え。D1 の最初のリスクとして、Keycloak を CloudFront のパスの下に置いてパスキーを使えるかも扱う。
+- design-decisions の段 D の「提案」の行を、持ち主に確かめる。
+- 段 D の D0（ALB、スタックの分割、第 1 部のアプリを外す）を、小さな計画にして承認を得てから作る。
