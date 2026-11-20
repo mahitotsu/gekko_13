@@ -1,15 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の入口の CloudFront の配信。配信の既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
 # 配信を作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消しても配信は残す（DeletionPolicy: Retain）。
-# 送り先は VPC origin（段 C の C-1b）。プライベートのサブネットの台を、インスタンスの ARN で指す。外の DNS は使わない。
-# 顧客のアプリの役（8080）と、ログインサーバーの役（8081、パス /login/*）の 2 つに振り分ける（段 C の C-2）。
-# CloudFront は、配信に結び付いた VPC origin を更新させない（409。docs/findings.md）。そこで VPC origin を A と B の 2 組持つ。
-# 台が入れ替わったら、aws/edge-point.sh が、使っていない組を新しい台に向け、配信をその組に切り替える（ActiveSlot）。
+# 送り先は、基盤（gekko13-ecs）の内部向けの ALB を指す VPC origin 1 つ（段 D の D0）。振り分けは ALB のリスナーの規則でする。
+# ALB は台が入れ替わっても変わらないので、台の入れ替えのたびの向け直しは要らない（段 C までの A と B の組はやめた）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 entry CloudFront distribution. Its default domain (dXXXX.cloudfront.net) becomes the passkey RP ID,
-  so the distribution is retained even if the stack is deleted. Origins are VPC origins in two slots (A and B), because CloudFront
-  rejects updates to a VPC origin that a distribution uses. aws/edge-point.sh points the unused slot at the new host and switches.
+  so the distribution is retained even if the stack is deleted. The single origin is a VPC origin pointing at the internal ALB
+  of the base stack; the ALB routes by path. No re-pointing when hosts change.
 
 Metadata:
   AWSToolsMetrics:
@@ -19,74 +17,26 @@ Parameters:
   Prefix:
     Type: String
     Default: gekko13
-  ActiveSlot:
+  AlbArn:
     Type: String
-    Default: A
-    AllowedValues: [A, B]
-    Description: Slot of VPC origins the distribution uses
-  InstanceArnA:
+    Description: ARN of the internal ALB (gekko13-ecs output LoadBalancerArn)
+  AlbDnsName:
     Type: String
-    Description: ARN of the EC2 instance that slot A points at
-  InstanceArnB:
-    Type: String
-    Description: ARN of the EC2 instance that slot B points at
-  OriginDomain:
-    Type: String
-    Description: Private DNS name of the instance of the active slot (CloudFront requires a domain name for the origin)
-  AppPort:
-    Type: Number
-    Default: 8080
-  LoginPort:
-    Type: Number
-    Default: 8081
-
-Conditions:
-  UseB: !Equals [!Ref ActiveSlot, B]
+    Description: DNS name of the internal ALB (CloudFront requires a domain name for the origin)
 
 Resources:
-  # 同じ台の 2 つのポートを、別々の VPC origin にする（VPC origin は、ポートを自分の設定に持つ）。A の組の論理 ID は、最初の作りのまま
-  AppVpcOrigin:
+  AlbVpcOrigin:
     Type: AWS::CloudFront::VpcOrigin
     Properties:
       VpcOriginEndpointConfig:
-        Name: !Sub "${Prefix}-app"
-        Arn: !Ref InstanceArnA
-        HTTPPort: !Ref AppPort
-        HTTPSPort: 443
-        OriginProtocolPolicy: http-only
-
-  LoginVpcOrigin:
-    Type: AWS::CloudFront::VpcOrigin
-    Properties:
-      VpcOriginEndpointConfig:
-        Name: !Sub "${Prefix}-login"
-        Arn: !Ref InstanceArnA
-        HTTPPort: !Ref LoginPort
-        HTTPSPort: 443
-        OriginProtocolPolicy: http-only
-
-  AppVpcOriginB:
-    Type: AWS::CloudFront::VpcOrigin
-    Properties:
-      VpcOriginEndpointConfig:
-        Name: !Sub "${Prefix}-app-b"
-        Arn: !Ref InstanceArnB
-        HTTPPort: !Ref AppPort
-        HTTPSPort: 443
-        OriginProtocolPolicy: http-only
-
-  LoginVpcOriginB:
-    Type: AWS::CloudFront::VpcOrigin
-    Properties:
-      VpcOriginEndpointConfig:
-        Name: !Sub "${Prefix}-login-b"
-        Arn: !Ref InstanceArnB
-        HTTPPort: !Ref LoginPort
+        Name: !Sub "${Prefix}-alb"
+        Arn: !Ref AlbArn
+        HTTPPort: 80
         HTTPSPort: 443
         OriginProtocolPolicy: http-only
 
   # キャッシュはしない（CachingDisabled）。送り先には、Host を除く利用者の値を渡す（AllViewerExceptHostHeader）。
-  # 送り先へは平文の HTTP にする（VPC の中の区間。台の上の TLS は、段 D で決める）。
+  # 送り先（内部向けの ALB）へは、VPC の中を平文の HTTP で送る。パスの振り分けは ALB がする。
   Distribution:
     Type: AWS::CloudFront::Distribution
     DeletionPolicy: Retain
@@ -94,8 +44,8 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader). HTTP to the origin inside
-          the VPC for now; TLS on the host is decided in stage D. /login/* goes to the login listener, the rest to the app listener
+          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader). HTTP to the internal ALB
+          inside the VPC. Path routing is done by the ALB listener rules
         must: Never replace or delete this distribution. Its domain is the passkey RP ID
     Properties:
       DistributionConfig:
@@ -105,37 +55,21 @@ Resources:
         IPV6Enabled: true
         PriceClass: PriceClass_200
         Origins:
-          - Id: app
-            DomainName: !Ref OriginDomain
+          - Id: alb
+            DomainName: !Ref AlbDnsName
             VpcOriginConfig:
-              VpcOriginId: !If [UseB, !GetAtt AppVpcOriginB.Id, !GetAtt AppVpcOrigin.Id]
-              OriginReadTimeout: 30
-              OriginKeepaliveTimeout: 5
-          - Id: login
-            DomainName: !Ref OriginDomain
-            VpcOriginConfig:
-              VpcOriginId: !If [UseB, !GetAtt LoginVpcOriginB.Id, !GetAtt LoginVpcOrigin.Id]
+              VpcOriginId: !GetAtt AlbVpcOrigin.Id
               OriginReadTimeout: 30
               OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
-          TargetOriginId: app
+          TargetOriginId: alb
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
           CachedMethods: [GET, HEAD]
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
           OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
           Compress: true
-        CacheBehaviors:
-          - PathPattern: /login/*
-            TargetOriginId: login
-            ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
-            CachedMethods: [GET, HEAD]
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
-            Compress: true
 
 Outputs:
   DistributionId: { Value: !Ref Distribution }
   DomainName: { Value: !GetAtt Distribution.DomainName }
-  ActiveSlot: { Value: !Ref ActiveSlot }

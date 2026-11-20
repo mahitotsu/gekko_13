@@ -1,12 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証のネットワークと、SPIRE server の状態を置く EFS。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
 # サブネットはプライベートにする。IGW への経路を持たず、外へは Egress-only のインターネットゲートウェイ（EIGW）から IPv6 で出る。
-# 外からは、CloudFront の VPC origin からだけ受ける（段 C の C-1b）。サブネットは 2 つの AZ に 1 つずつ。
+# 外からは、CloudFront の VPC origin から内部向けの ALB を通してだけ受ける（段 D の D0）。サブネットは 2 つの AZ に 1 つずつ。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 network and the EFS that holds SPIRE server state. IPv6 first, with no NAT gateway and no VPC endpoints (no fixed monthly cost).
   Subnets are private: no route to the internet gateway; egress goes over IPv6 through an egress-only internet gateway.
-  The only inbound path from outside is CloudFront VPC origins. One subnet in each of two AZs.
+  The only inbound path from outside is CloudFront VPC origins to the internal ALB. One subnet in each of two AZs.
 
 Metadata:
   AWSToolsMetrics:
@@ -136,7 +136,7 @@ Resources:
 
   # ホスト、SPIRE server のタスクの ENI（awsvpc）、EFS のマウントターゲットが共有するグループ。
   # VPC の外からの通信を受けない。受けるのは、同じグループの中からだけ（台をまたぐ Service Connect、SPIRE の 8081、EFS の 2049）。
-  # 入ってくる規則を外へ広げない。入口を作るときは CloudFront のプレフィックスリストだけに限る。
+  # 入ってくる規則を外へ広げない。外からの入口は、内部向けの ALB のグループからだけにする（HostIngressFromAlb）。
   HostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Metadata:
@@ -144,7 +144,7 @@ Resources:
         why: >-
           Shared by hosts, the SPIRE server task ENI (awsvpc) and EFS mount targets.
           Inbound is accepted only from members of this group (cross-host Service Connect, SPIRE 8081, EFS 2049)
-        must: Never open inbound beyond this group. A future ingress must be limited to the CloudFront prefix list
+        must: Never open inbound beyond this group and the internal ALB group
     Properties:
       GroupDescription: gekko13 ECS hosts (inbound only from this group)
       VpcId: !Ref Vpc
@@ -173,22 +173,48 @@ Resources:
       ToPort: 65535
       Description: members of this group only
 
-  # 段 C の C-1b: CloudFront の VPC origin（CloudFront が VPC に作るグループ）からだけ、入口のポート（8080 と 8081）を受ける。
-  # グループは最初の VPC origin を作ったときにできるので、aws/edge-point.sh が引いて渡す。外からの受信は、この規則のほかに足さない。
-  HostIngressFromCloudFront:
-    Type: AWS::EC2::SecurityGroupIngress
-    Condition: AllowCloudFront
+  # 段 D の D0: 入口は、CloudFront の VPC origin から内部向けの ALB を指し、ALB が台のタスクへ振り分ける。
+  # ALB は、CloudFront が VPC に作るグループ（CloudFront-VPCOrigins-Service-SG）から 80 だけを受け、台の動的なポートへだけ出る。
+  # グループは最初の VPC origin を作ったときにできる。scripts/vpc-origin-sg.sh が引き、aws/deploy.sh が渡す。
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Metadata:
       com.aws.cloudformation.Context:
-        why: Stage C-1b. Only this account's CloudFront VPC origins may reach the edge ports (app 8080, login 8081)
+        why: >-
+          Stage D0. CloudFront VPC origins reach the internal ALB on port 80 only, and the ALB reaches only the dynamic host ports
+        must: Accept inbound only from the CloudFront VPC origin group. Never open the ALB to other sources
+    Properties:
+      GroupDescription: gekko13 internal ALB (inbound only from CloudFront VPC origins)
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 32768, ToPort: 65535, DestinationSecurityGroupId: !Ref HostSecurityGroup, Description: dynamic host ports }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-alb" }]
+
+  AlbIngressFromCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: AllowCloudFront
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      SourceSecurityGroupId: !Ref CloudFrontVpcOriginSg
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: CloudFront VPC origins only
+
+  # 台は、ALB からだけ、動的なホストのポート（bridge のタスクの受け口）を受ける。外からの受信は、この規則のほかに足さない。
+  HostIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stage D0. Hosts accept the dynamic host ports of bridge-mode tasks only from the internal ALB
         must: Add no other inbound rule from outside the group
     Properties:
       GroupId: !Ref HostSecurityGroup
-      SourceSecurityGroupId: !Ref CloudFrontVpcOriginSg
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
       IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8081
-      Description: CloudFront VPC origins only
+      FromPort: 32768
+      ToPort: 65535
+      Description: internal ALB only
 
   # SPIRE server のデータストア（sqlite）と鍵、agent が最初に信じるバンドル。
   # ECS のスタックを作り直しても、台が入れ替わっても、CA と登録が残るように、ECS の外に置く。
@@ -246,6 +272,7 @@ Outputs:
   # 段 A は 1 つめだけ、段 B は 2 つとも使う
   SubnetIds: { Value: !Join [",", [!Ref Subnet, !Ref Subnet2]] }
   HostSecurityGroupId: { Value: !Ref HostSecurityGroup }
+  AlbSecurityGroupId: { Value: !Ref AlbSecurityGroup }
   FileSystemId: { Value: !Ref FileSystem }
   SpireServerAccessPointId: { Value: !Ref SpireServerAccessPoint }
   BundleAccessPointId: { Value: !Ref BundleAccessPoint }

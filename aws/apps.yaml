@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 のアプリのスタック（段 D の D0 で、基盤の aws/ecs.yaml から分けた）。基盤のクラスター、名前空間、ALB の上に、アプリのサービスを載せる。
+# 入口: CloudFront の VPC origin → 基盤の内部向けの ALB → ここのターゲットグループ。ECS が、動き出したタスクを、台と動的なポートの組で登録する。
+# 振り分けは ALB のリスナーの規則でする。/login は Keycloak、それ以外は edge-check（D1-a で顧客のアプリに替える）。
+# 台の数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、台は ALB のグループからだけ動的なポートを受ける（network のスタック）。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
+Description: >-
+  gekko13 apps on the base runtime (gekko13-ecs): the login server (keycloak), the authorization server (auth) and the edge check.
+  CloudFront VPC origin -> internal ALB (base stack) -> target groups here. ECS registers tasks by host and dynamic port.
+  Listener rules route /login to keycloak and everything else to edge-check. Nothing assumes a host count or AZ.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  ClusterName:
+    Type: String
+  CapacityProviderName:
+    Type: String
+  NamespaceArn:
+    Type: String
+  ExecutionRoleArn:
+    Type: String
+  LogGroupName:
+    Type: String
+  ListenerArn:
+    Type: String
+  AppImage:
+    Type: String
+    Description: URI and tag of the gekko13/node image in ECR (edge-check)
+  AuthImage:
+    Type: String
+    Description: URI and tag of the gekko13/auth image (Spring Authorization Server) in ECR
+  KeycloakImage:
+    Type: String
+    Description: URI and tag of the gekko13/keycloak image in ECR
+  SpiffeHelperImage:
+    Type: String
+  AuthStandinParameter:
+    Type: String
+    Default: /gekko13/auth/standin-secret
+    Description: SSM SecureString holding the client secret of the user stand-in client of the authorization server
+  RpId:
+    Type: String
+    Default: ""
+    Description: Passkey RP ID, the default domain of the entry CloudFront distribution (empty until the distribution exists)
+  EdgeTaskCount:
+    Type: Number
+    Default: 2
+    Description: Desired task count of edge-check. Tasks spread over AZs, one per host
+
+Conditions:
+  HasRpId: !Not [!Equals [!Ref RpId, ""]]
+
+Resources:
+  # 健康の確かめは 10 秒ごと、2 回続けて通れば健康。抜けるときの待ちは 10 秒（台を速く 0 にするため）
+  KeycloakTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${Prefix}-keycloak"
+      VpcId: !Ref VpcId
+      TargetType: instance
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckPath: /login/realms/gekko13/.well-known/openid-configuration
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+
+  EdgeCheckTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${Prefix}-edge-check"
+      VpcId: !Ref VpcId
+      TargetType: instance
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckPath: /edge-point
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+
+  KeycloakRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ListenerArn
+      Priority: 10
+      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: [/login, /login/*] } }]
+      Actions: [{ Type: forward, TargetGroupArn: !Ref KeycloakTargetGroup }]
+
+  # D1-a で、顧客のアプリ（BFF）に替える
+  EdgeCheckRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ListenerArn
+      Priority: 100
+      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: ["/*"] } }]
+      Actions: [{ Type: forward, TargetGroupArn: !Ref EdgeCheckTargetGroup }]
+
+  # 段 C の C-3: 認可サーバー（Spring Authorization Server）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
+  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。入口（ALB）には出さない。イメージは SVID が書かれるまで待ってから起動する。
+  AuthTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-auth"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      Volumes:
+        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid }
+      ContainerDefinitions:
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          MountPoints:
+            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
+        - Name: app
+          Image: !Ref AuthImage
+          Essential: true
+          # JVM はこの上限の 75% をヒープにする（services/auth/Dockerfile の MaxRAMPercentage）
+          Memory: 512
+          # svid-helper は root で動き、鍵を root のグループで 0640 にして書く（基盤の UserData の helper.conf）。
+          # app は root でない利用者のまま、グループだけ root にして鍵を読む（docs/findings.md の 4-13）
+          User: "1000:0"
+          PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
+          Environment:
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: ISSUER, Value: https://auth:8443 }
+            - { Name: TRUST_DOMAIN, Value: gekko13.internal }
+          Secrets:
+            - { Name: STANDIN_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}" }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
+
+  # ログインサーバー（Keycloak）。ALB の /login と /login/* の規則で届く。保存先は dev-file の使い捨てで、起動のたびにレルムを取り込む。
+  # 管理者の利用者は作らない（管理画面は CloudFront から誰でも届くため）。
+  # Host は CloudFront が送り先の名前に替えるので、KC_HOSTNAME に完全な URL を渡し、Host に頼らない。
+  KeycloakTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Login server behind the ALB rule for /login. Disposable dev-file storage, realm imported at every start.
+          The full URL in KC_HOSTNAME because CloudFront rewrites Host
+        must: Never add a bootstrap admin user while the admin console is reachable through CloudFront
+    Properties:
+      Family: !Sub "${Prefix}-keycloak"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref KeycloakImage
+          Essential: true
+          # Keycloak の JVM は、既定で上限の 70% をヒープにする
+          Memory: 1024
+          PortMappings:
+            - { ContainerPort: 8080, HostPort: 0, Protocol: tcp }
+          Environment:
+            - { Name: KC_HOSTNAME, Value: !Sub "https://${RpId}/login" }
+            - { Name: KC_HTTP_ENABLED, Value: "true" }
+            - { Name: RP_ID, Value: !Ref RpId }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: keycloak, mode: non-blocking }
+
+  # 確かめの受け口。応答に、タスクと AZ を返す。D0 では、2 つの AZ のどちらの台にも届くかを、これで確かめる。
+  EdgeCheckTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${Prefix}-edge-check"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 64
+          PortMappings:
+            - { ContainerPort: 8080, HostPort: 0, Protocol: tcp }
+          Environment:
+            - { Name: SERVICE, Value: edge-check }
+            - { Name: RP_ID, Value: !Ref RpId }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: edge-check, mode: non-blocking }
+
+  AuthService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ClusterName
+      ServiceName: auth
+      TaskDefinition: !Ref AuthTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Ref NamespaceArn
+        Services: [{ PortName: app, DiscoveryName: auth, ClientAliases: [{ Port: 8443, DnsName: auth }] }]
+
+  # 配信の名前（RpId）がまだないと、KC_HOSTNAME が作れないので、タスク数を 0 にしておく。
+  # 起動からレルムの取り込みまでに時間がかかるので、ALB の健康の確かめを 180 秒待つ
+  KeycloakService:
+    Type: AWS::ECS::Service
+    DependsOn: KeycloakRule
+    Properties:
+      Cluster: !Ref ClusterName
+      ServiceName: keycloak
+      TaskDefinition: !Ref KeycloakTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
+      DesiredCount: !If [HasRpId, 1, 0]
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+      HealthCheckGracePeriodSeconds: 180
+      LoadBalancers: [{ ContainerName: app, ContainerPort: 8080, TargetGroupArn: !Ref KeycloakTargetGroup }]
+
+  # AZ に散らし、同じ台に 2 つ置かない。タスク数が 2 なら、台が 2 台になり、AZ が分かれる
+  EdgeCheckService:
+    Type: AWS::ECS::Service
+    DependsOn: EdgeCheckRule
+    Properties:
+      Cluster: !Ref ClusterName
+      ServiceName: edge-check
+      TaskDefinition: !Ref EdgeCheckTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
+      DesiredCount: !Ref EdgeTaskCount
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+      PlacementConstraints: [{ Type: distinctInstance }]
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
+      HealthCheckGracePeriodSeconds: 60
+      LoadBalancers: [{ ContainerName: app, ContainerPort: 8080, TargetGroupArn: !Ref EdgeCheckTargetGroup }]
+
+Outputs:
+  KeycloakTargetGroupArn: { Value: !Ref KeycloakTargetGroup }
+  EdgeCheckTargetGroupArn: { Value: !Ref EdgeCheckTargetGroup }

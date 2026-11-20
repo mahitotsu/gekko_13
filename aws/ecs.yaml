@@ -1,15 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の検証の実行基盤。ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances 台）に SPIRE の server と agent、BFF、transfer、ledger、
-# 認可サーバー（auth、Spring Authorization Server）とログインサーバー（keycloak）を載せる。
+# gekko13 の検証の実行基盤（段 D の D0 から、基盤とアプリの 2 つのスタックに分けた。アプリは aws/apps.yaml）。
+# ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances 台）に、SPIRE の server と agent を載せる。入口の内部向けの ALB もここに置く。
 # 台の数と AZ を前提にしない。アプリどうしは Service Connect（TCP の中継だけ）で呼び、mTLS はアプリが終える。
 # agent は Cloud Map の DNS 名で server に届く。server の状態（sqlite と鍵）とバンドルは EFS に置く（network のスタック）。
 # 使わない間は aws/scale.sh down で、タスク数を 0 にし、台も 0 にする。AWS の名前は、IPv6 で届くデュアルスタックのものを使う。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
-  gekko13 runtime on ECS (EC2) with a capacity provider (ASG, 0 to MaxInstances hosts): SPIRE server and agent, BFF, transfer, ledger,
-  the authorization server (auth) and the login server (keycloak).
-  Nothing assumes a host count or AZ. Apps call each other through Service Connect (TCP only) and terminate mTLS themselves.
-  Agents reach the server by a Cloud Map DNS name; server state and the bundle live on EFS. Scale to zero with aws/scale.sh down.
+  gekko13 base runtime on ECS (EC2) with a capacity provider (ASG, 0 to MaxInstances hosts): SPIRE server and agent, and the internal ALB of the entry.
+  Apps live in the gekko13-apps stack (aws/apps.yaml). Nothing assumes a host count or AZ. Apps call each other through Service Connect (TCP only)
+  and terminate mTLS themselves. Agents reach the server by a Cloud Map DNS name; server state and the bundle live on EFS. Scale to zero with aws/scale.sh down.
 
 Metadata:
   AWSToolsMetrics:
@@ -47,54 +46,15 @@ Parameters:
     Type: String
     Default: "2"
     Description: Upper bound of the Auto Scaling group. The capacity provider scales between 0 and this
-  TaskCount:
-    Type: Number
-    Default: 1
-    Description: Desired task count of bff, transfer and ledger. Each task lands on a distinct host
   AppImage:
     Type: String
     Description: URI and tag of the gekko13/node image in ECR
-  AuthImage:
-    Type: String
-    Description: URI and tag of the gekko13/auth image (Spring Authorization Server) in ECR
-  KeycloakImage:
-    Type: String
-    Description: URI and tag of the gekko13/keycloak image in ECR
   SpireServerImage:
     Type: String
   SpireAgentImage:
     Type: String
   SpiffeHelperImage:
     Type: String
-  Issuer:
-    Type: String
-  TokenUrl:
-    Type: String
-  AppClientId:
-    Type: String
-  BffClientId:
-    Type: String
-  TransferClientId:
-    Type: String
-  RpId:
-    Type: String
-    Default: ""
-    Description: Passkey RP ID, the default domain of the entry CloudFront distribution (empty until the distribution exists)
-  BffSecretParameter:
-    Type: String
-    Default: /gekko13/bff/client-secret
-    Description: SSM SecureString holding the BFF client secret. Created by the deploy script
-  TransferSecretParameter:
-    Type: String
-    Default: /gekko13/transfer/client-secret
-  ProbeRefreshTokenParameter:
-    Type: String
-    Default: /gekko13/probe/refresh-token
-    Description: User refresh token used by the probe. Written by scripts/aws-login.ts
-  ProbeModeParameter:
-    Type: String
-    Default: /gekko13/probe/mode
-    Description: What the probe runs ("scenarios" or "soak <minutes>"). Written by aws/run-scenarios.sh
   SvidTtlSeconds:
     Type: Number
     Default: 300
@@ -102,14 +62,19 @@ Parameters:
     Type: String
     Default: /gekko13/auth/standin-secret
     Description: SSM SecureString holding the client secret of the user stand-in client of the authorization server. Created by the deploy script
+  AlbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets of the internal ALB. An internal ALB needs subnets in two AZs, even while hosts use one
+  AlbSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group of the internal ALB (network stack). Inbound only from CloudFront VPC origins
   ContainerInsights:
     Type: String
     Default: disabled
     AllowedValues: [enabled, disabled]
     Description: Turn on only while measuring memory (stage C-3). Billed per metric while on
 
-Conditions:
-  HasRpId: !Not [!Equals [!Ref RpId, ""]]
+
 
 Resources:
   Cluster:
@@ -117,7 +82,6 @@ Resources:
     Properties:
       ClusterName: !Ref Prefix
       ClusterSettings: [{ Name: containerInsights, Value: !Ref ContainerInsights }]
-
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -151,7 +115,6 @@ Resources:
         RoutingPolicy: MULTIVALUE
         DnsRecords: [{ Type: A, TTL: 10 }]
       HealthCheckCustomConfig: { FailureThreshold: 1 }
-
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -165,12 +128,10 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles: [!Ref InstanceRole]
-
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -190,12 +151,7 @@ Resources:
               - Effect: Allow
                 Action: ssm:GetParameters
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}"
-                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TransferSecretParameter}"
-                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}"
-                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeModeParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}"
-
   SpireServerTaskRole:
     Type: AWS::IAM::Role
     # aws_iid のノードの確認で、SPIRE の server がインスタンスのタグを読む。権限を DescribeInstances より広げない。
@@ -217,7 +173,6 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - { Effect: Allow, Action: ec2:DescribeInstances, Resource: "*" }
-
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     # IMDSv2 を必須にし、応答のホップを 1 にする。bridge モードのコンテナはインスタンスの認証情報を取れず、
@@ -389,7 +344,6 @@ Resources:
           InstanceWarmupPeriod: 120
         ManagedTerminationProtection: DISABLED
         ManagedDraining: ENABLED
-
   CapacityProviderAssociation:
     Type: AWS::ECS::ClusterCapacityProviderAssociations
     Properties:
@@ -464,7 +418,6 @@ Resources:
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-server, mode: non-blocking }
-
   SpireAgentTask:
     Type: AWS::ECS::TaskDefinition
     # docker の attestor は、呼び出し元の PID からコンテナを探す。ホストの PID と docker のソケットが要る。
@@ -506,434 +459,38 @@ Resources:
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-agent, mode: non-blocking }
-
-  # SVID はタスク専用のボリュームに書き、同じタスクの app だけが読む。ホストのパスを使わないので、1 台に同じサービスのタスクが 2 つあっても重ならない。
-  LedgerTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${Prefix}-ledger"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: ledger, mode: non-blocking }
-        - Name: app
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 96
-          PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
-          Environment:
-            - { Name: SERVICE, Value: ledger }
-            - { Name: SVID_DIR, Value: /svid }
-            - { Name: ISSUER, Value: !Ref Issuer }
-            - { Name: JWKS_URL, Value: !Sub "${Issuer}/.well-known/jwks.json" }
-            - { Name: CALLERS, Value: !Sub '{"spiffe://gekko13.internal/svc/transfer":"${TransferClientId}"}' }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: ledger, mode: non-blocking }
-
-  TransferTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${Prefix}-transfer"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: transfer, mode: non-blocking }
-        - Name: app
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 96
-          PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
-          Environment:
-            - { Name: SERVICE, Value: transfer }
-            - { Name: SVID_DIR, Value: /svid }
-            - { Name: ISSUER, Value: !Ref Issuer }
-            - { Name: JWKS_URL, Value: !Sub "${Issuer}/.well-known/jwks.json" }
-            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
-            - { Name: CLIENT_ID, Value: !Ref TransferClientId }
-            - { Name: ACTOR_SCOPE, Value: internal/actor }
-            - { Name: NEXT_URL, Value: https://ledger:8443 }
-            - { Name: NEXT_ID, Value: spiffe://gekko13.internal/svc/ledger }
-            - { Name: CALLERS, Value: !Sub '{"spiffe://gekko13.internal/svc/bff":"${BffClientId}"}' }
-          Secrets:
-            - { Name: CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${TransferSecretParameter}" }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: transfer, mode: non-blocking }
-
-  BffTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${Prefix}-bff"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: bff, mode: non-blocking }
-        - Name: app
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 96
-          PortMappings: [{ Name: app, ContainerPort: 8080, Protocol: tcp }]
-          Environment:
-            - { Name: SERVICE, Value: bff }
-            - { Name: SVID_DIR, Value: /svid }
-            - { Name: ISSUER, Value: !Ref Issuer }
-            - { Name: JWKS_URL, Value: !Sub "${Issuer}/.well-known/jwks.json" }
-            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
-            - { Name: USER_CLIENT_ID, Value: !Ref AppClientId }
-            - { Name: CLIENT_ID, Value: !Ref BffClientId }
-            - { Name: ACTOR_SCOPE, Value: internal/actor }
-            - { Name: NEXT_URL, Value: https://transfer:8443 }
-            - { Name: NEXT_ID, Value: spiffe://gekko13.internal/svc/transfer }
-          Secrets:
-            - { Name: CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}" }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: bff, mode: non-blocking }
-
-  # シナリオ 1-b: 登録していないファミリー。サービスにせず、aws/run-scenarios.sh が RunTask で起動する。
-  # 確認役が 30 秒待ち、同じタスクの svid-helper に SVID が出たかを ROGUE_RESULT の行に出して終わる。どの台に置かれてもよい。
-  RogueTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${Prefix}-rogue"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: false
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: rogue, mode: non-blocking }
-        - Name: check
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 32
-          Command:
-            - sh
-            - -c
-            - >-
-              sleep 30;
-              if [ -f /svid/svid.pem ]; then echo "ROGUE_RESULT svid"; else echo "ROGUE_RESULT none"; fi
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: rogue, mode: non-blocking }
-
-  # シナリオの実行役。「乗っ取られたタスク」を実際に作って攻撃する。本物のファミリーに、プローブのコンテナを足した別の版を登録し、
-  # そのタスクの svid-helper が正規に得た SVID だけを使う（findings 1-3 の残るリスクを、検証のためにわざと使う）。
-  # Service Connect の中から攻撃するため、タスク数 0 のサービスにする。試験の間だけ aws/run-scenarios.sh が 1 にし、終わったら必ず 0 に戻す。
-  # 走り終えたら PROBE_DONE と終了コードを出して待つ（サービスが起こし直して、もう一度走らないように）。BFF の秘密も持つ。
-  ProbeBffTask:
-    Type: AWS::ECS::TaskDefinition
+  # 段 D の D0: 入口の内部向けの ALB。CloudFront の VPC origin がこの ALB を ARN で指すので、ALB は基盤に置き、作り直さない
+  # （作り直すと ARN が変わり、VPC origin の作り直しに 3〜6 分かかる。docs/findings.md の 4-9）。
+  # ターゲットグループとリスナーの規則は、アプリのスタック（aws/apps.yaml）が足す。既定は 404 を返す。
+  # ALB から台へは、VPC の中を平文の HTTP で送る（ALB は送り先の SPIFFE ID を確かめられない。docs/design-decisions.md）。
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Compromised-task probe: a separate revision in the real bff family, so its own svid-helper legitimately gets the bff SVID.
-          Attacks from inside Service Connect. Kept at zero tasks; aws/run-scenarios.sh sets it to one only during a test
-        must: Keep the service at zero tasks outside tests. Never run-task this family without a revision
+          Stage D0 entry. A CloudFront VPC origin points at this ALB by ARN, so it lives in the base stack and is never replaced.
+          Target groups and listener rules come from aws/apps.yaml. Plain HTTP to hosts inside the VPC
+        must: Keep it internal. Never replace it (the VPC origin would need to be recreated)
     Properties:
-      Family: !Sub "${Prefix}-bff"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-bff, mode: non-blocking }
-        - Name: probe
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 96
-          Command:
-            - sh
-            - -c
-            - >-
-              set -- $PROBE_MODE;
-              if [ "$1" = soak ]; then node scripts/soak.ts --target aws --as bff --minutes "$2"; else node scripts/scenarios.ts --target aws --as bff; fi;
-              echo "PROBE_DONE $?"; exec sleep 86400
-          Environment:
-            - { Name: BFF_URL, Value: http://bff:8080 }
-            - { Name: LEDGER_URL, Value: https://ledger:8443 }
-            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
-            - { Name: APP_CLIENT_ID, Value: !Ref AppClientId }
-            - { Name: BFF_CLIENT_ID, Value: !Ref BffClientId }
-          Secrets:
-            - { Name: BFF_CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}" }
-            - { Name: USER_REFRESH_TOKEN, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}" }
-            - { Name: PROBE_MODE, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeModeParameter}" }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-bff, mode: non-blocking }
+      Name: !Sub "${Prefix}-entry"
+      Type: application
+      Scheme: internal
+      IpAddressType: ipv4
+      Subnets: !Ref AlbSubnetIds
+      SecurityGroups: [!Ref AlbSecurityGroupId]
+      LoadBalancerAttributes:
+        - { Key: idle_timeout.timeout_seconds, Value: "60" }
+        - { Key: routing.http.drop_invalid_header_fields.enabled, Value: "true" }
 
-  ProbeTransferTask:
-    Type: AWS::ECS::TaskDefinition
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Compromised-task probe in the real transfer family (see ProbeBffTask)
-        must: Keep the service at zero tasks outside tests. Never run-task this family without a revision
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
-      Family: !Sub "${Prefix}-transfer"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-transfer, mode: non-blocking }
-        - Name: probe
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 96
-          Command:
-            - sh
-            - -c
-            - >-
-              node scripts/scenarios.ts --target aws --as transfer;
-              echo "PROBE_DONE $?"; exec sleep 86400
-          Environment:
-            - { Name: BFF_URL, Value: http://bff:8080 }
-            - { Name: LEDGER_URL, Value: https://ledger:8443 }
-            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
-            - { Name: APP_CLIENT_ID, Value: !Ref AppClientId }
-            - { Name: BFF_CLIENT_ID, Value: !Ref BffClientId }
-          Secrets:
-            - { Name: BFF_CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}" }
-            - { Name: USER_REFRESH_TOKEN, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}" }
-            - { Name: PROBE_MODE, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeModeParameter}" }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-transfer, mode: non-blocking }
-
-  ProbeLedgerTask:
-    Type: AWS::ECS::TaskDefinition
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: Compromised-task probe in the real ledger family (see ProbeBffTask)
-        must: Keep the service at zero tasks outside tests. Never run-task this family without a revision
-    Properties:
-      Family: !Sub "${Prefix}-ledger"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-ledger, mode: non-blocking }
-        - Name: probe
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 96
-          Command:
-            - sh
-            - -c
-            - >-
-              node scripts/scenarios.ts --target aws --as ledger;
-              echo "PROBE_DONE $?"; exec sleep 86400
-          Environment:
-            - { Name: BFF_URL, Value: http://bff:8080 }
-            - { Name: LEDGER_URL, Value: https://ledger:8443 }
-            - { Name: TOKEN_URL, Value: !Ref TokenUrl }
-            - { Name: APP_CLIENT_ID, Value: !Ref AppClientId }
-            - { Name: BFF_CLIENT_ID, Value: !Ref BffClientId }
-          Secrets:
-            - { Name: BFF_CLIENT_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BffSecretParameter}" }
-            - { Name: USER_REFRESH_TOKEN, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeRefreshTokenParameter}" }
-            - { Name: PROBE_MODE, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProbeModeParameter}" }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: probe-ledger, mode: non-blocking }
-
-  # 段 C の C-3: 認可サーバー（Spring Authorization Server）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
-  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。イメージは SVID が書かれるまで待ってから起動する。
-  AuthTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${Prefix}-auth"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
-        - { Name: svid }
-      ContainerDefinitions:
-        - Name: svid-helper
-          Image: !Ref SpiffeHelperImage
-          Essential: true
-          MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
-          MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
-            - { SourceVolume: svid, ContainerPath: /svid }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
-        - Name: app
-          Image: !Ref AuthImage
-          Essential: true
-          # JVM はこの上限の 75% をヒープにする（services/auth/Dockerfile の MaxRAMPercentage）
-          Memory: 512
-          # svid-helper は root で動き、鍵を root のグループで 0640 にして書く（UserData の helper.conf）。
-          # app は root でない利用者のまま、グループだけ root にして鍵を読む（docs/findings.md）
-          User: "1000:0"
-          PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
-          Environment:
-            - { Name: SVID_DIR, Value: /svid }
-            - { Name: ISSUER, Value: https://auth:8443 }
-            - { Name: TRUST_DOMAIN, Value: gekko13.internal }
-          Secrets:
-            - { Name: STANDIN_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}" }
-          MountPoints:
-            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
-
-  # 段 C の C-3: ログインサーバー（Keycloak）。CloudFront の /login/* が、台の 8081 に届く（gekko13-edge の login の VPC origin）。
-  # 保存先は dev-file の使い捨てで、起動のたびにレルムを取り込む。管理者の利用者は作らない（管理画面は CloudFront から誰でも見えるため）。
-  # Host は CloudFront が送り先の名前に替えるので、KC_HOSTNAME に完全な URL を渡し、Host に頼らない。
-  KeycloakTask:
-    Type: AWS::ECS::TaskDefinition
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: >-
-          Stage C-3 login server. CloudFront /login/* reaches host port 8081 through the login VPC origin.
-          Disposable dev-file storage, realm imported at every start. The full URL in KC_HOSTNAME because CloudFront rewrites Host
-        must: Never add a bootstrap admin user while the admin console is reachable through CloudFront
-    Properties:
-      Family: !Sub "${Prefix}-keycloak"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      ContainerDefinitions:
-        - Name: app
-          Image: !Ref KeycloakImage
-          Essential: true
-          # Keycloak の JVM は、既定で上限の 70% をヒープにする
-          Memory: 1024
-          PortMappings:
-            - { ContainerPort: 8080, HostPort: 8081, Protocol: tcp }
-          Environment:
-            - { Name: KC_HOSTNAME, Value: !Sub "https://${RpId}/login" }
-            - { Name: KC_HTTP_ENABLED, Value: "true" }
-            - { Name: RP_ID, Value: !Ref RpId }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: keycloak, mode: non-blocking }
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: { StatusCode: "404", ContentType: text/plain, MessageBody: not found }
 
   SpireServerService:
     Type: AWS::ECS::Service
@@ -962,155 +519,6 @@ Resources:
       LaunchType: EC2
       SchedulingStrategy: DAEMON
 
-  LedgerService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: ledger
-      TaskDefinition: !Ref LedgerTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: !Ref TaskCount
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
-        Services: [{ PortName: app, DiscoveryName: ledger, ClientAliases: [{ Port: 8443, DnsName: ledger }] }]
-
-  TransferService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: transfer
-      TaskDefinition: !Ref TransferTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: !Ref TaskCount
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
-        Services: [{ PortName: app, DiscoveryName: transfer, ClientAliases: [{ Port: 8443, DnsName: transfer }] }]
-
-  BffService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: bff
-      TaskDefinition: !Ref BffTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: !Ref TaskCount
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
-        Services: [{ PortName: app, DiscoveryName: bff, ClientAliases: [{ Port: 8080, DnsName: bff }] }]
-
-  # プローブのサービス。Service Connect のクライアントの役だけ（受ける名前は持たない）。普段はタスク数 0。
-  ProbeBffService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: probe-bff
-      TaskDefinition: !Ref ProbeBffTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: 0
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration: { Enabled: true, Namespace: !GetAtt Namespace.Arn }
-
-  ProbeTransferService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: probe-transfer
-      TaskDefinition: !Ref ProbeTransferTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: 0
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration: { Enabled: true, Namespace: !GetAtt Namespace.Arn }
-
-  ProbeLedgerService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: probe-ledger
-      TaskDefinition: !Ref ProbeLedgerTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: 0
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration: { Enabled: true, Namespace: !GetAtt Namespace.Arn }
-
-  # 段 C の C-1: CloudFront から台の上のサービスに届くかの確認用。CloudFront は決まったポートを指すので、ホストポートを 8080 に固定する。
-  # 受けるのは、CloudFront の送り先向けのプレフィックスリストからだけ（network のスタックのセキュリティグループ）。
-  EdgeCheckTask:
-    Type: AWS::ECS::TaskDefinition
-    Metadata:
-      com.aws.cloudformation.Context:
-        why: >-
-          Stage C-1b and C-2 check on the app listener (8080). The login listener (8081) now belongs to keycloak (stage C-3).
-          Fixed host port because a VPC origin targets a fixed port
-        must: Accept traffic only from the CloudFront VPC origin security group (network stack)
-    Properties:
-      Family: !Sub "${Prefix}-edge-check"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      ContainerDefinitions:
-        - Name: app
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 64
-          # 8081 は C-3 から Keycloak が使う。C-2 のパスキーの試しの画面（8081）は、もう CloudFront から届かない
-          PortMappings:
-            - { ContainerPort: 8080, HostPort: 8080, Protocol: tcp }
-          Environment:
-            - { Name: SERVICE, Value: edge-check }
-            - { Name: RP_ID, Value: !Ref RpId }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: edge-check, mode: non-blocking }
-
-  EdgeCheckService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: edge-check
-      TaskDefinition: !Ref EdgeCheckTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-
-  AuthService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: auth
-      TaskDefinition: !Ref AuthTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
-      ServiceConnectConfiguration:
-        Enabled: true
-        Namespace: !GetAtt Namespace.Arn
-        Services: [{ PortName: app, DiscoveryName: auth, ClientAliases: [{ Port: 8443, DnsName: auth }] }]
-
-  # 配信の名前（RpId）がまだないと、KC_HOSTNAME が作れないので、タスク数を 0 にしておく
-  KeycloakService:
-    Type: AWS::ECS::Service
-    DependsOn: CapacityProviderAssociation
-    Properties:
-      Cluster: !Ref Cluster
-      ServiceName: keycloak
-      TaskDefinition: !Ref KeycloakTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: !If [HasRpId, 1, 0]
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
 
 Outputs:
   ClusterName: { Value: !Ref Cluster }
@@ -1118,4 +526,8 @@ Outputs:
   AutoScalingGroupName: { Value: !Ref AutoScalingGroup }
   CapacityProviderName: { Value: !Ref CapacityProvider }
   NamespaceName: { Value: !Sub "svc.${Prefix}.internal" }
-  RogueTaskDefinition: { Value: !Ref RogueTask }
+  NamespaceArn: { Value: !GetAtt Namespace.Arn }
+  ExecutionRoleArn: { Value: !GetAtt ExecutionRole.Arn }
+  LoadBalancerArn: { Value: !Ref LoadBalancer }
+  LoadBalancerDnsName: { Value: !GetAtt LoadBalancer.DNSName }
+  ListenerArn: { Value: !Ref Listener }
