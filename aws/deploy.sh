@@ -84,12 +84,6 @@ fi
 
 cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
 
-# 共有の保存先（Aurora Serverless v2）。初めて作るときは 10 分ほどかかる
-cfn --stack-name "$PREFIX-db" --template-file aws/db.yaml --parameter-overrides \
-  "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
-  "VpcId=$(out "$PREFIX-network" VpcId)" \
-  "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)"
-DB_HOST=$(out "$PREFIX-db" DbHost)
 
 # 認可サーバーの、利用者の代わりの窓口（user-standin）の秘密。なければ乱数で作る。値は画面にもファイルにも残さない
 # 秘密を作って SSM の SecureString に置く。すでにあれば作らない（作り直すと、使っている側とずれる）。値は画面にもファイルにも残さない。
@@ -130,6 +124,14 @@ elif ! has_param "$ROOT_KEY" || ! has_param "$ROOT_CERT"; then
 fi
 # Aurora の証明書を確かめる CA（ap-northeast-1 の RSA2048 G1。aws/rds-ca.pem）。秘密ではないので String に置き、毎回書き直す
 aws ssm put-parameter --region "$REGION" --name "/$PREFIX/db/ca" --type String --overwrite --value "file://aws/rds-ca.pem" >/dev/null
+
+# 共有の保存先は、管理者のパスワード（上で SSM に作る）を読むので、秘密を作ったあとに作る
+# 共有の保存先（Aurora Serverless v2）。初めて作るときは 10 分ほどかかる
+cfn --stack-name "$PREFIX-db" --template-file aws/db.yaml --parameter-overrides \
+  "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
+  "VpcId=$(out "$PREFIX-network" VpcId)" \
+  "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)"
+DB_HOST=$(out "$PREFIX-db" DbHost)
 
 # パスキーの RP ID は、入口の配信の名前。配信がまだなければ空にする（配信を作ったあとで、もう一度実行する）
 rp_id() {
