@@ -76,6 +76,7 @@
 - 2026-11-21: タスクのオートスケーリングを、Keycloak と auth に入れる（アラーム 4 つ、月約 0.4 ドル）。持ち主が承認した。
 - 2026-11-21: auth と SPIRE server に、コンテナのヘルスチェックを足す。Service Connect は、新しいタスクが HEALTHY になってから通信を回す。その動きには、欠かせないコンテナにヘルスチェックが要る（ECS の資料、https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect-concepts.html 、2026-11-21 に読んだ）。入れ替えのときに、受けられないタスクへ回さないため。持ち主が承認した。
 - 2026-11-21: 第 1 部の文書（`docs/phase1/`）を、第 2 部の完成を待たずに消す。第 2 部で使い続ける事実と判断は、2026-11-18 に移し終えていた。持ち主が決めた。読むときは、git の履歴（コミット `0a9b494`）から読む。
+- 2026-11-21: 4 つのサービス（spire-server、Keycloak、auth、edge-check）で、ECS の AZ の偏りの直し（`AvailabilityZoneRebalancing`）を有効にし、デプロイの `MaximumPercent` を 200 % にする。インスタンスを止める試しのあと、代わりの auth が残ったインスタンスに置かれ、auth が 2 つとも 1 つの AZ に偏った。ECS は、動いているタスクを自分では並べ直さず、AZ の偏りの直しは `MaximumPercent` が 100 % だと効かない（ECS の資料、https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-rebalancing.html 、2026-11-21 に読んだ）。持ち主が承認した。
 
 ## 次の候補（未実施）
 - design-decisions の段 D の「提案」の行を、持ち主に確かめる。

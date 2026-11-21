@@ -263,7 +263,9 @@ Resources:
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
       DesiredCount: 2
       # ローリングアップデートする。AZ に散らす。タスクの数は、オートスケーリングが 2〜4 で変える（AuthScaling）
-      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
       HealthCheckGracePeriodSeconds: 120
       ServiceConnectConfiguration:
@@ -281,7 +283,9 @@ Resources:
       TaskDefinition: !Ref KeycloakTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
       DesiredCount: !If [HasRpId, 2, 0]
-      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
       NetworkConfiguration:
         AwsvpcConfiguration:
@@ -299,7 +303,8 @@ Resources:
       TaskDefinition: !Ref EdgeCheckTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
       DesiredCount: !Ref EdgeTaskCount
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
       PlacementConstraints: [{ Type: distinctInstance }]
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
       HealthCheckGracePeriodSeconds: 60

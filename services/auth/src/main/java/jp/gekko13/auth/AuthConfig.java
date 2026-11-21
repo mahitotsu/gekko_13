@@ -26,6 +26,8 @@ import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -64,6 +66,8 @@ import org.springframework.security.web.authentication.HttpStatusEntryPoint;
  */
 @Configuration
 public class AuthConfig {
+
+	private static final Logger log = LoggerFactory.getLogger(AuthConfig.class);
 
 	static final String BFF = "bff-client";
 
@@ -208,6 +212,8 @@ public class AuthConfig {
 		else {
 			key = sharedKey(pem);
 		}
+		// 複数のタスクが同じ鍵を持つかを、ログで比べられるようにする。鍵の ID は公開鍵のサムプリントで、秘密は出さない
+		log.info("signing key: shared={}, kid={}", !pem.isBlank(), key.getKeyID());
 		return new ImmutableJWKSet<>(new JWKSet(key));
 	}
 
