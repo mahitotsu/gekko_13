@@ -56,6 +56,10 @@
 | 4-14 | ECS のスタックの更新が止まる前に起きた台は、古い起動テンプレートのまま残った |
 | 4-15 | 入口を内部向けの ALB にすると、台が 0 の状態から約 3 分で使え、2 つの AZ のどちらの台にも届いた |
 | 4-16 | ALB を指す VPC origin を作るのに約 9 分、配信の切り替えに約 1 分、古い VPC origin を消すのに約 7 分かかった |
+| 4-17 | 入口の中継（Web Functions）は、NetworkConnector の先から名前空間の SRV を引き、2 つの AZ のタスクに届いた。本文付きの POST と複数の Set-Cookie が通り、エンドポイントを直接呼ぶと 403 だった |
+| 4-18 | NetworkConnector の操作ロールと Web Functions の実行ロールは、信頼ポリシーに aws:SourceAccount の条件があると、Lambda に引き受けられなかった |
+| 4-19 | CloudFront は、Web Functions の送り先の OAC に、署名の仕方 always を拒み、always-amz-auth を求めた |
+| 4-20 | NetworkConnector を作るのに約 4 分、中継のリビジョンとエンドポイントは十数秒、配信の切り替えに約 3 分かかった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -554,6 +558,61 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 
 - スタック `gekko13-edge` の出来事（2026-11-20、UTC）: `AlbVpcOrigin` の作成 15:27:18〜15:36:30、`Distribution` の更新 15:36:32〜15:37:37、古い 4 つの削除 15:37:39〜15:44:48。
 - 切り替えのあとも、`DomainName` は前と同じだった。
+
+</details>
+
+### 4-17. 入口の中継（Web Functions）は、NetworkConnector の先から名前空間の SRV を引き、2 つの AZ のタスクに届いた。本文付きの POST と複数の Set-Cookie が通り、エンドポイントを直接呼ぶと 403 だった
+**結論:** CloudFront から、OAC で署名して Web Functions の中継を呼び、中継が名前空間 `svc.gekko13.internal` の SRV を VPC の DNS で引いて、タスクへ送った。Lambda の資料は、VPC に関連づけたプライベートのホストゾーンが引けるとだけ書き、Cloud Map の名前空間には触れていない。実際には、Cloud Map の名前空間の SRV も引けた。
+
+| 確かめたこと | 結果 |
+|---|---|
+| `/edge-point` を 6 回 | 6 回とも 200。AZ は 2 種類（1a が 4 回、1c が 2 回） |
+| Keycloak の discovery | 200。issuer は配信の名前 |
+| Keycloak のトークンの受け口へのフォームの POST（知らない client） | 401 の `invalid_client`。本文の `client_id` が Keycloak に届いた |
+| Keycloak の認可の画面 | 200。Set-Cookie が 3 つとも、属性（Path、HttpOnly、SameSite）ごと届いた |
+| 中継のエンドポイントを、署名なしで直接 | 403 |
+
+中継の記録では、11 件の要求がすべて 1 回めの送り先で通り、送り直しもエラーも 0 件だった。中継の中の時間は 2〜34 ms、Keycloak の最初の認可の要求だけが 149 ms だった。実行環境の起動は 340 ms、メモリは 141 MB だった。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `curl https://<配信の名前>/edge-point`（6 回）、`curl` で discovery、トークンの受け口（`grant_type=client_credentials`）、認可の受け口（`client_id=gekko13-app`、PKCE つき）、エンドポイントの名前への直接の `curl`（2026-11-21 05:46〜05:50 UTC）。
+- 中継の記録: `/aws/lambda/web/gekko13-entry` の `proxied` の行の `ms` と `attempt`、`platform.initReport` の `totalDurationMs` と `maxMemoryUsageMb`。
+- 実行環境の版: `nodejs24.x:nodejs.web24.v22`。zip の中は、`scripts/stage-entry.sh` が TypeScript から変えた JavaScript（コミット `f76be6a`）。
+
+</details>
+
+### 4-18. NetworkConnector の操作ロールと Web Functions の実行ロールは、信頼ポリシーに aws:SourceAccount の条件があると、Lambda に引き受けられなかった
+**結論:** どちらのロールも、主体を `lambda.amazonaws.com` にし、`aws:SourceAccount` を自分のアカウントに限る条件を付けた。NetworkConnector の作成は「The service is unable to assume the provided NetworkConnectorOperatorRole」で拒まれた。条件を外して作り直すと、NetworkConnector は通った。次に、リビジョンの作成が「The execution role ... cannot be assumed by lambda.amazonaws.com」で拒まれ、こちらも条件を外すと通った。Lambda の資料の操作ロールの信頼ポリシーにも、gekko_10 の実行ロールにも、条件はない。EC2 のロール（`ec2.amazonaws.com`）では、同じ条件で問題なく動いている。 <!-- check-docs: 残す エラーの文言をそのまま引くため -->
+
+<details>
+<summary>根拠</summary>
+
+- スタック `gekko13-entry` の出来事（2026-11-21、UTC）: `Connector` の CREATE_FAILED（04:55:30）、`Revision` の CREATE_FAILED（05:21:36）。直したコミットは `3572866` と `0078b45`。
+- 資料: https://docs.aws.amazon.com/lambda/latest/dg/web-functions-networking.html の「Operator role permissions」（2026-11-21 に読んだ）。
+
+</details>
+
+### 4-19. CloudFront は、Web Functions の送り先の OAC に、署名の仕方 always を拒み、always-amz-auth を求めた
+**結論:** OAC の `SigningBehavior` を `always` にすると、配信の更新が「Lambda-Web origins require always-amz-auth signing behavior」で拒まれ、配信のスタックは前の状態に巻き戻った。CloudFormation の型は、`never`、`no-override`、`always`、`always-amz-auth` のどれも受け付けるので、型の検査では見つからない。Lambda の資料と gekko_12 の実測 3-8 は、`always-amz-auth` と書いている。 <!-- check-docs: 残す エラーの文言をそのまま引くため -->
+
+<details>
+<summary>根拠</summary>
+
+- スタック `gekko13-edge` の出来事（2026-11-21 05:41 UTC）: `Distribution` の UPDATE_FAILED。直したコミットは `f36f273`。
+
+</details>
+
+### 4-20. NetworkConnector を作るのに約 4 分、中継のリビジョンとエンドポイントは十数秒、配信の切り替えに約 3 分かかった
+**結論:** 入口の中継のスタックは、作り始めから約 5 分でできた。ほとんどが NetworkConnector（ENI を 2 つの AZ に作る）の時間だった。リビジョンは約 4 秒、エンドポイントは約 8 秒だった。止めてあった配信を、送り先を中継に替えて有効にするのに約 3 分かかった。どれも、作るときに一度だけかかる時間で、使わない間は消さないので、戻すときにはかからない。巻き戻しで NetworkConnector を消すのには、約 2 分かかった。
+
+<details>
+<summary>根拠</summary>
+
+- スタック `gekko13-entry` の出来事（2026-11-21、UTC）: `Connector` 05:36:13〜05:40:29、`Revision` 05:40:31〜05:40:35、`Endpoint` 05:40:36〜05:40:44。
+- スタック `gekko13-edge` の出来事: `Distribution` 05:42:21〜05:45:27。
+- 巻き戻し: `Connector` の DELETE_COMPLETE は 04:57:47（CREATE_FAILED の約 2 分後）。
 
 </details>
 
