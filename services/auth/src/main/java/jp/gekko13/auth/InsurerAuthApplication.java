@@ -4,13 +4,13 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
-/** 段 C の C-4 の認可サーバー。SPIFFE の mTLS を自分で終え、出すトークンを呼び手の SVID の証明書に結ぶ。 */
+/** 認可サーバー（insurer-auth）。トークンを出し、替える（architecture の 2 章、D-19）。 */
 @SpringBootApplication
 @ConfigurationPropertiesScan
-public class AuthApplication {
+public class InsurerAuthApplication {
 
 	public static void main(String[] args) {
-		SpringApplication.run(AuthApplication.class, args);
+		SpringApplication.run(InsurerAuthApplication.class, args);
 	}
 
 }

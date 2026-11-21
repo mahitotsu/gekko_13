@@ -1,0 +1,149 @@
+/* 顧客のアプリの見た目（D-48）。Tailwind CSS が、使ったクラスから静的な CSS を作る。インラインのスタイルは使わない（G32）。
+   色は、意味ごとの値（トークン）で決め、ライトとダークで値を替える。部品は components/ui.tsx にある。 */
+@import "tailwindcss";
+
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+:root {
+  color-scheme: light dark;
+  --background: oklch(0.985 0.002 250);
+  --foreground: oklch(0.21 0.02 260);
+  --card: oklch(1 0 0);
+  --muted: oklch(0.96 0.005 250);
+  --muted-foreground: oklch(0.5 0.02 260);
+  --border: oklch(0.91 0.008 250);
+  --primary: oklch(0.45 0.15 255);
+  --primary-foreground: oklch(0.99 0 0);
+  /* 保険会社が署名し、画面が確かめた内容 */
+  --verified: oklch(0.52 0.13 155);
+  --verified-soft: oklch(0.97 0.03 155);
+  /* 営業 AI エージェントの言葉（確かめていない） */
+  --agent: oklch(0.5 0.13 295);
+  --agent-soft: oklch(0.97 0.02 295);
+  --danger: oklch(0.55 0.2 27);
+  --danger-soft: oklch(0.97 0.025 27);
+  --warning: oklch(0.6 0.13 75);
+  --warning-soft: oklch(0.97 0.04 85);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.17 0.01 260);
+    --foreground: oklch(0.95 0.005 250);
+    --card: oklch(0.21 0.012 260);
+    --muted: oklch(0.26 0.012 260);
+    --muted-foreground: oklch(0.72 0.015 260);
+    --border: oklch(0.32 0.012 260);
+    --primary: oklch(0.7 0.13 255);
+    --primary-foreground: oklch(0.17 0.02 260);
+    --verified: oklch(0.75 0.14 155);
+    --verified-soft: oklch(0.25 0.04 155);
+    --agent: oklch(0.76 0.11 295);
+    --agent-soft: oklch(0.25 0.04 295);
+    --danger: oklch(0.7 0.17 25);
+    --danger-soft: oklch(0.26 0.05 25);
+    --warning: oklch(0.8 0.13 85);
+    --warning-soft: oklch(0.27 0.05 85);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-verified: var(--verified);
+  --color-verified-soft: var(--verified-soft);
+  --color-agent: var(--agent);
+  --color-agent-soft: var(--agent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --font-sans: system-ui, "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-foreground font-sans leading-relaxed antialiased;
+  }
+  * {
+    @apply border-border;
+  }
+  /* 隠した要素は、クラスの display より優先して隠す */
+  [hidden] {
+    display: none !important;
+  }
+  button:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
+  [aria-busy] button:disabled {
+    @apply cursor-wait;
+  }
+}
+
+/* 申込みの段。テストは #steps li.done と aria-current を見る */
+#steps li {
+  @apply flex items-center gap-1.5 rounded-full border px-3 py-0.5 text-sm text-muted-foreground;
+}
+#steps li.done {
+  @apply border-verified text-verified;
+}
+#steps li.done::before {
+  content: "✓";
+}
+#steps li[aria-current] {
+  @apply border-primary bg-primary font-semibold text-primary-foreground;
+}
+
+/* カードの枠（details）。開いたカードは、左の線で示す */
+details.tool > summary {
+  @apply flex cursor-pointer list-none items-center gap-2 font-semibold;
+  overflow-wrap: anywhere;
+}
+details.tool > summary::-webkit-details-marker {
+  display: none;
+}
+details.tool > summary::before {
+  content: "▸";
+  @apply text-muted-foreground transition-transform;
+}
+details.tool[open] > summary::before {
+  @apply rotate-90;
+}
+details.tool:not([open]) > summary {
+  @apply font-normal text-muted-foreground;
+}
+
+/* 営業 AI エージェントの言葉の中の Markdown */
+.agent-body > * + * {
+  @apply mt-2;
+}
+.agent-body ul {
+  @apply list-disc pl-5;
+}
+.agent-body ol {
+  @apply list-decimal pl-5;
+}
+.agent-body table {
+  @apply my-1 text-sm;
+}
+.agent-body td,
+.agent-body th {
+  @apply border-b px-2 py-1 text-left;
+}
+
+/* 署名を待つ間の印 */
+.waiting::before {
+  content: "";
+  @apply mr-2 inline-block size-3.5 animate-spin rounded-full border-2 border-current border-r-transparent align-[-0.15em];
+}
+@media (prefers-reduced-motion: reduce) {
+  .waiting::before {
+    animation: none;
+  }
+}

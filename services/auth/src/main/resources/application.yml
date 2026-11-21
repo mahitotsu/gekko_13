@@ -1,24 +1,41 @@
 # 認可サーバーは、SVID で TLS を自分で終える。spiffe-helper が SVID_DIR に書き、入れ替わったら読み直す（reload-on-update）。
-# 証明書を示さない呼び手（client_secret の窓口）も受けるので、client-auth は want にする。示された証明書は、SPIRE のバンドルで確かめる。
+# サービスは SVID の証明書を示す。顧客のアプリの BFF が P で呼ぶ受け口（連絡先、passkey の一覧）も、BFF の SVID で mTLS をかける。
+# 証明書を示さない呼び手を、TLS の層では拒まない（client-auth: want）。受け口ごとに、相手の SPIFFE ID かトークンで確かめる。
 server:
   port: 8443
-  ssl:
-    bundle: svid
-    client-auth: want
-# 認可の記録は、データベースに置く（段 D の D1-a1）。AWS では、AWS の JDBC ラッパーで IAM のデータベース認証にし、パスワードを置かない。
+# 認可の記録、連絡先、登録を外したクライアントは、共有のデータベースに置く（段 D の D1-a1、D1-a2）。ID とパスワードでつなぎ、
+# AWS では Aurora の証明書を確かめる（DB_URL の sslmode=verify-full）。
 # 表は起動のときに、なければ作る（schema.sql。2 つのタスクが同時に作らないよう、アドバイザリーロックを取る）
 spring:
   datasource:
     url: ${DB_URL}
     username: ${DB_USER:auth}
     password: ${DB_PASSWORD:}
-    driver-class-name: ${DB_DRIVER:software.amazon.jdbc.Driver}
+    driver-class-name: ${DB_DRIVER:org.postgresql.Driver}
     hikari:
       maximum-pool-size: 5
   sql:
     init:
       mode: always
       schema-locations: classpath:schema.sql
+# ログインサーバーの宛先。AWS では CloudFront を通した公開の名前（https）で呼び、TLS でログインサーバーを確かめる。
+# 手元では、コンテナの名前で平文の HTTP で呼ぶ
+gekko:
+  issuer: ${ISSUER:https://auth:8443}
+  trust-domain: ${TRUST_DOMAIN:gekko13.internal}
+  login-issuer: ${LOGIN_ISSUER}
+  login-url: ${LOGIN_URL}
+  login-jwks-url: ${gekko.login-url}/realms/insurer/protocol/openid-connect/certs
+  jwt-svid-file: ${JWT_SVID_FILE:/svid/jwt_svid.token}
+logging:
+  level:
+    org.springframework.boot.ssl: info
+---
+# SVID の TLS。試験（test のプロファイル）では、SVID のファイルがないので使わない（証明書は、要求の属性で渡す）
+spring:
+  config:
+    activate:
+      on-profile: "!test"
   ssl:
     bundle:
       watch:
@@ -32,10 +49,7 @@ spring:
             private-key: file:${SVID_DIR:/svid}/svid_key.pem
           truststore:
             certificate: file:${SVID_DIR:/svid}/svid_bundle.pem
-gekko:
-  issuer: ${ISSUER:https://auth:8443}
-  trust-domain: ${TRUST_DOMAIN:gekko13.internal}
-  standin-secret: ${STANDIN_SECRET}
-logging:
-  level:
-    org.springframework.boot.ssl: info
+server:
+  ssl:
+    bundle: svid
+    client-auth: want

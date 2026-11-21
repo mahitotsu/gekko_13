@@ -1,0 +1,16 @@
+// 画面（ブラウザで動く）の型の検査。Node 向けの根の tsconfig と違い、DOM と JSX を使う。npm test が回す
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": [],
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["."]
+}

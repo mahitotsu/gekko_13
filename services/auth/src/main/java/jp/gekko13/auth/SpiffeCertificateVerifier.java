@@ -1,11 +1,7 @@
 package jp.gekko13.auth;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateParsingException;
 import java.security.cert.X509Certificate;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
 import java.util.function.Consumer;
@@ -16,8 +12,9 @@ import org.springframework.security.oauth2.core.OAuth2ErrorCodes;
 import org.springframework.security.oauth2.server.authorization.authentication.OAuth2ClientAuthenticationContext;
 
 /**
- * tls_client_auth で、証明書の SAN の URI（SPIFFE ID）を、登録した SPIFFE ID と照らす。
- * 標準の照合は Subject DN を見るが、SVID の Subject は空のことがあるので差し替える。
+ * tls_client_auth で、証明書の SAN の URI（SPIFFE ID）を、登録した SPIFFE ID と照らす（gekko_11 の D-16）。
+ * 既定の照合は Subject DN を見るので、差し替える。証明書の連鎖は、TLS の層が SPIRE の bundle で確かめる。
+ * 登録を外した窓口は、ここで拒む。
  */
 final class SpiffeCertificateVerifier implements Consumer<OAuth2ClientAuthenticationContext> {
 
@@ -25,20 +22,26 @@ final class SpiffeCertificateVerifier implements Consumer<OAuth2ClientAuthentica
 
 	private static final int URI_NAME = 6;
 
+	private final ClientRevocation revocation;
+
+	SpiffeCertificateVerifier(ClientRevocation revocation) {
+		this.revocation = revocation;
+	}
+
 	@Override
 	public void accept(OAuth2ClientAuthenticationContext context) {
 		X509Certificate[] chain = (X509Certificate[]) context.getAuthentication().getCredentials();
 		String expected = context.getRegisteredClient().getClientSettings().getSetting(SPIFFE_ID);
-		if (!matches(chain[0], expected)) {
+		List<String> uris = uriNames(chain[0]);
+		if (expected == null || uris.size() != 1 || !expected.equals(uris.get(0))) {
 			throw new OAuth2AuthenticationException(
 					new OAuth2Error(OAuth2ErrorCodes.INVALID_CLIENT, "Client authentication failed: spiffe_id", null));
 		}
-	}
-
-	/** SPIFFE の X.509-SVID は URI の SAN をちょうど 1 つ持つ。2 つ以上や 0 は、一致としない。 */
-	static boolean matches(X509Certificate certificate, String expected) {
-		List<String> uris = uriNames(certificate);
-		return expected != null && uris.size() == 1 && expected.equals(uris.get(0));
+		// 登録を外した窓口には、新しいトークンを出さない（G4）
+		if (this.revocation.isRevoked(context.getRegisteredClient().getClientId())) {
+			throw new OAuth2AuthenticationException(
+					new OAuth2Error(OAuth2ErrorCodes.INVALID_CLIENT, "Client registration is revoked", null));
+		}
 	}
 
 	static List<String> uriNames(X509Certificate certificate) {
@@ -51,17 +54,6 @@ final class SpiffeCertificateVerifier implements Consumer<OAuth2ClientAuthentica
 		}
 		catch (CertificateParsingException ex) {
 			return List.of();
-		}
-	}
-
-	/** RFC 8705 の x5t#S256。証明書の DER の SHA-256 を、詰め物なしの base64url で書く。 */
-	static String thumbprint(X509Certificate certificate) {
-		try {
-			byte[] digest = MessageDigest.getInstance("SHA-256").digest(certificate.getEncoded());
-			return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
-		}
-		catch (NoSuchAlgorithmException | CertificateEncodingException ex) {
-			throw new IllegalStateException(ex);
 		}
 	}
 

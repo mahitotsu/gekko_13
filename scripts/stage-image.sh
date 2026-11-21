@@ -10,6 +10,10 @@ cp -r packages services "$OUT/"
 # ここで除くものは、aws/deploy.sh のタグの材料からも除く（材料と中身をそろえる）
 rm -rf "$OUT/services/auth" "$OUT/services/keycloak" "$OUT/services/entry" "$OUT/services/db-init"
 find "$OUT" -type d -name test -prune -exec rm -rf {} +
+# 顧客のアプリの画面は、ホストの Vite でまとめて入れる（段 D の D1-a2）。材料は services/customer-app/web で、イメージのタグの材料に入っている
+rm -rf "$OUT/services/customer-app/dist"
+DIST="$(pwd)/$OUT/services/customer-app/dist"
+(cd services/customer-app && npx --no-install vite build --outDir "$DIST" --emptyOutDir --logLevel error >&2)
 # AWS でシナリオを回す実行役（ECS のタスク gekko13-probe）と、3-e の偽の証明書
 mkdir -p "$OUT/scripts" && cp scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh "$OUT/scripts/"
 scripts/make-fake-certs.sh "$OUT/fixtures/fake"

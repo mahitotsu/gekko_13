@@ -22,8 +22,8 @@ class SharedKeyTest {
 				+ Base64.getMimeEncoder(64, "\n".getBytes()).encodeToString(pair.getPrivate().getEncoded())
 				+ "\n-----END PRIVATE KEY-----\n";
 
-		RSAKey first = AuthConfig.sharedKey(pem);
-		RSAKey second = AuthConfig.sharedKey(pem);
+		RSAKey first = AuthorizationServerConfig.sharedKey(pem);
+		RSAKey second = AuthorizationServerConfig.sharedKey(pem);
 
 		assertThat(first.getKeyID()).isEqualTo(second.getKeyID()).isEqualTo(first.computeThumbprint().toString());
 		assertThat(first.toRSAPublicKey()).isEqualTo(pair.getPublic());

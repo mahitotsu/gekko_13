@@ -3,3 +3,4 @@ local/run/
 *.log
 .env
 services/*/target/
+services/*/dist/

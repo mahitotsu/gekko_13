@@ -16,21 +16,20 @@ import org.springframework.util.StringUtils;
 
 /**
  * TLS で示された証明書を、tls_client_auth の認証として受け取る。
- * 標準の変換部品は、連鎖が 1 枚だと self_signed_tls_client_auth とみなす。SPIRE の SVID は 1 枚で示されるので、差し替える
- * （gekko_11 の実測 F-G50）。連鎖は、Tomcat の TLS の層が SPIRE のバンドルで確かめ済みである。
+ * 標準の変換部品は、連鎖が 1 枚だと self_signed_tls_client_auth とみなす。SPIRE の SVID は、認証局の証明書を
+ * 付けずに 1 枚で示されることが多いので、差し替える。連鎖は、TLS の層が SPIRE の bundle で確かめ済みである。
  */
 final class SpiffeCertificateConverter implements AuthenticationConverter {
 
-	static final String CERTIFICATE_ATTRIBUTE = "jakarta.servlet.request.X509Certificate";
-
 	@Override
 	public Authentication convert(HttpServletRequest request) {
-		X509Certificate[] chain = (X509Certificate[]) request.getAttribute(CERTIFICATE_ATTRIBUTE);
-		if (chain == null || chain.length == 0) {
+		X509Certificate[] chain = (X509Certificate[]) request.getAttribute("jakarta.servlet.request.X509Certificate");
+		if (chain == null || chain.length == 0 || request.getQueryString() != null
+				&& request.getQueryString().contains(OAuth2ParameterNames.CLIENT_ID)) {
 			return null;
 		}
 		String[] clientIds = request.getParameterValues(OAuth2ParameterNames.CLIENT_ID);
-		if (clientIds == null || clientIds.length == 0 || !StringUtils.hasText(clientIds[0])) {
+		if (clientIds == null || !StringUtils.hasText(clientIds[0])) {
 			return null;
 		}
 		if (clientIds.length != 1) {

@@ -7,6 +7,7 @@ import { request as httpsRequest, createServer, type Server } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PeerCertificate, TLSSocket } from "node:tls";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 
 export interface Svid {
   cert: string;
@@ -183,6 +184,50 @@ export function mtlsCall(
     req.on("error", reject);
     req.end(init.body);
   });
+}
+
+/**
+ * mtlsCall と同じく、相手の SPIFFE ID を確かめて、そのときの SVID で mTLS をかけて呼ぶ。応答の本文は流したまま返す（AG-UI の SSE を中継するため）。
+ * fetch の形で返すので、openid-client や jose の customFetch にも渡せる。
+ */
+export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000): typeof fetch {
+  return (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const headers = Object.fromEntries(new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined)));
+    const body = init.body === undefined || init.body === null ? undefined : init.body instanceof URLSearchParams ? init.body.toString() : String(init.body);
+    const svid = source.current;
+    return new Promise<Response>((resolve, reject) => {
+      const req = httpsRequest(
+        url,
+        {
+          method: init.method ?? "GET",
+          headers,
+          cert: svid.cert,
+          key: svid.key,
+          ca: svid.bundle,
+          agent: false,
+          minVersion: "TLSv1.3",
+          checkServerIdentity: (_host, cert) => {
+            const id = spiffeIdOf(cert.subjectaltname);
+            return id === expectedServerId ? undefined : new Error(`相手の SPIFFE ID が違う: ${id ?? "(なし)"}`);
+          },
+          timeout: timeoutMs,
+        },
+        (res) => {
+          const out = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : v);
+          const status = res.statusCode ?? 502;
+          // 応答が始まったら、待ちの上限を外す（SSE は長く続く）
+          req.setTimeout(0);
+          resolve(new Response(status === 204 || status === 304 ? null : (Readable.toWeb(res) as ReadableStream), { status, headers: out }));
+        },
+      );
+      req.on("timeout", () => req.destroy(new Error("timeout")));
+      req.on("error", reject);
+      init.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")));
+      req.end(body);
+    });
+  }) as typeof fetch;
 }
 
 export async function readBody(req: IncomingMessage, limit = 64 * 1024): Promise<string> {

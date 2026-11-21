@@ -71,6 +71,8 @@
 | 4-29 | auth の 2 タスクは、同じ署名鍵（同じ鍵の ID）を持った |
 | 4-30 | AZ の偏りの直しを有効にすると、偏ったタスクを ECS が並べ直した。`MaximumPercent` を 200 % にすると、ローリングアップデートの間にインスタンスが 1 台増えた |
 | 4-31 | Aurora と冗長化を足しても、インスタンスが 0 の状態から約 3 分半〜4 分で使えた。Aurora は、つながりがなくなって 5 分ほどで一時停止し、再開は 5 秒ほどだった |
+| 4-32 | 認可の記録をデータベースに置くと、`java.lang.Long` の値を含む記録は読み戻せなかった |
+| 4-33 | Keycloak 26.8.2 の管理の API は、トークンにクライアントスコープ `kc-admin-api` の宛先を求めた。スコープは、レルムの JSON に定義しないと、取り込みで割り当てられなかった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -768,6 +770,28 @@ Aurora は、インスタンスが 0 になってから 220〜307 秒で 0 ACU �
 - コマンド: `aws/scale.sh down`、CloudWatch の `ServerlessDatabaseCapacity`（1 分ごとの最小値）が 0 になるまで待つ、`aws/d0-measure.sh`（2026-11-21 12:46〜13:24 UTC、コミット `4d80532` の作り）。結果は `local/run/d0/20261121T125427Z`、`20261121T130611Z`、`20261121T131739Z` の `result.md`。
 - 内訳（始点からの秒。1 回目、2 回目、3 回目）: インスタンスが ASG に加わった 117、134、106。CloudFront を通して Keycloak が応えた 200、206、186。auth の起動（ログの時刻）228、234、210。
 - db-init のログ: 1 回目は 2 つとも 1 回待って +191 秒で終わった。2 回目は片方が 1 回待った。3 回目は 2 つとも待たずに +180 秒で終わった。
+
+</details>
+
+### 4-32. 認可の記録をデータベースに置くと、`java.lang.Long` の値を含む記録は読み戻せなかった
+**結論:** Spring Authorization Server の認可の記録は JSON で保存され、読み戻すときに Jackson の許可の一覧で型を確かめる。取決めの範囲の上限（`maxBenefit`）を `Long` で入れた記録は、一覧にないとして拒まれ、交換が失敗した。`List.of` と `Map.of` の型も一覧にない（D1-a1 で分かっていた）。auth は、記録に入れる値を `ArrayList`、`LinkedHashMap`、`Integer` に写してから入れる（`services/auth` の `Plain`）。
+
+<details>
+<summary>根拠</summary>
+
+- auth の単体の試験を、メモリの H2（PostgreSQL の互換の形）に書いて読み戻す形にして回した（2026-11-21）。`The class with java.lang.Long ... is not in the allowlist`（参照の道は `authorization_details[0].maxBenefit`）で 9 件が失敗し、写す処理を足すと全部通った。
+
+</details>
+
+### 4-33. Keycloak 26.8.2 の管理の API は、トークンにクライアントスコープ `kc-admin-api` の宛先を求めた。スコープは、レルムの JSON に定義しないと、取り込みで割り当てられなかった
+**結論:** 認可サーバーは、JWT-SVID でクライアント認証して、Keycloak の管理の API で利用者の passkey を読む（gekko_11 の D-42）。26.8.2 では、gekko_11（26.8.1）と同じ設定のトークンが 401 になった。クライアントに `kc-admin-api` を既定のスコープとして割り当てると通る。このスコープはレルムを作るときに自動で足されるが、取り込むレルムの JSON の `defaultClientScopes` に名前だけ書いても、取り込みの時点ではまだなく、割り当てが落ちた。スコープそのものを JSON に定義すると、割り当てられた。
+
+<details>
+<summary>根拠</summary>
+
+- Keycloak のログ（管理の API の部分を debug にした）: `Failed to verify identity token: Expected audience not available in the token`（2026-11-21、手元）。
+- Keycloak 26.8.2 の upgrading の資料: 管理の API のトークンには、宛先と `kc-admin-api` のスコープが要る（https://www.keycloak.org/docs/26.8.2/upgrading/ 、2026-11-21 に読んだ）。
+- 割り当ての有無は、データベースの `client_scope_client` で見た。名前だけのときは `basic` だけだった。
 
 </details>
 

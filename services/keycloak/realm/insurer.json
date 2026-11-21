@@ -1,0 +1,418 @@
+{
+  "realm": "insurer",
+  "loginTheme": "insurer",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 3600,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "webAuthnPolicyPasswordlessRpId": "${RP_ID}",
+  "webAuthnPolicyPasswordlessRpEntityName": "教材保険会社",
+  "webAuthnPolicyPasswordlessPasskeysEnabled": true,
+  "webAuthnPolicyPasswordlessMediation": "none",
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessResidentKey": "not specified",
+  "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
+  "webAuthnPolicyPasswordlessAuthenticatorAttachment": "platform",
+  "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": true,
+  "localizationTexts": {
+    "en": {
+      "webauthn-registration-title": "パスキーを登録します。このパスキーで、次からのログインと、申込みの署名をします",
+      "webauthn-registration-init-label": "パスキー",
+      "deleteCredentialTitle": "{0} を消します",
+      "deleteCredentialMessage": "{0} を保険会社から消しますか。消すと、このパスキーでは、ログインも申込みの署名もできなくなります。",
+      "doConfirmDelete": "消す",
+      "doDecline": "やめる",
+      "doRegisterSecurityKey": "パスキーを登録する",
+      "webauthn-doAuthenticate": "パスキーでログイン",
+      "passkey-doAuthenticate": "パスキーでログイン"
+    }
+  },
+  "roles": {
+    "realm": [
+      {
+        "name": "CUSTOMER"
+      },
+      {
+        "name": "AUDITOR"
+      }
+    ]
+  },
+  "clientScopeMappings": {
+    "realm-management": [
+      {
+        "client": "insurer-auth",
+        "roles": [
+          "view-users"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "id": "alice",
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.invalid",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Alice",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_PASSWORD}"
+        }
+      ],
+      "realmRoles": [
+        "CUSTOMER"
+      ],
+      "attributes": {
+        "verified_claims": [
+          "{\"verification\":{\"trust_framework\":\"jp_aml\",\"method\":\"対面で本人確認書類を確認\",\"time\":\"2026-01-15\"},\"claims\":{\"name\":\"Alice\"}}"
+        ]
+      }
+    },
+    {
+      "id": "bob",
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.invalid",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Bob",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_PASSWORD}"
+        }
+      ],
+      "realmRoles": [
+        "CUSTOMER"
+      ],
+      "attributes": {
+        "verified_claims": [
+          "{\"verification\":{\"trust_framework\":\"jp_aml\",\"method\":\"対面で本人確認書類を確認\",\"time\":\"2026-01-15\"},\"claims\":{\"name\":\"Bob\"}}"
+        ]
+      }
+    },
+    {
+      "id": "mallory",
+      "username": "mallory",
+      "enabled": true,
+      "email": "mallory@example.invalid",
+      "emailVerified": true,
+      "firstName": "Mallory",
+      "lastName": "Mallory",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_PASSWORD}"
+        }
+      ],
+      "realmRoles": [
+        "CUSTOMER"
+      ]
+    },
+    {
+      "id": "hanako",
+      "username": "hanako",
+      "enabled": true,
+      "email": "hanako@example.invalid",
+      "emailVerified": true,
+      "firstName": "Hanako",
+      "lastName": "Hanako",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_PASSWORD}"
+        }
+      ],
+      "realmRoles": [
+        "CUSTOMER"
+      ],
+      "attributes": {
+        "verified_claims": [
+          "{\"verification\":{\"trust_framework\":\"jp_aml\",\"method\":\"対面で本人確認書類を確認\",\"time\":\"2026-01-15\"},\"claims\":{\"name\":\"Hanako\"}}"
+        ]
+      }
+    },
+    {
+      "id": "carol",
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@example.invalid",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Carol",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_PASSWORD}"
+        }
+      ],
+      "realmRoles": [
+        "CUSTOMER"
+      ],
+      "attributes": {
+        "verified_claims": [
+          "{\"verification\":{\"trust_framework\":\"jp_aml\",\"method\":\"対面で本人確認書類を確認\",\"time\":\"2026-01-15\"},\"claims\":{\"name\":\"Carol\"}}"
+        ]
+      }
+    },
+    {
+      "id": "kansa",
+      "username": "kansa",
+      "enabled": true,
+      "email": "kansa@example.invalid",
+      "emailVerified": true,
+      "firstName": "Kansa",
+      "lastName": "Kansa",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_PASSWORD}"
+        }
+      ],
+      "realmRoles": [
+        "AUDITOR"
+      ]
+    },
+    {
+      "username": "service-account-insurer-auth",
+      "enabled": true,
+      "serviceAccountClientId": "insurer-auth",
+      "clientRoles": {
+        "realm-management": [
+          "view-users"
+        ]
+      }
+    }
+  ],
+  "identityProviders": [
+    {
+      "alias": "spire",
+      "providerId": "spiffe",
+      "enabled": true,
+      "config": {
+        "trustDomain": "spiffe://${TRUST_DOMAIN}",
+        "bundleEndpoint": "${SPIRE_BUNDLE_ENDPOINT}"
+      }
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "kc-admin-api",
+      "description": "Keycloak 26.8.2 requires this scope (audience) on tokens for the Admin REST API",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "admin-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-admin-api-audience-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "lightweight.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "basic",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "multivalued": "true",
+            "claim.name": "roles",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    },
+    {
+      "name": "apply",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "sales-agent",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "may_act",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": {
+            "claim.name": "may_act",
+            "claim.value": "{\"iss\":\"${AUTH_ISSUER}\",\"sub\":\"sales-agent\"}",
+            "jsonType.label": "JSON",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "verified_claims",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "verified_claims",
+            "claim.name": "verified_claims",
+            "jsonType.label": "JSON",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "issuance",
+          "protocol": "openid-connect",
+          "protocolMapper": "insurer-issuance-mapper",
+          "config": {
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "passkeys",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "insurer-auth",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "customer-app",
+      "publicClient": false,
+      "clientAuthenticatorType": "federated-jwt",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "${APP_ORIGIN}/callback"
+      ],
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "basic"
+      ],
+      "optionalClientScopes": [
+        "apply",
+        "passkeys"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "dpop.bound.access.tokens": "true",
+        "access.token.header.type.rfc9068": "true",
+        "use.refresh.tokens": "true",
+        "post.logout.redirect.uris": "${APP_ORIGIN}/",
+        "jwt.credential.issuer": "spire",
+        "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/customer-app"
+      }
+    },
+    {
+      "clientId": "insurer-audit",
+      "publicClient": false,
+      "clientAuthenticatorType": "federated-jwt",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "${AUDIT_ORIGIN}/login/oauth2/code/insurer-login"
+      ],
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "basic"
+      ],
+      "optionalClientScopes": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "false",
+        "post.logout.redirect.uris": "${AUDIT_ORIGIN}/",
+        "jwt.credential.issuer": "spire",
+        "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/insurer-audit"
+      }
+    },
+    {
+      "clientId": "insurer-auth",
+      "publicClient": false,
+      "clientAuthenticatorType": "federated-jwt",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "defaultClientScopes": [
+        "basic",
+        "kc-admin-api"
+      ],
+      "optionalClientScopes": [],
+      "attributes": {
+        "use.refresh.tokens": "false",
+        "jwt.credential.issuer": "spire",
+        "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/auth"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-management roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "realm-management",
+            "claim.name": "resource_access.realm-management.roles",
+            "multivalued": "true",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ]
+}

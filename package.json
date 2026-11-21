@@ -6,7 +6,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "tsc --noEmit && eslint . && vitest run && scripts/check-templates.sh",
+    "test": "tsc --noEmit && tsc --noEmit -p services/customer-app/web && eslint . && vitest run && scripts/check-templates.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "local:up": "local/up.sh",
@@ -14,15 +14,34 @@
     "scenarios": "node scripts/scenarios.ts"
   },
   "dependencies": {
+    "@hono/node-server": "2.1.0",
     "@simplewebauthn/server": "13.3.3",
-    "jose": "^6.2.17"
+    "canonicalize": "5.1.0",
+    "hono": "4.13.0",
+    "jose": "^6.2.17",
+    "openid-client": "6.8.1"
   },
   "devDependencies": {
+    "@ag-ui/client": "1.0.3",
+    "@ag-ui/core": "1.0.3",
     "@eslint/js": "^9.39.5",
+    "@simplewebauthn/browser": "13.2.2",
+    "@tailwindcss/vite": "4.3.3",
     "@types/node": "^24.19.2",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.2",
+    "@vitejs/plugin-react": "5.1.0",
     "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "playwright-core": "1.64.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwindcss": "4.3.3",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.72.2",
+    "vite": "7.1.12",
     "vitest": "^3.2.7"
   }
 }
