@@ -1,10 +1,12 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージ、認可サーバーとログインサーバーのイメージ、SPIRE と spiffe-helper の写しを置く。
+# 入口の中継（Web Functions。段 D の D0-b）の zip の置き場（S3）もここに置く。Web Functions は、バージョニングを有効にした S3 からしかコードを読まない。
 # ghcr.io は IPv6 で届かない恐れがあるので、インスタンスはここからだけ取る。ほかのスタックより先に作る。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 container registry (ECR): the app image, the authorization server and login server images, and copies of SPIRE and spiffe-helper.
-  Hosts pull only from here because ghcr.io may be unreachable over IPv6. Create before the other stacks.
+  Hosts pull only from here because ghcr.io may be unreachable over IPv6. Also the S3 bucket for the entry relay zip
+  (Lambda Web Functions read code only from a versioned S3 bucket). Create before the other stacks.
 
 Metadata:
   AWSToolsMetrics:
@@ -17,6 +19,43 @@ Parameters:
     AllowedPattern: "[a-z0-9-]+"
 
 Resources:
+  # 入口の中継の zip。キーは中身の SHA-256 にする（aws/deploy.sh）。古い版は 7 日で消す
+  EntryCodeBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Code of the entry relay Web Function. Web Functions read code only from a versioned bucket. Keys are content hashes
+        must: Keep public access blocked. Only the Lambda service may read objects, for the entry function's revisions
+    Properties:
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      BucketEncryption: { ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }] }
+      LifecycleConfiguration:
+        Rules: [{ Id: old-versions, Status: Enabled, NoncurrentVersionExpiration: { NoncurrentDays: 7 } }]
+
+  # Lambda が、入口の関数のリビジョンのためにだけ読める（関数の名前は aws/entry.yaml と揃える）
+  EntryCodeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref EntryCodeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaReadsEntryRevisions
+            Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: [s3:GetObject, s3:GetObjectVersion]
+            Resource: !Sub "${EntryCodeBucket.Arn}/*"
+            Condition:
+              ArnLike: { aws:SourceArn: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:web-function/${Prefix}-entry/revision/*" }
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource: [!GetAtt EntryCodeBucket.Arn, !Sub "${EntryCodeBucket.Arn}/*"]
+            Condition: { Bool: { aws:SecureTransport: "false" } }
+
   AppRepository:
     Type: AWS::ECR::Repository
     # 全サービスで共通の Node.js のイメージ。タグは git のコミットにする。
@@ -80,6 +119,7 @@ Resources:
       EmptyOnDelete: true
 
 Outputs:
+  EntryCodeBucketName: { Value: !Ref EntryCodeBucket }
   AppRepositoryUri: { Value: !GetAtt AppRepository.RepositoryUri }
   AuthRepositoryUri: { Value: !GetAtt AuthRepository.RepositoryUri }
   KeycloakRepositoryUri: { Value: !GetAtt KeycloakRepository.RepositoryUri }

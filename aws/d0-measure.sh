@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 段 D の D0: 台が 0 の状態から、入口（CloudFront → 内部向けの ALB）を通して使えるまでの時間を測る。
+# 段 D の D0 と D0-b: 台が 0 の状態から、入口（D0-b からは CloudFront → 入口の中継）を通して使えるまでの時間を測る。
 # 始点: タスク数を戻した時刻。終点: 次の 3 つがそろった時刻（docs/log.md の 2026-11-21 の定義）。
 #   - CloudFront を通して、Keycloak のレルムの discovery が、配信の名前を issuer にして返る
 #   - auth のログに「Started AuthApplication」が出る
 #   - CloudFront を通した /edge-point の応答に、2 つの違う AZ が現れる
-# 内訳として、台が ASG に加わった時刻、各サービスが RUNNING になった時刻、ALB のターゲットが健康になった時刻も取る。
+# 内訳として、台が ASG に加わった時刻、各サービスが RUNNING になった時刻、Cloud Map のインスタンスが健康になった時刻も取る。
 # 結果は local/run/d0/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/d0-measure.sh
 # 実行すると費用が出る。終わっても台は動いたまま。使い終わったら aws/scale.sh down で 0 にする。
@@ -18,7 +18,7 @@ CLUSTER=$(stack_out gekko13-ecs ClusterName)
 ASG=$(stack_out gekko13-ecs AutoScalingGroupName)
 LOG_GROUP=$(stack_out gekko13-ecs LogGroupName)
 DOMAIN=$(stack_out gekko13-edge DomainName)
-declare -A TG=([keycloak]=$(stack_out gekko13-apps KeycloakTargetGroupArn) [edge-check]=$(stack_out gekko13-apps EdgeCheckTargetGroupArn))
+declare -A DISCOVERY=([keycloak]=$(stack_out gekko13-apps KeycloakDiscoveryId) [edge-check]=$(stack_out gekko13-apps EdgeCheckDiscoveryId))
 hosts() { aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto-scaling-group-names "$ASG" --query 'length(AutoScalingGroups[0].Instances)' --output text; }
 now() { date +%s; }
 
@@ -54,11 +54,11 @@ while :; do
   done < <(aws ecs describe-services --region "$REGION" --cluster "$CLUSTER" --services $SERVICES \
     --query 'services[].[serviceName,runningCount]' --output text)
   for k in keycloak edge-check; do
-    h=$(aws elbv2 describe-target-health --region "$REGION" --target-group-arn "${TG[$k]}" \
-      --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' --output text)
-    [ "$h" -ge 1 ] && mark "$k のターゲットが健康になった"
+    h=$(aws servicediscovery get-instances-health-status --region "$REGION" --service-id "${DISCOVERY[$k]}" \
+      --query 'length(Status.* | [?@==`HEALTHY`])' --output text 2>/dev/null || echo 0)
+    [ "$h" -ge 1 ] && mark "$k が Cloud Map で健康になった"
   done
-  # 入口を通した応答。edge-check は呼ぶたびに ALB が振り分けるので、何度か呼んで AZ を集める
+  # 入口を通した応答。edge-check は呼ぶたびに中継が送り先を選ぶので、何度か呼んで AZ を集める
   if [ -z "${AT[CloudFront を通して Keycloak が応えた]:-}" ] &&
     curl -s --max-time 10 "https://$DOMAIN/login/realms/gekko13/.well-known/openid-configuration" |
     grep -q "\"issuer\":\"https://$DOMAIN/login/realms/gekko13\""; then
@@ -83,7 +83,7 @@ END=$KC
 [ "$AUTH_STARTED" -gt "$END" ] && END=$AUTH_STARTED
 KC_STARTED=$(log_time keycloak/app "started in")
 {
-  echo "# D0 の測定 $(basename "$RUN")"
+  echo "# D0-b の測定 $(basename "$RUN")"
   echo
   echo "| 出来事 | 始点からの秒 |"
   echo "|---|---|"

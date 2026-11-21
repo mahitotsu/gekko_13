@@ -1,13 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 のアプリのスタック（段 D の D0 で、基盤の aws/ecs.yaml から分けた）。基盤のクラスター、名前空間、ALB の上に、アプリのサービスを載せる。
-# 入口: CloudFront の VPC origin → 基盤の内部向けの ALB → ここのターゲットグループ。ECS が、動き出したタスクを、台と動的なポートの組で登録する。
-# 振り分けは ALB のリスナーの規則でする。/login は Keycloak、それ以外は edge-check（D1-a で顧客のアプリに替える）。
-# 台の数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、台は ALB のグループからだけ動的なポートを受ける（network のスタック）。
+# gekko13 のアプリのスタック（段 D の D0 で、基盤の aws/ecs.yaml から分けた）。基盤のクラスターと名前空間の上に、アプリのサービスを載せる。
+# 入口（段 D の D0-b）: CloudFront → 入口の中継（aws/entry.yaml の Web Functions）→ タスク。中継は、名前空間の SRV で送り先を見つける。
+# ECS が、健康なタスクを、台の IP と動的なポートの組で SRV に登録する。健康は、コンテナの健康の確かめで決める（D0 の ALB と同じ URL）。
+# 振り分けは中継がパスでする。/login は Keycloak、それ以外は edge-check（D1-a で顧客のアプリに替える）。
+# 台の数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、台は中継のグループからだけ動的なポートを受ける（network のスタック）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 apps on the base runtime (gekko13-ecs): the login server (keycloak), the authorization server (auth) and the edge check.
-  CloudFront VPC origin -> internal ALB (base stack) -> target groups here. ECS registers tasks by host and dynamic port.
-  Listener rules route /login to keycloak and everything else to edge-check. Nothing assumes a host count or AZ.
+  CloudFront -> entry relay (Lambda Web Function, aws/entry.yaml) -> tasks. ECS registers healthy tasks in SRV records of the
+  namespace by host IP and dynamic port; the relay routes /login to keycloak and everything else to edge-check.
+  Nothing assumes a host count or AZ.
 
 Metadata:
   AWSToolsMetrics:
@@ -17,19 +19,18 @@ Parameters:
   Prefix:
     Type: String
     Default: gekko13
-  VpcId:
-    Type: AWS::EC2::VPC::Id
   ClusterName:
     Type: String
   CapacityProviderName:
     Type: String
   NamespaceArn:
     Type: String
+  NamespaceId:
+    Type: String
+    Description: ID of the base namespace (gekko13-ecs output NamespaceId). The SRV records of keycloak and edge-check live here
   ExecutionRoleArn:
     Type: String
   LogGroupName:
-    Type: String
-  ListenerArn:
     Type: String
   AppImage:
     Type: String
@@ -59,60 +60,35 @@ Conditions:
   HasRpId: !Not [!Equals [!Ref RpId, ""]]
 
 Resources:
-  # 健康の確かめは 10 秒ごと、2 回続けて通れば健康。抜けるときの待ちは 10 秒（台を速く 0 にするため）
-  KeycloakTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  # 入口の中継が引く SRV。ECS が、健康なタスクを、台の IP と動的なポートの組で登録する（bridge なので SRV だけ）。
+  # TTL は 10 秒。止まったタスクには、この間だけ送ることがあり、中継がつながらなければ別のタスクへ送り直す。
+  KeycloakDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          SRV records resolved by the entry relay. ECS registers healthy tasks by host IP and dynamic port (bridge mode allows SRV only).
+          TTL 10 seconds
     Properties:
-      Name: !Sub "${Prefix}-keycloak"
-      VpcId: !Ref VpcId
-      TargetType: instance
-      Protocol: HTTP
-      Port: 8080
-      HealthCheckPath: /login/realms/gekko13/.well-known/openid-configuration
-      HealthCheckIntervalSeconds: 10
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      Matcher: { HttpCode: "200" }
-      TargetGroupAttributes:
-        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
+      Name: keycloak
+      NamespaceId: !Ref NamespaceId
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{ Type: SRV, TTL: 10 }]
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
 
-  EdgeCheckTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  EdgeCheckDiscovery:
+    Type: AWS::ServiceDiscovery::Service
     Properties:
-      Name: !Sub "${Prefix}-edge-check"
-      VpcId: !Ref VpcId
-      TargetType: instance
-      Protocol: HTTP
-      Port: 8080
-      HealthCheckPath: /edge-point
-      HealthCheckIntervalSeconds: 10
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      Matcher: { HttpCode: "200" }
-      TargetGroupAttributes:
-        - { Key: deregistration_delay.timeout_seconds, Value: "10" }
-
-  KeycloakRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref ListenerArn
-      Priority: 10
-      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: [/login, /login/*] } }]
-      Actions: [{ Type: forward, TargetGroupArn: !Ref KeycloakTargetGroup }]
-
-  # D1-a で、顧客のアプリ（BFF）に替える
-  EdgeCheckRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref ListenerArn
-      Priority: 100
-      Conditions: [{ Field: path-pattern, PathPatternConfig: { Values: ["/*"] } }]
-      Actions: [{ Type: forward, TargetGroupArn: !Ref EdgeCheckTargetGroup }]
+      Name: edge-check
+      NamespaceId: !Ref NamespaceId
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{ Type: SRV, TTL: 10 }]
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
 
   # 段 C の C-3: 認可サーバー（Spring Authorization Server）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
-  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。入口（ALB）には出さない。イメージは SVID が書かれるまで待ってから起動する。
+  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。入口の中継には出さない。イメージは SVID が書かれるまで待ってから起動する。
   AuthTask:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -158,7 +134,7 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
 
-  # ログインサーバー（Keycloak）。ALB の /login と /login/* の規則で届く。保存先は dev-file の使い捨てで、起動のたびにレルムを取り込む。
+  # ログインサーバー（Keycloak）。入口の中継が、/login と /login/* を送る。保存先は dev-file の使い捨てで、起動のたびにレルムを取り込む。
   # 管理者の利用者は作らない（管理画面は CloudFront から誰でも届くため）。
   # Host は CloudFront が送り先の名前に替えるので、KC_HOSTNAME に完全な URL を渡し、Host に頼らない。
   KeycloakTask:
@@ -166,7 +142,7 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Login server behind the ALB rule for /login. Disposable dev-file storage, realm imported at every start.
+          Login server behind the entry relay route for /login. Disposable dev-file storage, realm imported at every start.
           The full URL in KC_HOSTNAME because CloudFront rewrites Host
         must: Never add a bootstrap admin user while the admin console is reachable through CloudFront
     Properties:
@@ -182,6 +158,17 @@ Resources:
           Memory: 1024
           PortMappings:
             - { ContainerPort: 8080, HostPort: 0, Protocol: tcp }
+          # イメージに curl がないので、bash の /dev/tcp で discovery を引き、200 を確かめる
+          HealthCheck:
+            Command:
+              - CMD
+              - bash
+              - -c
+              - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /login/realms/gekko13/.well-known/openid-configuration HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && read -r line <&3 && [[ $line == *" 200 "* ]]'
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 180
           Environment:
             - { Name: KC_HOSTNAME, Value: !Sub "https://${RpId}/login" }
             - { Name: KC_HTTP_ENABLED, Value: "true" }
@@ -205,6 +192,12 @@ Resources:
           MemoryReservation: 64
           PortMappings:
             - { ContainerPort: 8080, HostPort: 0, Protocol: tcp }
+          HealthCheck:
+            Command: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/edge-point"]
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
           Environment:
             - { Name: SERVICE, Value: edge-check }
             - { Name: RP_ID, Value: !Ref RpId }
@@ -227,10 +220,9 @@ Resources:
         Services: [{ PortName: app, DiscoveryName: auth, ClientAliases: [{ Port: 8443, DnsName: auth }] }]
 
   # 配信の名前（RpId）がまだないと、KC_HOSTNAME が作れないので、タスク数を 0 にしておく。
-  # 起動からレルムの取り込みまでに時間がかかるので、ALB の健康の確かめを 180 秒待つ
+  # 起動からレルムの取り込みまでに時間がかかるので、健康の確かめを 180 秒待つ
   KeycloakService:
     Type: AWS::ECS::Service
-    DependsOn: KeycloakRule
     Properties:
       Cluster: !Ref ClusterName
       ServiceName: keycloak
@@ -239,12 +231,11 @@ Resources:
       DesiredCount: !If [HasRpId, 1, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
       HealthCheckGracePeriodSeconds: 180
-      LoadBalancers: [{ ContainerName: app, ContainerPort: 8080, TargetGroupArn: !Ref KeycloakTargetGroup }]
+      ServiceRegistries: [{ RegistryArn: !GetAtt KeycloakDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
 
   # AZ に散らし、同じ台に 2 つ置かない。タスク数が 2 なら、台が 2 台になり、AZ が分かれる
   EdgeCheckService:
     Type: AWS::ECS::Service
-    DependsOn: EdgeCheckRule
     Properties:
       Cluster: !Ref ClusterName
       ServiceName: edge-check
@@ -255,8 +246,8 @@ Resources:
       PlacementConstraints: [{ Type: distinctInstance }]
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
       HealthCheckGracePeriodSeconds: 60
-      LoadBalancers: [{ ContainerName: app, ContainerPort: 8080, TargetGroupArn: !Ref EdgeCheckTargetGroup }]
+      ServiceRegistries: [{ RegistryArn: !GetAtt EdgeCheckDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
 
 Outputs:
-  KeycloakTargetGroupArn: { Value: !Ref KeycloakTargetGroup }
-  EdgeCheckTargetGroupArn: { Value: !Ref EdgeCheckTargetGroup }
+  KeycloakDiscoveryId: { Value: !Ref KeycloakDiscovery }
+  EdgeCheckDiscoveryId: { Value: !Ref EdgeCheckDiscovery }

@@ -1,16 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の入口の CloudFront の配信。配信の既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
 # 配信を作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消しても配信は残す（DeletionPolicy: Retain）。
-# 送り先は、基盤（gekko13-ecs）の内部向けの ALB を指す VPC origin 1 つ（段 D の D0）。振り分けは ALB のリスナーの規則でする。
-# ALB は台が入れ替わっても変わらないので、台の入れ替えのたびの向け直しは要らない（段 C までの A と B の組はやめた）。
-# 使わない間は Parked=true で、配信を止め（Enabled: false）、VPC origin を消して ALB から切り離す（aws/park.sh）。
-# 止めている間の送り先は、届くことのない仮の名前（example.com。IANA が例のために取ってある）。配信は残すので、名前（RP ID）は変わらない。
+# 送り先は、入口の中継（aws/entry.yaml の Web Functions）のエンドポイント 1 つ（段 D の D0-b）。振り分けは中継がパスでする。
+# CloudFront は OAC で要求に署名し、中継のリソースポリシーが、この配信からの呼び出しだけを許す。
+# 中継には固定費がないので、使わない間も配信は止めない（台とタスクを 0 にするだけ。D0 の Parked はやめた）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 entry CloudFront distribution. Its default domain (dXXXX.cloudfront.net) becomes the passkey RP ID,
-  so the distribution is retained even if the stack is deleted. The single origin is a VPC origin pointing at the internal ALB
-  of the base stack; the ALB routes by path. No re-pointing when hosts change. Parked=true disables the distribution and
-  removes the VPC origin so that the ALB can be deleted while unused; the domain stays.
+  so the distribution is retained even if the stack is deleted. The single origin is the endpoint of the entry relay
+  (a Lambda Web Function, aws/entry.yaml), signed with OAC; the relay's resource policy admits only this distribution.
+  The relay routes by path. The distribution stays enabled while hosts are at zero.
 
 Metadata:
   AWSToolsMetrics:
@@ -20,38 +19,30 @@ Parameters:
   Prefix:
     Type: String
     Default: gekko13
-  AlbArn:
+  EntryFunctionArn:
     Type: String
-    Default: ""
-    Description: ARN of the internal ALB (gekko13-ecs output LoadBalancerArn). Empty while parked
-  AlbDnsName:
+    Description: ARN of the entry relay Web Function (gekko13-entry output FunctionArn). The resource policy attaches here
+  EntryEndpointArn:
     Type: String
-    Default: ""
-    Description: DNS name of the internal ALB (CloudFront requires a domain name for the origin). Empty while parked
-  Parked:
+    Description: ARN of the relay endpoint (gekko13-entry output EndpointArn). CloudFront may invoke only this endpoint
+  EntryDomainName:
     Type: String
-    Default: "false"
-    AllowedValues: ["true", "false"]
-    Description: true disables the distribution and removes the VPC origin while the ALB does not exist (aws/park.sh)
-
-Conditions:
-  IsParked: !Equals [!Ref Parked, "true"]
-  IsLive: !Not [!Condition IsParked]
+    Description: Domain name of the relay endpoint (gekko13-entry output EndpointDomainName)
 
 Resources:
-  AlbVpcOrigin:
-    Type: AWS::CloudFront::VpcOrigin
-    Condition: IsLive
+  # Web Functions の送り先は、種類 lambda、いつも署名（always）にする（Lambda の資料。ほかの署名の仕方は拒まれる）
+  EntryOac:
+    Type: AWS::CloudFront::OriginAccessControl
     Properties:
-      VpcOriginEndpointConfig:
-        Name: !Sub "${Prefix}-alb"
-        Arn: !Ref AlbArn
-        HTTPPort: 80
-        HTTPSPort: 443
-        OriginProtocolPolicy: http-only
+      OriginAccessControlConfig:
+        Name: !Sub "${Prefix}-entry"
+        Description: !Sub "${Prefix} entry relay (Lambda Web Function)"
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
 
   # キャッシュはしない（CachingDisabled）。送り先には、Host を除く利用者の値を渡す（AllViewerExceptHostHeader）。
-  # 送り先（内部向けの ALB）へは、VPC の中を平文の HTTP で送る。パスの振り分けは ALB がする。
+  # Web Functions は、Host がエンドポイントの名前でない要求を拒むので、Host は送らない（gekko_12 の実測 3-8）。
   Distribution:
     Type: AWS::CloudFront::Distribution
     DeletionPolicy: Retain
@@ -59,36 +50,55 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader). HTTP to the internal ALB
-          inside the VPC. Path routing is done by the ALB listener rules
+          No caching (CachingDisabled). Forward viewer values except Host (AllViewerExceptHostHeader), because Web Functions
+          reject a Host other than the endpoint domain. HTTPS to the relay endpoint, signed with OAC
         must: Never replace or delete this distribution. Its domain is the passkey RP ID
     Properties:
       DistributionConfig:
         Comment: !Sub "${Prefix} entry"
-        Enabled: !If [IsParked, false, true]
+        Enabled: true
         HttpVersion: http2and3
         IPV6Enabled: true
         PriceClass: PriceClass_200
         Origins:
-          - !If
-            - IsParked
-            - Id: parked
-              DomainName: example.com
-              CustomOriginConfig: { OriginProtocolPolicy: https-only, HTTPSPort: 443, HTTPPort: 80 }
-            - Id: alb
-              DomainName: !Ref AlbDnsName
-              VpcOriginConfig:
-                VpcOriginId: !GetAtt AlbVpcOrigin.Id
-                OriginReadTimeout: 30
-                OriginKeepaliveTimeout: 5
+          - Id: entry
+            DomainName: !Ref EntryDomainName
+            OriginAccessControlId: !GetAtt EntryOac.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              HTTPSPort: 443
+              HTTPPort: 80
+              OriginSSLProtocols: [TLSv1.2]
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
         DefaultCacheBehavior:
-          TargetOriginId: !If [IsParked, parked, alb]
+          TargetOriginId: entry
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
           CachedMethods: [GET, HEAD]
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
           OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
           Compress: true
+
+  # Web Function のリソースポリシーは 1 つだけで、この資源が丸ごと持つ。CloudFront に、この配信からだけ、このエンドポイントを呼ばせる
+  EntryInvokePolicy:
+    Type: AWS::Lambda::ResourcePolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: The only resource policy of the relay. CloudFront may invoke only the relay endpoint, and only for this distribution
+        must: Never allow a principal other than cloudfront.amazonaws.com scoped to this distribution
+    Properties:
+      ResourceArn: !Ref EntryFunctionArn
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudFrontInvoke
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: lambda:InvokeWebFunctionEndpoint
+            Resource: !Ref EntryEndpointArn
+            Condition:
+              StringEquals: { aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}" }
 
 Outputs:
   DistributionId: { Value: !Ref Distribution }

@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の入口の中継（段 D の D0-b）。CloudFront の配信（aws/edge.yaml）が OAC で署名して呼ぶ、Lambda の Web Functions。
+# 中継は、パスで送り先のサービスを決め、名前空間の SRV で見つけたタスクへ、VPC の中を平文の HTTP で送る（services/entry）。
+# VPC へは NetworkConnector で出る。ENI は Lambda が 2 つの AZ のサブネットに作り、中継のグループ（network のスタック）を付ける。
+# 固定費がない。使わない間も消さずに置く（台とタスクを 0 にするだけ）。サービス管理の Elastic IP は付けない（固定費になる）。
+# エンドポイントは IAM の認証にし、署名のない直接の呼び出しを拒む。CloudFront だけに呼ばせる許可は、配信の側（aws/edge.yaml）が付ける。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
+Description: >-
+  gekko13 entry relay (stage D0-b): a Lambda Web Function that CloudFront calls with OAC signing. It routes by path and relays
+  requests over plain HTTP to tasks found through SRV records of the namespace. It reaches the VPC through a network connector.
+  No fixed monthly cost; keep it while hosts are at zero. IAM auth on the endpoint; the CloudFront grant lives in aws/edge.yaml.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the network connector ENIs. Two subnets in different AZs are required
+  EntrySecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group of the entry relay ENIs (network stack). No inbound; outbound to host dynamic ports and DNS
+  CodeBucket:
+    Type: String
+    Description: Versioned S3 bucket holding the relay zip (gekko13-registry output EntryCodeBucketName)
+  CodeKey:
+    Type: String
+    Description: S3 key of the relay zip. aws/deploy.sh uses the content hash
+  CodeVersion:
+    Type: String
+    Description: S3 object version of the relay zip
+  NamespaceName:
+    Type: String
+    Default: svc.gekko13.internal
+  Routes:
+    Type: String
+    Default: /login=keycloak,/=edge-check
+    Description: Path prefix to service routing of the relay. Longest prefix wins
+
+Resources:
+  # Web Functions は、2 つのロググループに書く（.local はエンドポイントが動くリージョンごと）。gekko_10 の作りに合わせた
+  CentralLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/web/${Prefix}-entry"
+      RetentionInDays: 7
+  LocalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/web/${Prefix}-entry.local"
+      RetentionInDays: 7
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: The relay only writes its own logs. It calls no AWS API (targets come from DNS)
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource:
+                  - !GetAtt CentralLogGroup.Arn
+                  - !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/web/${Prefix}-entry.local:*"
+
+  # NetworkConnector が ENI を作るときに Lambda が引き受けるロール（Lambda の資料の「Operator role permissions」に従う）
+  ConnectorOperatorRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Assumed by Lambda to create the network connector ENIs, following the Lambda guide (operator role permissions)
+        must: Do not grant Elastic IP actions (service-managed EIPs have a fixed hourly cost)
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: connector-enis
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ec2:CreateNetworkInterface
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*"
+              - Effect: Allow
+                Action: ec2:CreateTags
+                Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*"
+                Condition: { StringEquals: { ec2:ManagedResourceOperator: network-connectors.lambda.amazonaws.com } }
+              - Effect: Allow
+                Action: [ec2:DescribeNetworkInterfaces, ec2:DescribeSubnets, ec2:DescribeSecurityGroups, ec2:DescribeVpcs]
+                Resource: "*"
+
+  # IPv4 だけにする。送り先は VPC の中の台（プライベートの IPv4）だけで、外へは出ない
+  Connector:
+    Type: AWS::Lambda::NetworkConnector
+    Properties:
+      Name: !Sub "${Prefix}-entry"
+      OperatorRole: !GetAtt ConnectorOperatorRole.Arn
+      Configuration:
+        VpcEgressConfiguration:
+          SubnetIds: !Ref SubnetIds
+          SecurityGroupIds: [!Ref EntrySecurityGroupId]
+          NetworkProtocol: IPv4
+          AssociatedComputeResourceTypes: [WebFunction]
+
+  WebFunction:
+    Type: AWS::Lambda::WebFunction
+    Properties:
+      FunctionName: !Sub "${Prefix}-entry"
+
+  # リビジョンは作ったあとに変えられない。コードか設定が変わると、CloudFormation が新しいリビジョンに置き換える。
+  # 待つ上限は 30 秒（CloudFront の送り先の応答の待ちと同じ）。中継が送り先を待つのは 25 秒まで（services/entry/src/main.ts）
+  Revision:
+    Type: AWS::Lambda::WebFunctionRevision
+    DependsOn: [CentralLogGroup, LocalLogGroup]
+    Properties:
+      FunctionName: !GetAtt WebFunction.FunctionArn
+      Description: entry relay
+      BuildConfig:
+        CodeConfig:
+          S3Object: { Bucket: !Ref CodeBucket, Key: !Ref CodeKey, VersionId: !Ref CodeVersion }
+        RuntimeConfig: { Runtime: nodejs24.x }
+      ServiceConfig:
+        ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+        TimeoutSeconds: 30
+        MaxConcurrencyPerEnvironment: 64
+        EgressNetworkConnectorArn: !GetAtt Connector.LatestVersionArn
+        EnvironmentVariables:
+          ROUTES: !Ref Routes
+          NAMESPACE: !Ref NamespaceName
+          SRV_CACHE_MS: "10000"
+          UPSTREAM_TIMEOUT_MS: "25000"
+
+  # NetworkConnector は HomeRegion のエンドポイントでだけ使える（Lambda の資料）
+  Endpoint:
+    Type: AWS::Lambda::WebFunctionEndpoint
+    Properties:
+      FunctionName: !GetAtt WebFunction.FunctionArn
+      EndpointName: main
+      EndpointType: HomeRegion
+      AuthType: IamAuth
+      RevisionWeights: [{ RevisionId: !GetAtt Revision.RevisionId, Weight: 100 }]
+
+Outputs:
+  FunctionArn: { Value: !GetAtt WebFunction.FunctionArn }
+  EndpointArn: { Value: !GetAtt Endpoint.EndpointArn }
+  EndpointDomainName: { Value: !GetAtt Endpoint.DomainName }
+  ConnectorArn: { Value: !GetAtt Connector.LatestVersionArn }

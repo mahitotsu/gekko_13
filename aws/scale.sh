@@ -2,7 +2,7 @@
 # AWS の段: 使わない間は down で、各サービスのタスク数を 0 にし、キャパシティプロバイダーに台を 0 まで縮めさせる。up で戻す。
 # 台の数は、マネージドスケーリングが決める。down のときだけ、タスクが 0 になってから ASG の希望台数を直接 0 にする
 # （マネージドスケーリングの縮小は、アラームが 15 分待つため。docs/findings.md）。
-# SPIRE server の状態は EFS にあるので、台が入れ替わっても CA と登録は残る。入口の ALB は台に依らないので、向け直しは要らない。
+# SPIRE server の状態は EFS にあるので、台が入れ替わっても CA と登録は残る。入口の中継は名前空間の SRV で送り先を見つけるので、向け直しは要らない。
 # 使い方:
 #   aws/scale.sh down        DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ（数分）
 #   aws/scale.sh up          spire-server、auth、keycloak を 1、edge-check を GEKKO13_EDGE_TASKS（既定 2）にして、安定するまで待つ

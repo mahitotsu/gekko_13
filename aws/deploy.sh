@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # AWS の段の資源を、決まった順番で作る。実行すると費用が出る（EC2 は動いている間、1 時間ごと）。
 # 使い方: aws/deploy.sh
-#   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く。既定は 1。入口の ALB は、いつも 2 つの AZ のサブネットに置く。
+#   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く。既定は 1。入口の中継の ENI は、いつも 2 つの AZ のサブネットに置く。
 #   GEKKO13_MAX_HOSTS で台の上限を（既定 2）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
 #   GEKKO13_INSTANCE_TYPE で台の大きさを（既定 t4g.small）、GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。
-# 順番: registry → イメージ → network → ecs（基盤と ALB）→ apps（アプリ）→ edge（CloudFront の配信）。
+# 順番: registry → イメージと中継の zip → network → ecs（基盤）→ apps（アプリ）→ entry（入口の中継）→ edge（CloudFront の配信）。
 # 段 D の D0 から、Cognito と第 1 部のアプリ（bff、transfer、ledger）は作らない。Cognito のスタックは、第 2 部の完成のときに消す。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -58,8 +58,16 @@ docker buildx imagetools inspect "$AUTH_REPO:$TAG" >/dev/null 2>&1 || \
 docker buildx imagetools inspect "$KEYCLOAK_REPO:$TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 -t "$KEYCLOAK_REPO:$TAG" --push services/keycloak
 
-# CloudFront が VPC に作るグループ（最初の VPC origin でできる）。入口の ALB は、ここからだけ受ける
-cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml --parameter-overrides "CloudFrontVpcOriginSg=$(scripts/vpc-origin-sg.sh)"
+# 入口の中継（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
+ENTRY_BUCKET=$(out "$PREFIX-registry" EntryCodeBucketName)
+ENTRY_ZIP=$(scripts/stage-entry.sh)
+ENTRY_KEY="entry/$(sha256sum "$ENTRY_ZIP" | cut -c1-64).zip"
+ENTRY_VERSION=$(aws s3api head-object --region "$REGION" --bucket "$ENTRY_BUCKET" --key "$ENTRY_KEY" --query VersionId --output text 2>/dev/null || true)
+if [ -z "$ENTRY_VERSION" ] || [ "$ENTRY_VERSION" = None ]; then
+  ENTRY_VERSION=$(aws s3api put-object --region "$REGION" --bucket "$ENTRY_BUCKET" --key "$ENTRY_KEY" --body "$ENTRY_ZIP" --query VersionId --output text)
+fi
+
+cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
 
 # 認可サーバーの、利用者の代わりの窓口（user-standin）の秘密。なければ乱数で作る。値は画面にもファイルにも残さない
 if ! aws ssm get-parameter --region "$REGION" --name "/$PREFIX/auth/standin-secret" >/dev/null 2>&1; then
@@ -101,8 +109,6 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "VpcId=$(out "$PREFIX-network" VpcId)" \
   "SubnetIds=$SUBNETS" \
   "SecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
-  "AlbSubnetIds=$(out "$PREFIX-network" SubnetIds)" \
-  "AlbSecurityGroupId=$(out "$PREFIX-network" AlbSecurityGroupId)" \
   "FileSystemId=$(out "$PREFIX-network" FileSystemId)" \
   "SpireServerAccessPointId=$(out "$PREFIX-network" SpireServerAccessPointId)" \
   "BundleAccessPointId=$(out "$PREFIX-network" BundleAccessPointId)" \
@@ -126,13 +132,12 @@ for s in keycloak auth edge-check; do
 done
 
 cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-overrides \
-  "VpcId=$(out "$PREFIX-network" VpcId)" \
   "ClusterName=$(out "$PREFIX-ecs" ClusterName)" \
   "CapacityProviderName=$(out "$PREFIX-ecs" CapacityProviderName)" \
   "NamespaceArn=$(out "$PREFIX-ecs" NamespaceArn)" \
   "ExecutionRoleArn=$(out "$PREFIX-ecs" ExecutionRoleArn)" \
   "LogGroupName=$(out "$PREFIX-ecs" LogGroupName)" \
-  "ListenerArn=$(out "$PREFIX-ecs" ListenerArn)" \
+  "NamespaceId=$(out "$PREFIX-ecs" NamespaceId)" \
   "AppImage=$(dualstack "$APP_REPO"):$TAG" \
   "AuthImage=$(dualstack "$AUTH_REPO"):$TAG" \
   "KeycloakImage=$(dualstack "$KEYCLOAK_REPO"):$TAG" \
@@ -140,12 +145,20 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "EdgeTaskCount=$EDGE_TASKS" \
   "RpId=$(rp_id)"
 
-# 入口の配信。送り先は ALB を指す VPC origin 1 つ。ALB は作り直さないので、台が入れ替わっても向け直しは要らない。
+# 入口の中継。ENI は 2 つの AZ のサブネットに置く（NetworkConnector は、違う AZ の 2 つのサブネットを求める）
+cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities CAPABILITY_IAM --parameter-overrides \
+  "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
+  "EntrySecurityGroupId=$(out "$PREFIX-network" EntrySecurityGroupId)" \
+  "CodeBucket=$ENTRY_BUCKET" \
+  "CodeKey=$ENTRY_KEY" \
+  "CodeVersion=$ENTRY_VERSION" \
+  "NamespaceName=$(out "$PREFIX-ecs" NamespaceName)"
+
+# 入口の配信。送り先は、入口の中継のエンドポイント 1 つ。台が入れ替わっても、向け直しは要らない。
 # 配信を初めて作ったときは、RP ID がまだ空なので、もう一度この手順を回す（keycloak のタスク数が 0 のままになる）
-# aws/park.sh で止めていた配信は、ここで動かし直す（Parked=false。渡さないと、前の値の true が引き継がれる）
 cfn --stack-name "$PREFIX-edge" --template-file aws/edge.yaml --parameter-overrides \
-  "AlbArn=$(out "$PREFIX-ecs" LoadBalancerArn)" \
-  "AlbDnsName=$(out "$PREFIX-ecs" LoadBalancerDnsName)" \
-  "Parked=false"
+  "EntryFunctionArn=$(out "$PREFIX-entry" FunctionArn)" \
+  "EntryEndpointArn=$(out "$PREFIX-entry" EndpointArn)" \
+  "EntryDomainName=$(out "$PREFIX-entry" EndpointDomainName)"
 
 echo "作った。入口: https://$(rp_id)/ 。使い終わったら aws/scale.sh down で、タスクと台を 0 にする"

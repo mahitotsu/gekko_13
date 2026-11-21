@@ -4,8 +4,8 @@
 
 ## 要旨
 - AWS は `aws/deploy.sh` で作り、`aws/scale.sh up` で台を起こし、`aws/scale.sh down` でタスクと台を 0 にする。
-- 台が 0 の間も、月額の固定費（入口の ALB、ホストゾーン、アラーム）と、保存の費用は残る。しばらく使わないときは、`aws/park.sh` で固定費を止める（[使わない間に固定費を止める](#使わない間に固定費を止める)）。
-- 台はプライベートのサブネットに置き、外からは CloudFront の VPC origin から、内部向けの ALB を通してだけ届く。台が入れ替わっても、向け直しは要らない。
+- 使わない間も、スタックは消さない。台とタスクを 0 にすれば、残る固定費はホストゾーンとアラームの月 1 ドル未満と、保存の費用だけになる（[使わない間の費用](#使わない間の費用)）。
+- 台はプライベートのサブネットに置き、外からは CloudFront から入口の中継（Lambda の Web Functions）を通してだけ届く。台が入れ替わっても、向け直しは要らない。
 - 今の AWS の作りは、keycloak、auth、確かめの受け口（edge-check）の 3 つのサービス。第 2 部のアプリは、段 D の D1 で載せる。
 
 ## 実行前の約束
@@ -19,7 +19,7 @@
 - AWS の段では、東京リージョン（ap-northeast-1）で、次の資源を作れる権限が要る。
   - 基盤: CloudFormation、IAM、EC2、Auto Scaling、ECS、ECR
   - 保存と発見: EFS、Cloud Map、Route 53（Cloud Map が作るホストゾーン）
-  - 入口: Elastic Load Balancing、CloudFront
+  - 入口: Lambda（Web Functions と NetworkConnector）、S3（中継の zip）、CloudFront
   - 記録と秘密: SSM、CloudWatch Logs
 - 依存は `npm ci` で入れる。
 
@@ -27,7 +27,7 @@
 ```sh
 npm test
 ```
-期待する結果: 型の検査と lint が通り、単体のテストが `11 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバー（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
+期待する結果: 型の検査と lint が通り、テストが `21 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバー（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
 
 ## 認可サーバーをローカルで確かめる
 `local/up.sh` は、第 1 部のサービスに加えて、認可サーバー（`services/auth`、Spring Authorization Server）を立てる。イメージは `services/auth/Dockerfile` から作り、ビルドの中で `mvn test` を回す。段 C の C-4 の判定は、次のとおりに回す。
@@ -50,7 +50,7 @@ local/down.sh
 GEKKO13_AZS=2 GEKKO13_INSTANCE_TYPE=t4g.medium GEKKO13_MAX_HOSTS=2 aws/deploy.sh
 ```
 
-期待する結果: 最後に `作った。入口: https://<配信の名前>/ 。…` と出る。作るスタックは 6 つで、順に registry、network、ecs（基盤と入口の ALB）、apps（アプリ）、edge（CloudFront の配信）。作った直後は、キャパシティプロバイダーが台を起こし、spire-server、auth、keycloak が 1 タスク、edge-check が 2 タスク動く。edge-check の 2 タスクは別の台に置くので、台は 2 台になる。配信を初めて作ったときは、keycloak が 0 タスクのままになる（配信の名前から、自分の URL を作るため）。そのときは、もう一度 `aws/deploy.sh` を回す。
+期待する結果: 最後に `作った。入口: https://<配信の名前>/ 。…` と出る。作るスタックは 6 つで、順に registry、network、ecs（基盤）、apps（アプリ）、entry（入口の中継）、edge（CloudFront の配信）。registry は、イメージと中継の zip の置き場である。作った直後は、キャパシティプロバイダーが台を起こし、spire-server、auth、keycloak が 1 タスク、edge-check が 2 タスク動く。edge-check の 2 タスクは別の台に置くので、台は 2 台になる。配信を初めて作ったときは、keycloak が 0 タスクのままになる（配信の名前から、自分の URL を作るため）。そのときは、もう一度 `aws/deploy.sh` を回す。
 
 メモリを測るときは、`GEKKO13_CONTAINER_INSIGHTS=enabled` を足す。測り終えたら、付けずに回し直して止める。
 
@@ -62,8 +62,8 @@ aws/scale.sh down    # DAEMON 以外の全サービスを 0 にし、ASG の希�
 
 期待する結果: `up` は数分で `安定した（台 2 台）` と出る。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の CA と登録は EFS に残るので、`up` のあとも作り直しは要らない（[findings 3-3](findings.md#3-3-台を-0-にして起こし直してもefs-の上の-spire-の-ca-と登録は残った)）。`up` で戻すタスク数は、`GEKKO13_EDGE_TASKS` で変えられる。
 
-## 入口（CloudFront と ALB）
-入口は、CloudFront の配信（スタック `gekko13-edge`）から、基盤（`gekko13-ecs`）の内部向けの ALB を指す VPC origin 1 つを通る。振り分けは、ALB のリスナーの規則でする。`/login` と `/login/*` は keycloak へ、それ以外は edge-check へ送る。ECS が、動き出したタスクを ALB のターゲットに登録するので、台が入れ替わっても手で向け直すことはない。
+## 入口（CloudFront と中継）
+入口は、CloudFront の配信（スタック `gekko13-edge`）から、入口の中継（スタック `gekko13-entry`、Lambda の Web Functions）を通る。CloudFront は OAC で要求に署名し、中継は IAM の認証で、この配信からの要求だけを受ける。中継は、パスで送り先を決める。`/login` と `/login/*` は keycloak へ、それ以外は edge-check へ送る。送り先は、名前空間 `svc.gekko13.internal` の SRV で見つける。ECS が健康なタスクを SRV に登録するので、台が入れ替わっても手で向け直すことはない。
 
 起こしたあとに、入口を通して届くかを確かめる。
 
@@ -76,22 +76,20 @@ curl -s "https://$D/login/realms/gekko13/.well-known/openid-configuration" | hea
 
 期待する結果: `"az":"ap-northeast-1a"` と `"az":"ap-northeast-1c"` の 2 種類が出る（AZ の名前はアカウントで違う）。続けて、`{"issuer":"https://<配信の名前>/login/realms/gekko13"` で始まる JSON が出る。
 
-配信の名前（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消しても配信が残る作り（`DeletionPolicy: Retain`）にしてある。ALB も作り直さない。ALB の ARN が変わると、VPC origin を作り直すことになり、3〜6 分届かなくなる（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）。
+配信の名前（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消しても配信が残る作り（`DeletionPolicy: Retain`）にしてある。
 
-## 使わない間に固定費を止める
-台を 0 にしても、入口の ALB（月約 17.7 ドル）、Cloud Map のホストゾーン、アラーム、ECR のイメージの費用は残る。しばらく使わないときは、次のとおりに止める。スタックを消すので、回す前に持ち主の承認を得る。
+中継の記録は、CloudWatch Logs の `/aws/lambda/web/gekko13-entry` にある。送り先が見つからないと `no-target`、つながらないと `upstream-failed` の行が出る。
 
-```sh
-aws/park.sh
-```
+## 使わない間の費用
+使わない間は、`aws/scale.sh down` でタスクと台を 0 にするだけにし、スタックは消さない。戻すのは `aws/scale.sh up` だけで足りる。配信は有効なまま残り、送り先のタスクがない間は、中継が 503 の `no target` を返す。
 
-`aws/park.sh` は、台を 0 にし、配信を止めて ALB から切り離してから（`gekko13-edge` の `Parked=true`）、`gekko13-apps`、`gekko13-ecs`、`gekko13-registry` を消す。残すのは、止めた配信（名前と RP ID は変わらない）、`gekko13-network`（VPC と EFS。SPIRE の CA と登録が残る）、`gekko13-cognito`、SSM の引数。どれも固定費がないか、月 0.001 ドル未満。
+止めている間に残る固定費は、次の 4 つである。入口の中継には固定費がない（[AWS の費用の見込み](#aws-の費用の見込み)）。
+- Cloud Map のホストゾーン（月 0.5 ドル）
+- マネージドスケーリングのアラーム 2 つ（月約 0.2 ドル）
+- ECR のイメージの保存
+- EFS の保存
 
-期待する結果: 最後に `止めた。残る固定費は EFS の月 0.001 ドル未満だけ。…` と出る。止めている間は、CloudFront の配信に届かない。
-
-戻すときは、「AWS で作る」の 2 のとおりに `aws/deploy.sh` を回す。ECR のイメージと、ALB を指す VPC origin を作り直すので、30 分ほどかかる（推定。VPC origin だけで約 9 分。[findings 4-16](findings.md#4-16-alb-を指す-vpc-origin-を作るのに約-9-分配信の切り替えに約-1-分古い-vpc-origin-を消すのに約-7-分かかった)）。
-
-## 段 D の D0 を測る
+## 段 D の D0-b を測る
 台が 0 の状態から、入口を通して使えるまでの時間を測る。測り方の定義（始点、終点、判定）は [log.md の 2026-11-21 の決定](log.md#決めたこと) にある。
 
 ```sh
@@ -102,14 +100,14 @@ aws/d0-measure.sh
 期待する結果: `+N 秒: …` の行が、出来事の順に出る。おおよその順は次のとおり。
 1. 台が ASG に加わる。
 2. 各サービスが RUNNING になる。
-3. ALB のターゲットが健康になり、CloudFront を通して Keycloak と 2 つの AZ の edge-check が応える。
+3. Cloud Map のインスタンスが健康になり、CloudFront を通して Keycloak と 2 つの AZ の edge-check が応える。
 4. auth が起動する（Keycloak より先のこともある）。
 
 最後に表と `判定（300 秒以内か）` が出て、`local/run/d0/<時刻>/result.md` に残る。台は動いたままなので、次の回の前と、終わったあとに `aws/scale.sh down` を回す。`local/down.sh` は `local/run/` を消すので、結果は先に写す。
 
 ## 第 1 部と段 C の名残
-次のスクリプトとスタックは、段 D の D0 から AWS で使わない。AWS の作りが変わったので、今は動かない。第 2 部の完成のときに、持ち主の承認を得て消す（[plan.md の 7 節](plan.md#7-制約と第-2-部の完成)）。
-- スクリプト: `aws/run-scenarios.sh`、`aws/create-user.sh`、`aws/edge-point.sh`、`aws/c3-measure.sh`、`scripts/aws-login.ts`、`scripts/aws-collect.ts`
+次のスクリプトとスタックは、段 D の D0 から AWS で使わない（`aws/park.sh` と `scripts/vpc-origin-sg.sh` は D0-b から）。AWS の作りが変わったので、今は動かない。第 2 部の完成のときに、持ち主の承認を得て消す（[plan.md の 7 節](plan.md#7-制約と第-2-部の完成)）。
+- スクリプト: `aws/run-scenarios.sh`、`aws/create-user.sh`、`aws/edge-point.sh`、`aws/c3-measure.sh`、`aws/park.sh`、`scripts/vpc-origin-sg.sh`、`scripts/aws-login.ts`、`scripts/aws-collect.ts`
 - テンプレート: `aws/cognito.yaml`（スタック `gekko13-cognito` も残っている）
 
 第 1 部のサービスのコード（`services/bff`、`services/transfer`、`services/ledger`、`services/issuer`）は、ローカルの `local/up.sh` がまだ使う（C-4 の確かめ）。D1 で、第 2 部のサービスに入れ替える。
@@ -125,14 +123,15 @@ aws servicediscovery list-namespaces --region ap-northeast-1 --query 'Namespaces
 ```
 
 確かめたら、次の順に `aws cloudformation delete-stack` で消す。
-1. `gekko13-apps`: アプリのサービス、タスク定義、ALB のターゲットグループとリスナーの規則が消える。
-2. `gekko13-edge`: ALB を指す VPC origin が消える。配信は残る（次の段落）。基盤の ALB より先に消す（VPC origin が ALB を指しているため）。
-3. `gekko13-ecs`: ECS のクラスター、SPIRE、ASG と台、入口の ALB、Cloud Map の名前空間、ロググループが消える。ALB の固定費は、ここで止まる。
-4. `gekko13-cognito`: 第 1 部の利用者と client が消える。
-5. `gekko13-network`: VPC と EFS が消える。EFS が消えると、SPIRE の CA と登録も消え、次に作るときは新しい CA になる。CloudFront が VPC に作ったグループと ENI が残っていると、VPC を消せない（推定）。
-6. `gekko13-registry`: ECR のイメージは、リポジトリと一緒に消える（`EmptyOnDelete`）。
+1. `gekko13-edge`: OAC と、中継のリソースポリシーが消える。配信は残る（次の段落）。
+2. `gekko13-entry`: 入口の中継、NetworkConnector とその ENI が消える。
+3. `gekko13-apps`: アプリのサービス、タスク定義、SRV のサービスが消える。
+4. `gekko13-ecs`: ECS のクラスター、SPIRE、ASG と台、Cloud Map の名前空間、ロググループが消える。ホストゾーンとアラームの固定費は、ここで止まる。
+5. `gekko13-cognito`: 第 1 部の利用者と client が消える。
+6. `gekko13-network`: VPC と EFS が消える。EFS が消えると、SPIRE の CA と登録も消え、次に作るときは新しい CA になる。D0 までに CloudFront が VPC に作ったグループ（`CloudFront-VPCOrigins-Service-SG`）が残っていると、VPC を消せない（推定）。
+7. `gekko13-registry`: ECR のイメージは、リポジトリと一緒に消える（`EmptyOnDelete`）。中継の zip の置き場（S3）は、中身を消してからでないと消えない。
 
-`gekko13-edge` の CloudFront の配信は、スタックを消しても残る。配信を消すと、RP ID が使えなくなり、登録したパスキーも使えなくなる。消すときは、先に配信を無効にしてから、`aws cloudfront delete-distribution` で消す。配信が使っている VPC origin は消せない（[findings 4-9](findings.md#4-9-cloudfront-は配信が使っている-vpc-origin-の更新を拒んだvpc-origin-を-2-組持って切り替えると向け直しは-36-分だった)）ので、配信を先に消すか、配信から外してから消す。
+`gekko13-edge` の CloudFront の配信は、スタックを消しても残る。配信を消すと、RP ID が使えなくなり、登録したパスキーも使えなくなる。消すときは、先に配信を無効にしてから、`aws cloudfront delete-distribution` で消す。
 
 SSM のパラメーター 5 つは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。認可サーバーの利用者の代わりの窓口の秘密（`/gekko13/auth/standin-secret`）と、第 1 部の 4 つ（BFF と transfer の client の秘密、リフレッシュトークン、プローブの動かし方）。最後に、`list-namespaces` に `svc.gekko13.internal` が残っていないかを確かめる。残っていれば、月額のかかるホストゾーンも残っている（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
 
@@ -145,7 +144,8 @@ SSM のパラメーター 5 つは、スタックの外で作ったので、`aws
 |---|---|---|
 | EC2（t4g.small） | 1 台 1 時間 0.0216 ドル | 台が動いている間 |
 | EC2（t4g.medium） | 1 台 1 時間 0.0432 ドル（料金の API、2026-11-20） | 台が動いている間 |
-| 入口の ALB | 1 時間 0.0243 ドル（月約 17.7 ドル）と、1 LCU 時間 0.008 ドル（料金の API、2026-11-20） | ECS のスタックがある間（台が 0 でも） |
+| 入口の中継（Web Functions） | 要求 100 万件あたり 0.30 ドル、CPU 1 vCPU 秒あたり約 0.000032 ドル、メモリ 1 GB 秒あたり約 0.0000043 ドル（料金の API、2026-11-21）。環境は、要求が止んでから約 5 分残る（gekko_10 の実測 1-7） | 要求を受けている間。使わない間は 0 |
+| NetworkConnector | 料金表に項目がない（2026-11-21）。サービス管理の Elastic IP は付けない（付けると固定費） | — |
 | Container Insights | CloudWatch のメトリクスの従量。数時間なら数セント（推定） | 有効にしている間 |
 | EBS（gp3 30 GB） | 1 台あたり月約 2.9 ドルの日割り（推定。gekko_12 の 20 GB で月約 1.9 ドルから比例で出した） | 台がある間。台が 0 なら 0 |
 | Cloud Map のホストゾーン | 月 0.5 ドル | ECS のスタックがある間（台が 0 でも） |
@@ -153,7 +153,7 @@ SSM のパラメーター 5 つは、スタックの外で作ったので、`aws
 | EFS（Standard） | 1 GB あたり月 0.36 ドル。使うのは数 MB | network のスタックがある間 |
 | ECR、CloudWatch Logs、SSM | ほぼ 0（保存と取り込みの従量。SSM の標準のパラメーターは無料）。ECR は、Keycloak と auth のイメージで約 1 GB 増え、月約 0.1 ドル（推定） | 使った分 |
 | CloudFront の配信 | 月の固定費はない。リクエストと転送の従量（試しの分はごく小さい。推定） | 使った分 |
-| VPC origin、Egress-only のインターネットゲートウェイ | 追加の料金はない（資料。2026-11-19）。EC2 の転送の従量はかかる | — |
+| Egress-only のインターネットゲートウェイ | 追加の料金はない（資料。2026-11-19）。EC2 の転送の従量はかかる | — |
 
 ## つまずきやすい点
 - **`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`:** Node.js の型の取り除きは `node_modules` の中で動かない。パッケージは相対パスで読む。
@@ -165,6 +165,7 @@ SSM のパラメーター 5 つは、スタックの外で作ったので、`aws
 - **`aws/deploy.sh` が「Templates with a size greater than 51,200 bytes」で止まる:** 送る前のコメントの除去が効いていない。`aws/deploy.sh` は ECS とアプリのテンプレートの行頭のコメントを除いてから送る。コメントでない行が増えて 51,200 バイトを超えたら、テンプレートをさらに分ける（[findings 4-12](findings.md#4-12-日本語のコメントを含めた-ecs-のテンプレートは直接送れる大きさ51200-バイトを超えた)）。
 - **起動テンプレートを変えたのに、台が古いまま:** スタックの更新の前から起きていた台は、古い起動テンプレートのまま残る。台の大きさを変えたときは、`aws/scale.sh down` で 0 にしてから起こす（[findings 4-14](findings.md#4-14-ecs-のスタックの更新が止まる前に起きた台は古い起動テンプレートのまま残った)）。
 - **auth が「Error reading certificate or key from file」で起きない:** 台の helper の設定（`/etc/gekko13/spire/helper.conf`）に `key_file_mode = 0640` がない。古い起動テンプレートの台で起きる。台を入れ替える（[findings 4-13](findings.md#4-13-spiffe-helper-は-root-で動き鍵を-0600-で書いたのでroot-でない利用者のアプリは鍵を読めなかった)）。
-- **CloudFront を通すと 502 か 504 になる:** ALB のターゲットが健康でない。`aws elbv2 describe-target-health` で見る。台のグループが ALB のグループから動的なポート（32768〜65535）を受けているか、タスクの受け口が健康の確かめのパスに 200 を返すかを確かめる。
-- **`/` が 404 の `not found` を返す:** ALB のリスナーの既定の応答。アプリのスタック（`gekko13-apps`）の規則がない。`aws/deploy.sh` を回し直す。
+- **CloudFront を通すと 503 の `no target` になる:** 中継が、送り先の SRV を見つけられない。タスクが健康でないか、まだ起きていない。`aws servicediscovery get-instances-health-status --service-id <id>` で見る（id は `gekko13-apps` の出力）。タスクの健康の確かめのパスが 200 を返すかを確かめる。
+- **CloudFront を通すと 502 の `bad gateway` になる:** 中継が、見つけたタスクにつながらない。中継の記録の `upstream-failed` を見る。台のグループが、中継のグループから動的なポート（32768〜65535）を受けているかを確かめる。
+- **CloudFront を通すと 403 になる:** 中継のリソースポリシーが、この配信を許していない。`aws lambda-web get-resource-policy` で、`aws:SourceArn` が配信の ARN かを確かめる。
 - **アプリのスタックの作成が、サービスを作るところで止まる:** 基盤のスタックから消したサービスが、まだ DRAINING で残っているおそれがある（推定）。`aws/deploy.sh` は 10 分まで待つ。それでも止まれば、`aws ecs describe-services` で状態を見て、待ってから回し直す。
