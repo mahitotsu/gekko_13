@@ -59,5 +59,12 @@
 | NetworkConnector | Lambda の Web Functions と MicroVMs が、VPC のサブネットとグループを通って外へ出るための設定。ENI は Lambda が作る |
 | OAC | Origin Access Control。CloudFront が、送り先への要求に SigV4 で署名する仕組み。送り先は、署名で CloudFront からの要求だけを受ける |
 | SRV | DNS のレコードの種類の 1 つ。名前に、送り先の名前とポートの組を対応させる。ECS は bridge のタスクを、台の IP と動的なポートの組で、Cloud Map の SRV に登録する |
+| Aurora Serverless v2 | Aurora の、負荷に合わせて計算の量（ACU）を増減させる形。最小を 0 ACU にすると、つながりがない間は止まり、計算の費用がかからない。この検証の段 D の D1-a1 から、全部のサービスの保存先にする |
+| ACU | Aurora Capacity Unit。Aurora Serverless v2 の計算の量の単位。費用は ACU 時間で決まる |
+| Aurora DSQL | AWS の、サーバーを持たない分散のデータベース。PostgreSQL と互換の部分がある。使わない間は費用がかからない。この検証では比べて退けた |
+| DPU | Distributed Processing Unit。Aurora DSQL の、処理の量の単位。費用は DPU の数で決まる |
+| IAM のデータベース認証 | パスワードの代わりに、IAM の認証情報で署名した短い期限のトークンで、データベースにつなぐ方式 |
+| JGroups | Keycloak が、複数のタスクどうしでキャッシュを共有するための通信の部品。相手の見つけ方の 1 つに、データベースを使う `jdbc-ping` がある |
+| Application Auto Scaling | ECS のサービスのタスクの数などを、CloudWatch のアラームに合わせて増減させる仕組み |
 | token-guard | gekko_11 の部品。受け口でトークンと呼び手を確かめ、出口でトークンを替える。gekko_11 ではサイドカーで、段 D では各アプリが読むライブラリにする |
 | 直送 | 保険会社のシステムが、契約の内容を、AI を通さずに、本人が登録した宛先へ直接送ること。本人は、手元の写しと見比べる（gekko_11） |
