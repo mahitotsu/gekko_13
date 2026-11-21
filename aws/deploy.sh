@@ -3,7 +3,8 @@
 # 使い方: aws/deploy.sh
 #   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く。既定は 1。入口の中継の ENI は、いつも 2 つの AZ のサブネットに置く。
 #   GEKKO13_MAX_HOSTS で台の上限を（既定 2）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
-#   GEKKO13_INSTANCE_TYPE で台の大きさを（既定 t4g.small）、GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。
+#   GEKKO13_INSTANCE_TYPES で台の種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
+#   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。台は全部スポットで起こす。
 # 順番: registry → イメージと中継の zip → network → ecs（基盤）→ apps（アプリ）→ entry（入口の中継）→ edge（CloudFront の配信）。
 # 段 D の D0 から、Cognito と第 1 部のアプリ（bff、transfer、ledger）は作らない。Cognito のスタックは、第 2 部の完成のときに消す。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
@@ -17,7 +18,8 @@ PUBLIC_IPV4=false
 AZS=${GEKKO13_AZS:-1}
 MAX_HOSTS=${GEKKO13_MAX_HOSTS:-2}
 EDGE_TASKS=${GEKKO13_EDGE_TASKS:-2}
-INSTANCE_TYPE=${GEKKO13_INSTANCE_TYPE:-t4g.small}
+INSTANCE_TYPES=${GEKKO13_INSTANCE_TYPES:-t4g.medium,c6g.large,c7g.large,t4g.large}
+[ "$(tr ',' '\n' <<<"$INSTANCE_TYPES" | grep -c .)" = 4 ] || { echo "GEKKO13_INSTANCE_TYPES は、ちょうど 4 つの種類をカンマで並べる: $INSTANCE_TYPES" >&2; exit 2; }
 CONTAINER_INSIGHTS=${GEKKO13_CONTAINER_INSIGHTS:-disabled}
 PREFIX=gekko13
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -122,7 +124,7 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "BundleAccessPointId=$(out "$PREFIX-network" BundleAccessPointId)" \
   "AssignPublicIpv4=$PUBLIC_IPV4" \
   "MaxInstances=$MAX_HOSTS" \
-  "InstanceType=$INSTANCE_TYPE" \
+  "InstanceTypes=$INSTANCE_TYPES" \
   "ContainerInsights=$CONTAINER_INSIGHTS" \
   "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
   "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \

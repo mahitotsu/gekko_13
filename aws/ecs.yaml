@@ -31,9 +31,12 @@ Parameters:
     Type: String
   BundleAccessPointId:
     Type: String
-  InstanceType:
-    Type: String
-    Default: t4g.small
+  InstanceTypes:
+    Type: CommaDelimitedList
+    Default: t4g.medium,c6g.large,c7g.large,t4g.large
+    Description: >-
+      Exactly four arm64 instance types for the Spot pool, cheapest first. Two vCPUs and at least 4 GiB each,
+      so that any of them fits the same tasks
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
@@ -181,7 +184,6 @@ Resources:
     Properties:
       LaunchTemplateData:
         ImageId: !Ref AmiId
-        InstanceType: !Ref InstanceType
         IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
         MetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 1, HttpEndpoint: enabled, HttpProtocolIpv6: enabled }
         NetworkInterfaces:
@@ -206,6 +208,7 @@ Resources:
             ECS_CLUSTER=${Prefix}
             ECS_ENABLE_TASK_IAM_ROLE=true
             ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=false
+            ECS_ENABLE_SPOT_INSTANCE_DRAINING=true
             AWS_USE_DUALSTACK_ENDPOINT=true
             EOF
 
@@ -300,20 +303,38 @@ Resources:
             EOF
 
   # 台の数は、キャパシティプロバイダーのマネージドスケーリングが決める（タスクが 0 なら 0 台）。
+  # 台は、全部スポットで起こす（オンデマンドは 0 台）。種類は 4 つ並べ、空きが多く安いものから選ぶ（price-capacity-optimized）。
+  # 中断の予告を受けると、ECS のエージェントが台からタスクを逃がす（UserData の ECS_ENABLE_SPOT_INSTANCE_DRAINING）。
+  # CapacityRebalance で、中断の危険が高まった台を、前もって入れ替える。
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Metadata:
       com.aws.cloudformation.Context:
-        why: The capacity provider's managed scaling sets the desired capacity (zero hosts when no tasks)
+        why: >-
+          The capacity provider's managed scaling sets the desired capacity (zero hosts when no tasks).
+          All hosts are Spot (no On-Demand base). Four arm64 types with price-capacity-optimized allocation;
+          capacity rebalancing replaces hosts at elevated interruption risk
         must: Keep MinSize at 0. Do not set DesiredCapacity here
     Properties:
       AutoScalingGroupName: !Sub "${Prefix}-ecs"
       MinSize: "0"
       MaxSize: !Ref MaxInstances
       VPCZoneIdentifier: !Ref SubnetIds
-      LaunchTemplate:
-        LaunchTemplateId: !Ref LaunchTemplate
-        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      CapacityRebalance: true
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Select [0, !Ref InstanceTypes]
+            - InstanceType: !Select [1, !Ref InstanceTypes]
+            - InstanceType: !Select [2, !Ref InstanceTypes]
+            - InstanceType: !Select [3, !Ref InstanceTypes]
+        InstancesDistribution:
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: 0
+          SpotAllocationStrategy: price-capacity-optimized
       NewInstancesProtectedFromScaleIn: false
       Tags:
         - { Key: AmazonECSManaged, Value: "true", PropagateAtLaunch: true }

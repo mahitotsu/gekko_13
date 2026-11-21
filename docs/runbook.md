@@ -44,10 +44,10 @@ local/down.sh
 作る前に、変更をコミットしておく。イメージのタグは、イメージごとの材料のコミットした中身から作る（`scripts/image-tag.sh`）。材料にコミットしていない変更があると、`aws/deploy.sh` は `材料にコミットしていない変更がある` と出して止まる。材料が変わらないイメージは作り直さず、そのタスクも入れ替わらない。どのコミットから作ったかは、イメージのラベル `org.opencontainers.image.revision` に残る。
 
 1. `aws sts get-caller-identity` で、作る先のアカウントが正しいかを確かめる。出力は記録に残さない。
-2. 台を 2 つの AZ に置き、t4g.medium を上限 2 台にして作る。
+2. 台を 2 つの AZ に置き、上限 2 台にして作る。台は全部スポットで起き、種類は t4g.medium、c6g.large、c7g.large、t4g.large から、空きが多く安いものが選ばれる。種類を変えるときは、`GEKKO13_INSTANCE_TYPES` に、ちょうど 4 つをカンマで並べる。
 
 ```sh
-GEKKO13_AZS=2 GEKKO13_INSTANCE_TYPE=t4g.medium GEKKO13_MAX_HOSTS=2 aws/deploy.sh
+GEKKO13_AZS=2 GEKKO13_MAX_HOSTS=2 aws/deploy.sh
 ```
 
 期待する結果: 最後に `作った。入口: https://<配信の名前>/ 。…` と出る。作るスタックは 6 つで、順に registry、network、ecs（基盤）、apps（アプリ）、entry（入口の中継）、edge（CloudFront の配信）。registry は、イメージと中継の zip の置き場である。作った直後は、キャパシティプロバイダーが台を起こし、spire-server、auth、keycloak が 1 タスク、edge-check が 2 タスク動く。edge-check の 2 タスクは別の台に置くので、台は 2 台になる。配信を初めて作ったときは、keycloak が 0 タスクのままになる（配信の名前から、自分の URL を作るため）。そのときは、もう一度 `aws/deploy.sh` を回す。
@@ -143,7 +143,7 @@ SSM のパラメーター 5 つは、スタックの外で作ったので、`aws
 | 部品 | 費用 | いつかかるか |
 |---|---|---|
 | EC2（t4g.small） | 1 台 1 時間 0.0216 ドル | 台が動いている間 |
-| EC2（t4g.medium） | 1 台 1 時間 0.0432 ドル（料金の API、2026-11-20） | 台が動いている間 |
+| EC2（t4g.medium） | 1 台 1 時間 0.0432 ドル（料金の API、2026-11-20）。スポットは 1 時間 0.017〜0.019 ドル（スポットの価格の履歴、2026-11-21。時間で変わる） | 台が動いている間。台は全部スポットで起こす |
 | 入口の中継（Web Functions） | 要求 100 万件あたり 0.30 ドル、CPU 1 vCPU 秒あたり約 0.000032 ドル、メモリ 1 GB 秒あたり約 0.0000043 ドル（料金の API、2026-11-21）。環境は、要求が止んでから約 5 分残る（gekko_10 の実測 1-7） | 要求を受けている間。使わない間は 0 |
 | NetworkConnector | 料金表に項目がない（2026-11-21）。サービス管理の Elastic IP は付けない（付けると固定費） | — |
 | Container Insights | CloudWatch のメトリクスの従量。数時間なら数セント（推定） | 有効にしている間 |
@@ -165,6 +165,7 @@ SSM のパラメーター 5 つは、スタックの外で作ったので、`aws
 - **`aws/deploy.sh` が「Templates with a size greater than 51,200 bytes」で止まる:** 送る前のコメントの除去が効いていない。`aws/deploy.sh` は ECS とアプリのテンプレートの行頭のコメントを除いてから送る。コメントでない行が増えて 51,200 バイトを超えたら、テンプレートをさらに分ける（[findings 4-12](findings.md#4-12-日本語のコメントを含めた-ecs-のテンプレートは直接送れる大きさ51200-バイトを超えた)）。
 - **起動テンプレートを変えたのに、台が古いまま:** スタックの更新の前から起きていた台は、古い起動テンプレートのまま残る。台の大きさを変えたときは、`aws/scale.sh down` で 0 にしてから起こす（[findings 4-14](findings.md#4-14-ecs-のスタックの更新が止まる前に起きた台は古い起動テンプレートのまま残った)）。
 - **auth が「Error reading certificate or key from file」で起きない:** 台の helper の設定（`/etc/gekko13/spire/helper.conf`）に `key_file_mode = 0640` がない。古い起動テンプレートの台で起きる。台を入れ替える（[findings 4-13](findings.md#4-13-spiffe-helper-は-root-で動き鍵を-0600-で書いたのでroot-でない利用者のアプリは鍵を読めなかった)）。
+- **台が予告なく入れ替わった:** スポットの中断か、中断の危険が高まった台の入れ替え（CapacityRebalance）である。ECS のエージェントが、予告を受けてタスクを別の台へ逃がす。1 タスクのサービス（spire-server、auth、keycloak）は、起き直すまで 3〜4 分止まり、Keycloak の利用者とパスキーは消える（推定）。`aws autoscaling describe-scaling-activities` で理由を見る。
 - **CloudFront を通すと 503 の `no target` になる:** 中継が、送り先の SRV を見つけられない。タスクが健康でないか、まだ起きていない。`aws servicediscovery get-instances-health-status --service-id <id>` で見る（id は `gekko13-apps` の出力）。タスクの健康の確かめのパスが 200 を返すかを確かめる。
 - **CloudFront を通すと 502 の `bad gateway` になる:** 中継が、見つけたタスクにつながらない。中継の記録の `upstream-failed` を見る。台のグループが、中継のグループから動的なポート（32768〜65535）を受けているかを確かめる。
 - **CloudFront を通すと 403 になる:** 中継のリソースポリシーが、この配信を許していない。`aws lambda-web get-resource-policy` で、`aws:SourceArn` が配信の ARN かを確かめる。
