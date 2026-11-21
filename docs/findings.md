@@ -73,6 +73,8 @@
 | 4-31 | Aurora と冗長化を足しても、インスタンスが 0 の状態から約 3 分半〜4 分で使えた。Aurora は、つながりがなくなって 5 分ほどで一時停止し、再開は 5 秒ほどだった |
 | 4-32 | 認可の記録をデータベースに置くと、`java.lang.Long` の値を含む記録は読み戻せなかった |
 | 4-33 | Keycloak 26.8.2 の管理の API は、トークンにクライアントスコープ `kc-admin-api` の宛先を求めた。スコープは、レルムの JSON に定義しないと、取り込みで割り当てられなかった |
+| 4-34 | CloudFront とリバースプロキシの後ろの Keycloak は、DPoP の `htu` を、届いた要求の URL（http と、CloudFront が替えた Host）で照らし、認可コードの交換を断った |
+| 4-35 | `aws cloudformation deploy` は、渡さないパラメーターに前の値を使い続けた。scale.sh down が 0 にしたオートスケーリングの幅も、スタックの更新では戻らなかった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -792,6 +794,28 @@ Aurora は、インスタンスが 0 になってから 220〜307 秒で 0 ACU �
 - Keycloak のログ（管理の API の部分を debug にした）: `Failed to verify identity token: Expected audience not available in the token`（2026-11-21、手元）。
 - Keycloak 26.8.2 の upgrading の資料: 管理の API のトークンには、宛先と `kc-admin-api` のスコープが要る（https://www.keycloak.org/docs/26.8.2/upgrading/ 、2026-11-21 に読んだ）。
 - 割り当ての有無は、データベースの `client_scope_client` で見た。名前だけのときは `basic` だけだった。
+
+</details>
+
+### 4-34. CloudFront とリバースプロキシの後ろの Keycloak は、DPoP の `htu` を、届いた要求の URL（http と、CloudFront が替えた Host）で照らし、認可コードの交換を断った
+**結論:** `KC_HOSTNAME` に公開の完全な URL を渡しても、DPoP の照合（`invalid_dpop_proof`、`DPoP HTTP URL mismatch`）は直らなかった。入口のリバースプロキシが公開の origin を `X-Forwarded-Proto`、`X-Forwarded-Host`、`X-Forwarded-Port` で付け、Keycloak が `KC_PROXY_HEADERS=xforwarded` で信じると、交換が通った。リバースプロキシは、閲覧者が送った同じ名前のヘッダーを捨てる。手元では、BFF が Host を公開の名前にして Keycloak を直接呼ぶので、この食い違いは出なかった。
+
+<details>
+<summary>根拠</summary>
+
+- Keycloak のログ（2026-11-21 15:00 UTC）: `type="CODE_TO_TOKEN_ERROR" ... error="invalid_dpop_proof", reason="DPoP HTTP URL mismatch"`。同じころ `Non-secure context detected` の警告。
+- 直したあと（コミット `9dc7045` のデプロイ）、`scripts/ui-login.ts` が CloudFront を通して 3 手順とも通った（15:16 UTC）。
+
+</details>
+
+### 4-35. `aws cloudformation deploy` は、渡さないパラメーターに前の値を使い続けた。scale.sh down が 0 にしたオートスケーリングの幅も、スタックの更新では戻らなかった
+**結論:** 入口のリバースプロキシの振り分け（`Routes`）は、テンプレートの既定値を替えても、前の値（`/=edge-check`）のままで「変更なし」になった。`deploy.sh` は `Routes` を毎回明示して渡す。また、`scale.sh down` は、Application Auto Scaling の幅を 0〜0 にする。そのあとスタックの更新で Keycloak のタスクを入れ替えると、入れ替えのあとでタスク数が 0 になった（auth も同じ幅だった）。`deploy.sh` は、更新の前に幅を 2〜4 に戻す。
+
+<details>
+<summary>根拠</summary>
+
+- 1 回目のデプロイ（2026-11-21 14:5x UTC）: `No changes to deploy. Stack gekko13-entry is up to date`。スタックの `Routes` の値は `/login=keycloak,/=edge-check` だった。
+- 2 回目のデプロイのあと: `describe-scalable-targets` で keycloak と auth が `0 0`。Keycloak のイベントは「deployment completed」のあと、タスクを 2 つ止めた。入口は 503 を返した。`aws/scale.sh up` で戻った。
 
 </details>
 

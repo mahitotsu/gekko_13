@@ -88,9 +88,12 @@
 - 2026-11-21: D1-a2-1（ログイン）を手元で通した。ログインサーバーを gekko_11 の insurer-login に替えた。auth は gekko_11 の insurer-auth に替え、連絡先と登録の取り消しをデータベースに移した。顧客のアプリ（画面と BFF）を載せた。確かめは、Docker の Playwright と仮想の認証器で回した（`scripts/ui-login.ts`）。alice と bob が、パスワードでログインし、パスキーを登録し、パスキーだけでログインし直せた。BFF は、JWT-SVID のクライアント認証でトークンを受け取り、SVID の mTLS で認可サーバーに受信箱を登録した。途中で分かった事実は [findings 4-32、4-33](findings.md#4-33-keycloak-2682-の管理の-api-はトークンにクライアントスコープ-kc-admin-api-の宛先を求めたスコープはレルムの-json-に定義しないと取り込みで割り当てられなかった)。
   - 固定の利用者のパスワードは、gekko_11 では「demo」だった。AWS では CloudFront の公開の名前で誰でも試せるので、`aws/deploy.sh` が乱数で作って SSM の SecureString に置き、ECS が Keycloak に渡す。手元は「demo」のまま。
   - 第 1 部のサービス（bff、transfer、ledger、issuer）は、新しい auth とつながらないので、手元では立てなくした。コードは残す（消すときは持ち主に確かめる）。
+- 2026-11-21: D1-a2-1 を AWS に送った（コミット `40a20b7`、`9dc7045`）。CloudFront を通して、`scripts/ui-login.ts` の 3 手順（パスワードでのログイン、パスキーの登録、パスキーだけでのログイン）が通った。持ち主がブラウザと本物のパスキーで試し、通った。plan.md の D1-a2 の予測 1 と 2 は、予測どおりだった。予測 1 は、`/login` の下でパスキーの登録とログインができること。予測 2 は、顧客のアプリが JWT-SVID でクライアント認証でき、Keycloak が SPIRE の公開鍵で確かめること。
+  - 途中で 2 回止まった。Keycloak が DPoP の `htu` を、届いた要求の URL で照らした（[findings 4-34](findings.md#4-34-cloudfront-とリバースプロキシの後ろの-keycloak-はdpop-の-htu-を届いた要求の-urlhttp-とcloudfront-が替えた-hostで照らし認可コードの交換を断った)）。`deploy.sh` が振り分けと、オートスケーリングの幅を戻さなかった（[4-35](findings.md#4-35-aws-cloudformation-deploy-は渡さないパラメーターに前の値を使い続けたscalesh-down-が-0-にしたオートスケーリングの幅もスタックの更新では戻らなかった)）。どちらも直した。
+  - インスタンスは 14:4x〜15:2x UTC ごろの約 40 分、2 台動かした（スポット）。Aurora も同じ間動いた。
 
 ## 次の候補（未実施）
 - design-decisions の段 D の「提案」の行を、持ち主に確かめる。
-- D1-a2-1（ログイン）を作る。手元で通してから、持ち主に確かめて AWS に送る。
+- D1-a2-2（案の提示から照合まで）を作る。営業 AI エージェント（台本）、事務サービス（Python）、保険会社のシステムを載せる。
 - 入口のリバースプロキシを作った翌日に、請求に NetworkConnector の項目が出ていないかを見る。
 - 一度だけ使ったタスク定義 `gekko13-dbfix:1` を、登録から外す（費用はかからない）。

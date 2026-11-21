@@ -170,6 +170,16 @@ if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services s
     --placement-constraints '[{"type":"distinctInstance"}]' >/dev/null
 fi
 
+# scale.sh down は、Keycloak と auth のタスクのオートスケーリングの幅を 0〜0 にする。CloudFormation は、テンプレートが変わらないかぎり
+# 幅を戻さないので、スタックの更新でタスクを入れ替えると、オートスケーリングがタスク数を 0 に下げる（docs/findings.md の 4-35）。更新の前に戻す
+for s in keycloak auth; do
+  if aws application-autoscaling describe-scalable-targets --region "$REGION" --service-namespace ecs --resource-ids "service/$PREFIX/$s" \
+    --query 'ScalableTargets[0].ResourceId' --output text 2>/dev/null | grep -q "$s"; then
+    aws application-autoscaling register-scalable-target --region "$REGION" --service-namespace ecs \
+      --scalable-dimension ecs:service:DesiredCount --resource-id "service/$PREFIX/$s" --min-capacity 2 --max-capacity 4 >/dev/null
+  fi
+done
+
 # テンプレートは、日本語のコメントを含めると、直接送れる大きさ（51,200 バイト）を超えることがある。
 # 送る前に、行頭のコメント（「# 」で始まる行）だけを除く。シバン（#!）は残す。S3 のバケットは使わない（docs/findings.md の 4-12）
 TMP=$(mktemp -d)
