@@ -5,7 +5,8 @@
 # SPIRE server の状態は EFS にあるので、台が入れ替わっても CA と登録は残る。入口の中継は名前空間の SRV で送り先を見つけるので、向け直しは要らない。
 # 使い方:
 #   aws/scale.sh down        DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ（数分）
-#   aws/scale.sh up          spire-server、auth、keycloak を 1、edge-check を GEKKO13_EDGE_TASKS（既定 2）にして、安定するまで待つ
+#   aws/scale.sh up          spire-server、auth、keycloak を 2、edge-check を GEKKO13_EDGE_TASKS（既定 2）にして、安定するまで待つ。
+#                            auth と keycloak のタスクの数の自動の増減を、最小 2、最大 4 に戻す
 #   GEKKO13_NO_WAIT=1 を付けると、up はタスク数を戻すだけで待たない（測るスクリプトが、自分で時刻を取るため）
 set -euo pipefail
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -16,6 +17,14 @@ out() { aws cloudformation describe-stacks --region "$REGION" --stack-name gekko
 CLUSTER=$(out ClusterName)
 ASG=$(out AutoScalingGroupName)
 set_count() { aws ecs update-service --region "$REGION" --cluster "$CLUSTER" --service "$1" --desired-count "$2" >/dev/null; }
+# タスクの数の自動の増減（段 D の D1-a1。apps のスタック）の幅を変える。止めるときは 0 にしないと、自動の増減が最小の 2 に戻してしまう
+AUTOSCALED="keycloak auth"
+set_range() {
+  for s in $AUTOSCALED; do
+    aws application-autoscaling register-scalable-target --region "$REGION" --service-namespace ecs \
+      --scalable-dimension ecs:service:DesiredCount --resource-id "service/$CLUSTER/$s" --min-capacity "$1" --max-capacity "$2" >/dev/null
+  done
+}
 hosts() { aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto-scaling-group-names "$ASG" --query 'length(AutoScalingGroups[0].Instances)' --output text; }
 # DAEMON（spire-agent）以外の、動いているサービスの名前。どのスタックのサービスでも、ここで拾う
 replica_services() {
@@ -30,6 +39,7 @@ replica_services() {
 
 case "$MODE" in
   down)
+    set_range 0 0
     SERVICES_DOWN=$(replica_services)
     for s in $SERVICES_DOWN; do set_count "$s" 0; done
     echo "タスク数を 0 にした（$SERVICES_DOWN）。DAEMON 以外のタスクが止まるまで待つ"
@@ -57,7 +67,9 @@ case "$MODE" in
     echo "台が 0 になった"
     ;;
   up)
-    for s in spire-server auth keycloak; do set_count "$s" 1; done
+    # 幅を先に戻す。0 のままタスク数を 2 にすると、自動の増減が 0 に戻してしまう
+    set_range 2 4
+    for s in spire-server auth keycloak; do set_count "$s" 2; done
     set_count edge-check "$EDGE_TASKS"
     if [ "${GEKKO13_NO_WAIT:-}" = 1 ]; then echo "タスク数を戻した（待たない）"; exit 0; fi
     echo "タスク数を戻した。台が起き、サービスが安定するまで待つ"

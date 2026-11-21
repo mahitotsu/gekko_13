@@ -94,6 +94,17 @@ Resources:
       LifecyclePolicy:
         LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
 
+  # SPIRE server のタスクで、server より先に動いて終わるコンテナ（段 D の D1-a1。services/db-init）
+  DbInitRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/db-init"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
   SpireServerRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -123,6 +134,7 @@ Outputs:
   AppRepositoryUri: { Value: !GetAtt AppRepository.RepositoryUri }
   AuthRepositoryUri: { Value: !GetAtt AuthRepository.RepositoryUri }
   KeycloakRepositoryUri: { Value: !GetAtt KeycloakRepository.RepositoryUri }
+  DbInitRepositoryUri: { Value: !GetAtt DbInitRepository.RepositoryUri }
   SpireServerRepositoryUri: { Value: !GetAtt SpireServerRepository.RepositoryUri }
   SpireAgentRepositoryUri: { Value: !GetAtt SpireAgentRepository.RepositoryUri }
   SpiffeHelperRepositoryUri: { Value: !GetAtt SpiffeHelperRepository.RepositoryUri }

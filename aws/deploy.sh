@@ -2,10 +2,10 @@
 # AWS の段の資源を、決まった順番で作る。実行すると費用が出る（EC2 は動いている間、1 時間ごと）。
 # 使い方: aws/deploy.sh
 #   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く。既定は 1。入口の中継の ENI は、いつも 2 つの AZ のサブネットに置く。
-#   GEKKO13_MAX_HOSTS で台の上限を（既定 2）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
+#   GEKKO13_MAX_HOSTS で台の上限を（既定 4。タスクの数の自動の増減で増える分）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
 #   GEKKO13_INSTANCE_TYPES で台の種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。台は全部スポットで起こす。
-# 順番: registry → イメージと中継の zip → network → ecs（基盤）→ apps（アプリ）→ entry（入口の中継）→ edge（CloudFront の配信）。
+# 順番: registry → イメージと中継の zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（アプリ）→ entry（入口の中継）→ edge（CloudFront の配信）。
 # 段 D の D0 から、Cognito と第 1 部のアプリ（bff、transfer、ledger）は作らない。Cognito のスタックは、第 2 部の完成のときに消す。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -16,7 +16,7 @@ if [ $# -gt 0 ]; then echo "引数は要らない（Cognito は段 D の D0 か�
 # サブネットはプライベートで IPv4 の経路がないので、公開 IPv4 は付けない（段 C の C-1b）
 PUBLIC_IPV4=false
 AZS=${GEKKO13_AZS:-1}
-MAX_HOSTS=${GEKKO13_MAX_HOSTS:-2}
+MAX_HOSTS=${GEKKO13_MAX_HOSTS:-4}
 EDGE_TASKS=${GEKKO13_EDGE_TASKS:-2}
 INSTANCE_TYPES=${GEKKO13_INSTANCE_TYPES:-t4g.medium,c6g.large,c7g.large,t4g.large}
 [ "$(tr ',' '\n' <<<"$INSTANCE_TYPES" | grep -c .)" = 4 ] || { echo "GEKKO13_INSTANCE_TYPES は、ちょうど 4 つの種類をカンマで並べる: $INSTANCE_TYPES" >&2; exit 2; }
@@ -30,9 +30,10 @@ HELPER=0.11.0
 REVISION=$(git rev-parse HEAD)
 APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile package.json package-lock.json packages services \
   scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/make-fake-certs.sh scripts/stage-image.sh \
-  ':!services/auth' ':!services/keycloak' ':!services/entry' ':!**/test/**')
+  ':!services/auth' ':!services/keycloak' ':!services/entry' ':!services/db-init' ':!**/test/**')
 AUTH_TAG=$(scripts/image-tag.sh "" services/auth)
 KEYCLOAK_TAG=$(scripts/image-tag.sh "" services/keycloak)
+DB_INIT_TAG=$(scripts/image-tag.sh "" services/db-init)
 LABEL="org.opencontainers.image.revision=$REVISION"
 
 # CloudFormation は ASCII 以外の文字を「?」に置き換える。送る前に止める
@@ -67,6 +68,10 @@ docker buildx imagetools inspect "$AUTH_REPO:$AUTH_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --label "$LABEL" -t "$AUTH_REPO:$AUTH_TAG" --push services/auth
 docker buildx imagetools inspect "$KEYCLOAK_REPO:$KEYCLOAK_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --label "$LABEL" -t "$KEYCLOAK_REPO:$KEYCLOAK_TAG" --push services/keycloak
+# Aurora にデータベースとロールを作るコンテナ（SPIRE server のタスクで、server より先に動く。RUN がないので、エミュレーションは要らない）
+DB_INIT_REPO=$(out "$PREFIX-registry" DbInitRepositoryUri)
+docker buildx imagetools inspect "$DB_INIT_REPO:$DB_INIT_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$DB_INIT_REPO:$DB_INIT_TAG" --push services/db-init
 
 # 入口の中継（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
 ENTRY_BUCKET=$(out "$PREFIX-registry" EntryCodeBucketName)
@@ -79,13 +84,52 @@ fi
 
 cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
 
+# 共有の保存先（Aurora Serverless v2）。初めて作るときは 10 分ほどかかる
+cfn --stack-name "$PREFIX-db" --template-file aws/db.yaml --parameter-overrides \
+  "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
+  "VpcId=$(out "$PREFIX-network" VpcId)" \
+  "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)"
+DB_HOST=$(out "$PREFIX-db" DbHost)
+
 # 認可サーバーの、利用者の代わりの窓口（user-standin）の秘密。なければ乱数で作る。値は画面にもファイルにも残さない
-if ! aws ssm get-parameter --region "$REGION" --name "/$PREFIX/auth/standin-secret" >/dev/null 2>&1; then
-  dir=$(umask 077 && mktemp -d -p /dev/shm gekko13-secret.XXXXXX)
-  openssl rand -hex 16 | tr -d '\n' > "$dir/value"
-  aws ssm put-parameter --region "$REGION" --name "/$PREFIX/auth/standin-secret" --type SecureString --value "file://$dir/value" >/dev/null
-  rm -rf "$dir"
+# 秘密を作って SSM の SecureString に置く。すでにあれば作らない（作り直すと、使っている側とずれる）。値は画面にもファイルにも残さない。
+# 第 2 引数は、値を作るコマンド（標準出力に値を出す）
+SECRET_DIR=$(umask 077 && mktemp -d -p /dev/shm gekko13-secret.XXXXXX)
+trap 'rm -rf "${SECRET_DIR:?}"' EXIT
+has_param() { aws ssm get-parameter --region "$REGION" --name "$1" >/dev/null 2>&1; }
+put_secret() {
+  has_param "$1" && return 0
+  "${@:2}" > "$SECRET_DIR/value"
+  aws ssm put-parameter --region "$REGION" --name "$1" --type SecureString --value "file://$SECRET_DIR/value" >/dev/null
+  rm -f "$SECRET_DIR/value"
+  echo "SSM に $1 を作った"
+}
+hex16() { openssl rand -hex 16 | tr -d '\n'; }
+hex24() { openssl rand -hex 24 | tr -d '\n'; }
+put_secret "/$PREFIX/auth/standin-secret" hex16
+# 共有の Aurora（段 D の D1-a1）の管理者と、サービスごとのパスワード
+put_secret "/$PREFIX/db/master-password" hex24
+for r in spire keycloak auth; do put_secret "/$PREFIX/db/$r-password" hex24; done
+# auth のトークンの発行の鍵（RSA、PKCS#8 の PEM）。複数のタスクが同じ鍵で出し、確かめる
+put_secret "/$PREFIX/auth/signing-key" openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+# SPIRE の根の CA（ECDSA P-256、5 年）。全部の server が、この下で中間の CA を作る。鍵と証明書は、一緒に一度だけ作る。
+# 片方だけあるときは止める（作り直すと、信頼の根が替わり、全部の台の agent が server を信じなくなる）
+ROOT_KEY="/$PREFIX/spire/root-key"
+ROOT_CERT="/$PREFIX/spire/root-cert"
+if ! has_param "$ROOT_KEY" && ! has_param "$ROOT_CERT"; then
+  openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt > "$SECRET_DIR/root.key"
+  openssl req -x509 -new -key "$SECRET_DIR/root.key" -days 1825 -sha256 -subj "/O=$PREFIX/CN=$PREFIX SPIRE root" \
+    -addext "basicConstraints=critical,CA:true" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -addext "subjectAltName=URI:spiffe://gekko13.internal" -out "$SECRET_DIR/root.crt"
+  aws ssm put-parameter --region "$REGION" --name "$ROOT_KEY" --type SecureString --value "file://$SECRET_DIR/root.key" >/dev/null
+  aws ssm put-parameter --region "$REGION" --name "$ROOT_CERT" --type SecureString --value "file://$SECRET_DIR/root.crt" >/dev/null
+  rm -f "$SECRET_DIR/root.key" "$SECRET_DIR/root.crt"
+  echo "SSM に SPIRE の根の CA を作った"
+elif ! has_param "$ROOT_KEY" || ! has_param "$ROOT_CERT"; then
+  echo "SPIRE の根の CA の鍵と証明書の片方だけが SSM にある。作り直すと信頼の根が替わるので、止める" >&2; exit 1
 fi
+# Aurora の証明書を確かめる CA（ap-northeast-1 の RSA2048 G1。aws/rds-ca.pem）。秘密ではないので String に置き、毎回書き直す
+aws ssm put-parameter --region "$REGION" --name "/$PREFIX/db/ca" --type String --overwrite --value "file://aws/rds-ca.pem" >/dev/null
 
 # パスキーの RP ID は、入口の配信の名前。配信がまだなければ空にする（配信を作ったあとで、もう一度実行する）
 rp_id() {
@@ -105,14 +149,14 @@ fi
 # 残っていると、制約に合う台がないときに server を置けず、更新が待ち続ける（docs/findings.md）
 if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services spire-server \
   --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q spire-server; then
-  aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 1 \
-    --placement-constraints '[]' >/dev/null
+  aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 2 \
+    --placement-constraints '[{"type":"distinctInstance"}]' >/dev/null
 fi
 
 # テンプレートは、日本語のコメントを含めると、直接送れる大きさ（51,200 バイト）を超えることがある。
 # 送る前に、行頭のコメント（「# 」で始まる行）だけを除く。シバン（#!）は残す。S3 のバケットは使わない（docs/findings.md の 4-12）
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" "${SECRET_DIR:?}"' EXIT
 strip() { grep -v -E '^[[:space:]]*# ' "aws/$1.yaml" > "$TMP/$1.yaml"; echo "$TMP/$1.yaml"; }
 
 cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAPABILITY_IAM --parameter-overrides \
@@ -129,7 +173,9 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
   "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \
   "SpireAgentImage=$(dualstack "$(out "$PREFIX-registry" SpireAgentRepositoryUri)"):$SPIRE" \
-  "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER"
+  "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
+  "DbInitImage=$(dualstack "$DB_INIT_REPO"):$DB_INIT_TAG" \
+  "DbHost=$DB_HOST"
 
 # 基盤のスタックから消えたサービス（D0 でアプリのスタックへ移した keycloak、auth、edge-check）は、しばらく DRAINING で残る。
 # その間は同じ名前のサービスを作れない（推定）ので、アプリのスタックを作る前に、DRAINING が終わるのを待つ（上限 10 分）
@@ -153,6 +199,9 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "KeycloakImage=$(dualstack "$KEYCLOAK_REPO"):$KEYCLOAK_TAG" \
   "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
   "EdgeTaskCount=$EDGE_TASKS" \
+  "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
+  "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
+  "DbHost=$DB_HOST" \
   "RpId=$(rp_id)"
 
 # 入口の中継。ENI は 2 つの AZ のサブネットに置く（NetworkConnector は、違う AZ の 2 つのサブネットを求める）

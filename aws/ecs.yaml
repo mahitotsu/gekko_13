@@ -2,13 +2,15 @@ AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証の実行基盤（段 D の D0 から、基盤とアプリの 2 つのスタックに分けた。アプリは aws/apps.yaml）。
 # ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances 台）に、SPIRE の server と agent を載せる。入口（段 D の D0-b から Web Functions の中継）は aws/entry.yaml に置く。
 # 台の数と AZ を前提にしない。アプリどうしは Service Connect（TCP の中継だけ）で呼び、mTLS はアプリが終える。
-# agent は Cloud Map の DNS 名で server に届く。server の状態（sqlite と鍵）とバンドルは EFS に置く（network のスタック）。
+# agent は Cloud Map の DNS 名で server に届く。server は 2 タスクで、状態を共有の Aurora（aws/db.yaml）に置き、共有の根の CA の下で中間の CA を作る。
+# agent が最初に信じるバンドル（根の証明書）は EFS に置く（network のスタック）。
 # 使わない間は aws/scale.sh down で、タスク数を 0 にし、台も 0 にする。AWS の名前は、IPv6 で届くデュアルスタックのものを使う。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 base runtime on ECS (EC2) with a capacity provider (ASG, 0 to MaxInstances hosts): SPIRE server and agent. The entry relay lives in aws/entry.yaml.
   Apps live in the gekko13-apps stack (aws/apps.yaml). Nothing assumes a host count or AZ. Apps call each other through Service Connect (TCP only)
-  and terminate mTLS themselves. Agents reach the server by a Cloud Map DNS name; server state and the bundle live on EFS. Scale to zero with aws/scale.sh down.
+  and terminate mTLS themselves. Agents reach the server by a Cloud Map DNS name. Two server tasks share state in Aurora (aws/db.yaml) and mint
+  intermediate CAs under one shared root, so the trust bundle stays the same across restarts. Scale to zero with aws/scale.sh down.
 
 Metadata:
   AWSToolsMetrics:
@@ -47,7 +49,7 @@ Parameters:
     Description: Set true only while working, if some AWS API is unreachable over IPv6 alone (billed per hour)
   MaxInstances:
     Type: String
-    Default: "2"
+    Default: "4"
     Description: Upper bound of the Auto Scaling group. The capacity provider scales between 0 and this
   AppImage:
     Type: String
@@ -65,6 +67,40 @@ Parameters:
     Type: String
     Default: /gekko13/auth/standin-secret
     Description: SSM SecureString holding the client secret of the user stand-in client of the authorization server. Created by the deploy script
+  DbInitImage:
+    Type: String
+    Description: URI and tag of the gekko13/db-init image in ECR (services/db-init)
+  DbHost:
+    Type: String
+    Description: Aurora cluster endpoint (gekko13-db output DbHost)
+  DbAdminUser:
+    Type: String
+    Default: gekko13admin
+  DbMasterPasswordParameter:
+    Type: String
+    Default: /gekko13/db/master-password
+  DbSpirePasswordParameter:
+    Type: String
+    Default: /gekko13/db/spire-password
+  DbKeycloakPasswordParameter:
+    Type: String
+    Default: /gekko13/db/keycloak-password
+  DbAuthPasswordParameter:
+    Type: String
+    Default: /gekko13/db/auth-password
+  DbCaParameter:
+    Type: String
+    Default: /gekko13/db/ca
+    Description: SSM String holding the Aurora CA certificate (aws/rds-ca.pem)
+  AuthSigningKeyParameter:
+    Type: String
+    Default: /gekko13/auth/signing-key
+  SpireRootCertParameter:
+    Type: String
+    Default: /gekko13/spire/root-cert
+  SpireRootKeyParameter:
+    Type: String
+    Default: /gekko13/spire/root-key
   ContainerInsights:
     Type: String
     Default: disabled
@@ -149,6 +185,14 @@ Resources:
                 Action: ssm:GetParameters
                 Resource:
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbMasterPasswordParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbSpirePasswordParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbKeycloakPasswordParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbAuthPasswordParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthSigningKeyParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootCertParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootKeyParameter}"
   SpireServerTaskRole:
     Type: AWS::IAM::Role
     # aws_iid のノードの確認で、SPIRE の server がインスタンスのタグを読む。権限を DescribeInstances より広げない。
@@ -244,10 +288,19 @@ Resources:
               ca_ttl       = "24h"
             }
             plugins {
+              # 2 つの server が、共有の Aurora に状態を置く。宛先とパスワードは、server の起動の -expandEnv で、タスクの環境変数から入る
               DataStore "sql" {
                 plugin_data {
-                  database_type     = "sqlite3"
-                  connection_string = "/var/lib/spire/server/datastore.sqlite3"
+                  database_type     = "postgres"
+                  connection_string = "dbname=spire user=spire password=${!SPIRE_DB_PASSWORD} host=${!DB_HOST} port=5432 sslmode=verify-full sslrootcert=/dbca/ca.pem"
+                }
+              }
+              # 全部の server が、同じ根の CA の下で中間の CA を作る。バンドルは根の証明書だけになり、server が起き直しても変わらない。
+              # 根の証明書と鍵は、aws/deploy.sh が作って SSM に置き、タスクの db-init のコンテナが書く
+              UpstreamAuthority "disk" {
+                plugin_data {
+                  cert_file_path = "/spire-ca/root.crt"
+                  key_file_path  = "/spire-ca/root.key"
                 }
               }
               NodeAttestor "aws_iid" {
@@ -255,10 +308,9 @@ Resources:
                   disable_instance_profile_selectors = true
                 }
               }
-              KeyManager "disk" {
-                plugin_data {
-                  keys_path = "/var/lib/spire/server/keys.json"
-                }
+              # 中間の CA の鍵は、タスクのメモリに置く。2 つの server で、鍵のファイルを奪い合わない。起き直すと、根の下で作り直す
+              KeyManager "memory" {
+                plugin_data {}
               }
             }
             EOF
@@ -366,16 +418,18 @@ Resources:
       CapacityProviders: [!Ref CapacityProvider]
       DefaultCapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
 
-  # server は 1 タスクに固定する（データストアが sqlite なので、2 つ同時に動かさない）。
-  # registrar は、登録を 1 回だけ作り、バンドルを EFS に書き続ける。ホストの数と配置から、登録の手順を切り離す。
+  # server は 2 タスクで、状態を共有の Aurora に置く（段 D の D1-a1）。どちらの server の SVID も、同じ根の CA に連なる。
+  # 最初に db-init のコンテナが動いて終わる。Aurora の CA と根の CA をタスクの中に書き、Aurora にデータベースとロールを作る（services/db-init）。
+  # registrar は、登録を作り、バンドル（根の証明書）を EFS に書き続ける。2 つのタスクで同時に動いても、同じ登録は作らない。
   SpireServerTask:
     Type: AWS::ECS::TaskDefinition
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Single server task (sqlite datastore). The registrar container creates entries once and keeps writing
-          the bundle to EFS, so registration does not depend on host count or placement
-        must: Never run two server tasks at once
+          Two server tasks share state in Aurora and mint intermediate CAs under one shared root (UpstreamAuthority disk).
+          The db-init container runs first: it writes the Aurora CA and the root CA into task volumes and creates databases and roles.
+          The registrar creates entries and keeps writing the bundle (the root certificate) to EFS
+        must: Never put the root key on EFS or in the image. It comes only from SSM through ECS secrets into a task volume
     Properties:
       Family: !Sub "${Prefix}-spire-server"
       RequiresCompatibilities: [EC2]
@@ -384,34 +438,58 @@ Resources:
       TaskRoleArn: !GetAtt SpireServerTaskRole.Arn
       Volumes:
         - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
-        - Name: data
-          EFSVolumeConfiguration:
-            FilesystemId: !Ref FileSystemId
-            TransitEncryption: ENABLED
-            AuthorizationConfig: { AccessPointId: !Ref SpireServerAccessPointId, IAM: DISABLED }
         - Name: bundle
           EFSVolumeConfiguration:
             FilesystemId: !Ref FileSystemId
             TransitEncryption: ENABLED
             AuthorizationConfig: { AccessPointId: !Ref BundleAccessPointId, IAM: DISABLED }
         - { Name: server-api }
+        - { Name: server-data }
+        - { Name: dbca }
+        - { Name: spire-ca }
       ContainerDefinitions:
-        # イメージは uid 1000 で動くが、タスクの中で共有するソケットのディレクトリは root の持ち物なので、root で動かす。
-        # EFS の上の所有者は、アクセスポイントが 1000 に揃える
+        - Name: db-init
+          Image: !Ref DbInitImage
+          Essential: false
+          MemoryReservation: 32
+          Environment:
+            - { Name: DB_HOST, Value: !Ref DbHost }
+            - { Name: DB_ADMIN_USER, Value: !Ref DbAdminUser }
+          Secrets:
+            - { Name: DB_ADMIN_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbMasterPasswordParameter}" }
+            - { Name: DB_SPIRE_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbSpirePasswordParameter}" }
+            - { Name: DB_KEYCLOAK_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbKeycloakPasswordParameter}" }
+            - { Name: DB_AUTH_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbAuthPasswordParameter}" }
+            - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
+            - { Name: SPIRE_ROOT_CERT, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootCertParameter}" }
+            - { Name: SPIRE_ROOT_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootKeyParameter}" }
+          MountPoints:
+            - { SourceVolume: dbca, ContainerPath: /dbca }
+            - { SourceVolume: spire-ca, ContainerPath: /spire-ca }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-server, mode: non-blocking }
+        # イメージは uid 1000 で動くが、タスクの中で共有するソケットのディレクトリは root の持ち物なので、root で動かす
         - Name: spire-server
           Image: !Ref SpireServerImage
           Essential: true
           User: "0"
           MemoryReservation: 96
-          Command: ["-config", "/etc/gekko13/spire/server.conf"]
+          Command: ["-config", "/etc/gekko13/spire/server.conf", "-expandEnv"]
+          DependsOn: [{ ContainerName: db-init, Condition: SUCCESS }]
           PortMappings: [{ ContainerPort: 8081, Protocol: tcp }]
           Environment:
             - { Name: AWS_REGION, Value: !Ref AWS::Region }
             - { Name: AWS_USE_DUALSTACK_ENDPOINT, Value: "true" }
+            - { Name: DB_HOST, Value: !Ref DbHost }
+          Secrets:
+            - { Name: SPIRE_DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbSpirePasswordParameter}" }
           MountPoints:
             - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
-            - { SourceVolume: data, ContainerPath: /var/lib/spire/server }
+            - { SourceVolume: server-data, ContainerPath: /var/lib/spire/server }
             - { SourceVolume: server-api, ContainerPath: /run/spire/server-api }
+            - { SourceVolume: dbca, ContainerPath: /dbca, ReadOnly: true }
+            - { SourceVolume: spire-ca, ContainerPath: /spire-ca, ReadOnly: true }
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-server, mode: non-blocking }
@@ -482,8 +560,11 @@ Resources:
       ServiceName: spire-server
       TaskDefinition: !Ref SpireServerTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 100 }
+      DesiredCount: 2
+      # 1 つずつ入れ替える（台を足さずに、止まらずに更新する）。2 つの AZ に散らし、1 台に 1 つ
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
+      PlacementConstraints: [{ Type: distinctInstance }]
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
       NetworkConfiguration:
         AwsvpcConfiguration:
           Subnets: !Ref SubnetIds

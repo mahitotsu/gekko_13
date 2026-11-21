@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の共有の保存先（段 D の D1-a1）。Aurora Serverless v2（PostgreSQL 17.5）を 1 つ置き、Keycloak、SPIRE server、auth が共有する。
+# 最小 0 ACU で、つながりがなくなって 5 分で止まり、計算の費用は 0 になる。つなぎに行くと起き直す（約 15 秒。AWS の資料）。
+# 書き込みのインスタンスは 1 つだけ（読み取りのインスタンスは置かない。動かしている間の費用が倍になるため）。保存は AZ をまたいで残る。
+# サービスは、ID とパスワードでつなぎ、TLS で Aurora の証明書を確かめる（verify-full）。TLS でない接続は、パラメーターで拒む。
+# Aurora はクライアントの証明書での認証に対応しないので、SVID の mTLS にはしない（docs/design-decisions.md）。
+# 管理者のパスワードは、aws/deploy.sh が SSM の SecureString に置き、ここで読む（Secrets Manager は固定費がかかるので使わない）。
+# 台（ECS のホストと SPIRE server の ENI）のグループから 5432 だけを受ける。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
+Description: >-
+  gekko13 shared datastore (stage D1-a1): one Aurora Serverless v2 cluster (PostgreSQL 17.5) shared by Keycloak, the SPIRE server and auth.
+  Minimum 0 ACU: it pauses five minutes after the last connection and resumes on connect. One writer instance, no reader.
+  Services connect with a user and password over TLS that verifies the server certificate; non-TLS connections are rejected.
+  The master password comes from an SSM SecureString written by aws/deploy.sh. Inbound 5432 only from the host security group.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets in two AZs (gekko13-network output SubnetIds). A DB subnet group needs two AZs
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  HostSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group of the ECS hosts and the SPIRE server task ENIs (gekko13-network output HostSecurityGroupId)
+  MasterPasswordParameter:
+    Type: String
+    Default: /gekko13/db/master-password
+    Description: SSM SecureString holding the master password. Created by aws/deploy.sh
+  MaxCapacity:
+    Type: Number
+    Default: 2
+    Description: Upper bound of Aurora capacity units
+
+Resources:
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${Prefix} shared datastore (two AZs)"
+      SubnetIds: !Ref SubnetIds
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Aurora accepts PostgreSQL only from the hosts and the SPIRE server task ENIs
+        must: Never open 5432 to other sources
+    Properties:
+      GroupDescription: gekko13 shared datastore (inbound 5432 only from the host group)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref HostSecurityGroupId, Description: hosts and task ENIs }
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: no outbound }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
+
+  # 台のグループは、出口を絞っている（network のスタック）。Aurora への 5432 だけを、ここで足す
+  HostEgressToDb:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref HostSecurityGroupId
+      DestinationSecurityGroupId: !Ref DbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      Description: shared datastore
+
+  # TLS でない接続を拒む
+  DbClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub "${Prefix} shared datastore (TLS only)"
+      Family: aurora-postgresql17
+      Parameters:
+        rds.force_ssl: "1"
+
+  # 消すときは、最後のスナップショットを残さない（データは検証の間だけ使う。残すと保存の費用がかかる）
+  DbCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Serverless v2 with a minimum of 0 ACU pauses after five idle minutes, so compute costs nothing while hosts are at zero.
+          The master password is read from SSM (no Secrets Manager, which has a monthly fee). No final snapshot on delete
+        must: Keep MinCapacity at 0. Keep it private. Never enable the Data API or a public endpoint
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: "17.5"
+      Port: 5432
+      MasterUsername: gekko13admin
+      MasterUserPassword: !Sub "{{resolve:ssm-secure:${MasterPasswordParameter}}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VpcSecurityGroupIds: [!Ref DbSecurityGroup]
+      DBClusterParameterGroupName: !Ref DbClusterParameterGroup
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0
+        MaxCapacity: !Ref MaxCapacity
+        SecondsUntilAutoPause: 300
+      StorageEncrypted: true
+      DeletionProtection: false
+      BackupRetentionPeriod: 1
+      EnableIAMDatabaseAuthentication: false
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
+
+  # 証明書は、aws/rds-ca.pem の CA（ap-northeast-1 の RSA2048 G1）で確かめるので、CA を明示する
+  DbInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Engine: aurora-postgresql
+      DBClusterIdentifier: !Ref DbCluster
+      DBInstanceClass: db.serverless
+      CACertificateIdentifier: rds-ca-rsa2048-g1
+      PubliclyAccessible: false
+      EnablePerformanceInsights: false
+      MonitoringInterval: 0
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
+
+Outputs:
+  DbHost: { Value: !GetAtt DbCluster.Endpoint.Address }
+  DbPort: { Value: !GetAtt DbCluster.Endpoint.Port }
+  DbClusterId: { Value: !Ref DbCluster }
+  DbAdminUser: { Value: gekko13admin }

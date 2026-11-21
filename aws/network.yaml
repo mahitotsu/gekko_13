@@ -181,6 +181,7 @@ Resources:
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - { IpProtocol: tcp, FromPort: 32768, ToPort: 65535, DestinationSecurityGroupId: !Ref HostSecurityGroup, Description: dynamic host ports }
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, DestinationSecurityGroupId: !Ref HostSecurityGroup, Description: awsvpc Keycloak tasks }
         - { IpProtocol: udp, FromPort: 53, ToPort: 53, CidrIp: 169.254.169.253/32, Description: Amazon-provided DNS }
         - { IpProtocol: tcp, FromPort: 53, ToPort: 53, CidrIp: 169.254.169.253/32, Description: Amazon-provided DNS }
       Tags: [{ Key: Name, Value: !Sub "${Prefix}-entry" }]
@@ -199,6 +200,21 @@ Resources:
       FromPort: 32768
       ToPort: 65535
       Description: entry relay only
+
+  # awsvpc の Keycloak のタスク（段 D の D1-a1）は、タスクの IP の 8080 で受ける。ENI は台のグループを使う
+  HostIngressFromEntryKeycloak:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Stage D1-a1. awsvpc Keycloak tasks listen on 8080 at the task IP and use the host group
+        must: Add no other inbound rule from outside the group
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      SourceSecurityGroupId: !Ref EntrySecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      Description: entry relay to awsvpc Keycloak
 
   # SPIRE server のデータストア（sqlite）と鍵、agent が最初に信じるバンドル。
   # ECS のスタックを作り直しても、台が入れ替わっても、CA と登録が残るように、ECS の外に置く。
