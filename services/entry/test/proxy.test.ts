@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createProxy, forwardHeaders, parseRoutes, routeFor, srvResolver, staticResolver, type Resolver } from "../src/proxy.ts";
+import { createProxy, forwardHeaders, parseRoutes, publicForwardHeaders, routeFor, srvResolver, staticResolver, type Resolver } from "../src/proxy.ts";
 
 describe("振り分け", () => {
   const routes = parseRoutes("/=edge-check,/login=keycloak");
@@ -127,5 +127,16 @@ describe("中継", () => {
     const p = await proxyWith(staticResolver(""));
     expect((await fetch(`http://127.0.0.1:${p}/`)).status).toBe(503);
     expect((await fetch(`http://127.0.0.1:${p}/`, { method: "POST", body: "x".repeat(2048) })).status).toBe(413);
+  });
+});
+
+describe("公開の origin の転送のヘッダー", () => {
+  it("閲覧者の転送のヘッダーを捨て、公開の origin から付け直す", () => {
+    const out = publicForwardHeaders({ "x-forwarded-host": "evil.example", forwarded: "host=evil", "x-forwarded-for": "198.51.100.7", cookie: "a=1" }, "https://d1.cloudfront.net");
+    expect(out).toEqual({ "x-forwarded-for": "198.51.100.7", cookie: "a=1", "x-forwarded-proto": "https", "x-forwarded-host": "d1.cloudfront.net", "x-forwarded-port": "443" });
+  });
+  it("公開の origin がなければ、転送のヘッダーを付けない（閲覧者のものも捨てる）", () => {
+    expect(publicForwardHeaders({ "x-forwarded-proto": "http", accept: "*/*" }, undefined)).toEqual({ accept: "*/*" });
+    expect(publicForwardHeaders({}, "http://gekko13.localhost:18000")).toMatchObject({ "x-forwarded-proto": "http", "x-forwarded-host": "gekko13.localhost:18000", "x-forwarded-port": "18000" });
   });
 });

@@ -243,6 +243,9 @@ Resources:
           Environment:
             - { Name: KC_HOSTNAME, Value: !Sub "https://${RpId}/login" }
             - { Name: KC_HTTP_ENABLED, Value: "true" }
+            # 入口のリバースプロキシが付ける X-Forwarded-*（公開の origin）で、届いた要求の URL を直す。DPoP の htu の照合に要る（docs/findings.md の 4-34）。
+            # リバースプロキシは閲覧者の同じヘッダーを捨てる。8080 に届くのは、リバースプロキシと同じセキュリティグループの中からだけ
+            - { Name: KC_PROXY_HEADERS, Value: xforwarded }
             - { Name: RP_ID, Value: !Ref RpId }
             - { Name: KC_DB_URL, Value: !Sub "jdbc:postgresql://${DbHost}:5432/keycloak?sslmode=verify-full&sslrootcert=/tmp/db-ca.pem" }
             - { Name: KC_DB_USERNAME, Value: keycloak }

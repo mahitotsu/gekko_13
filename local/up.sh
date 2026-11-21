@@ -71,7 +71,7 @@ app_labels() { echo --label "com.amazonaws.ecs.task-definition-family=gekko13-$1
 # ログインサーバー（Keycloak と gekko_11 の拡張）。保存先は PostgreSQL。レルムの ${…} は、取り込みのときに環境変数で置き換わる
 start_keycloak() {
   run --name gekko13-keycloak --network-alias keycloak --memory 1g \
-    -e "KC_HOSTNAME=$ORIGIN/login" -e KC_HTTP_ENABLED=true \
+    -e "KC_HOSTNAME=$ORIGIN/login" -e KC_HTTP_ENABLED=true -e KC_PROXY_HEADERS=xforwarded \
     -e KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak -e KC_DB_USERNAME=keycloak -e "KC_DB_PASSWORD=$DB_KEYCLOAK" \
     -e "BUNDLE_CA_PEM=$(cat run/bundle-endpoint/tls.crt)" -e KC_TRUSTSTORE_PATHS=/tmp/bundle-ca.pem \
     -e "RP_ID=$RP_ID" -e "TRUST_DOMAIN=$TD" -e AUTH_ISSUER=https://auth:8443 \
@@ -105,7 +105,7 @@ start_customer_app() {
 # 入口のリバースプロキシ（AWS では Lambda の Web Functions）。同じコードを、送り先を固定して動かす
 start_entry() {
   run --name gekko13-entry \
-    -e AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000 -e ROUTES=/login=keycloak,/=customer-app \
+    -e AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000 -e ROUTES=/login=keycloak,/=customer-app -e "PUBLIC_ORIGIN=$ORIGIN" \
     -e STATIC_TARGETS=keycloak=keycloak:8080,customer-app=customer-app:8080 \
     -v "$HERE/../services/entry/src:/app/src:ro" -p 127.0.0.1:18000:3000 \
     node:24-alpine node /app/src/main.ts

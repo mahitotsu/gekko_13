@@ -116,7 +116,28 @@ export type ProxyOptions = {
   maxAttempts: number;
   log: (o: object) => void;
   random?: () => number;
+  /**
+   * 入口の公開の origin（例 "https://dXXXX.cloudfront.net"）。あれば、送り先に X-Forwarded-Proto、Host、Port で渡す。
+   * 送り先（Keycloak）は、届いた要求の URL を、これで公開の URL に直す（DPoP の htu の照合。docs/findings.md の 4-34）。
+   * 閲覧者が送った同じ名前のヘッダーは、あってもなくても捨てる（偽れないようにする）
+   */
+  publicOrigin?: string;
 };
+
+/** 閲覧者から受け取らない、転送のヘッダー。リバースプロキシが自分で付ける */
+const FORWARDED = ["x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "forwarded"];
+
+/** 公開の origin を、転送のヘッダーにする。 */
+export function publicForwardHeaders(headers: IncomingHttpHeaders, publicOrigin: string | undefined): IncomingHttpHeaders {
+  const out = { ...headers };
+  for (const k of FORWARDED) delete out[k];
+  if (!publicOrigin) return out;
+  const u = new URL(publicOrigin);
+  out["x-forwarded-proto"] = u.protocol.replace(":", "");
+  out["x-forwarded-host"] = u.host;
+  out["x-forwarded-port"] = u.port || (u.protocol === "https:" ? "443" : "80");
+  return out;
+}
 
 type Attempt = { kind: "response"; res: IncomingMessage } | { kind: "retryable"; error: Error } | { kind: "fatal"; error: Error };
 
@@ -126,7 +147,7 @@ export function createProxy(o: ProxyOptions) {
   function attempt(t: Target, req: IncomingMessage, body: Buffer): Promise<Attempt> {
     return new Promise((resolve) => {
       let connected = false;
-      const headers = forwardHeaders(req.headers);
+      const headers = publicForwardHeaders(forwardHeaders(req.headers), o.publicOrigin);
       if (body.length > 0 || "content-length" in req.headers) headers["content-length"] = String(body.length);
       const up = request({ host: t.host, port: t.port, method: req.method, path: req.url, headers, agent, timeout: o.timeoutMs });
       up.on("socket", (s) => {

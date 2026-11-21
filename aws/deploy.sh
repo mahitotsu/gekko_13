@@ -235,14 +235,17 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "RpId=$(rp_id)"
 fi
 
-# 入口のリバースプロキシ。ENI は 2 つの AZ のサブネットに置く（NetworkConnector は、違う AZ の 2 つのサブネットを求める）
+# 入口のリバースプロキシ。ENI は 2 つの AZ のサブネットに置く。
+# 振り分け（Routes）は、毎回明示して渡す。aws cloudformation deploy は、渡さないパラメーターに前の値を使い続け、テンプレートの既定値を替えても効かない（NetworkConnector は、違う AZ の 2 つのサブネットを求める）
 cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities CAPABILITY_IAM --parameter-overrides \
   "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
   "EntrySecurityGroupId=$(out "$PREFIX-network" EntrySecurityGroupId)" \
   "CodeBucket=$ENTRY_BUCKET" \
   "CodeKey=$ENTRY_KEY" \
   "CodeVersion=$ENTRY_VERSION" \
-  "NamespaceName=$(out "$PREFIX-ecs" NamespaceName)"
+  "NamespaceName=$(out "$PREFIX-ecs" NamespaceName)" \
+  "Routes=/login=keycloak,/=customer-app" \
+  "PublicOrigin=$( [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ] && echo "https://$(rp_id)" )"
 
 # 入口のディストリビューション。送り先は、入口のリバースプロキシのエンドポイント 1 つ。インスタンスが入れ替わっても、向け直しは要らない。
 # ディストリビューションを初めて作ったときは、RP ID がまだ空なので、もう一度この手順を回す（keycloak のタスク数が 0 のままになる）
