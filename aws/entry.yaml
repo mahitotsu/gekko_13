@@ -38,7 +38,7 @@ Parameters:
     Default: svc.gekko13.internal
   Routes:
     Type: String
-    Default: /login=keycloak,/=edge-check
+    Default: /login=keycloak,/=customer-app
     Description: Path prefix to service routing of the relay. Longest prefix wins
 
 Resources:

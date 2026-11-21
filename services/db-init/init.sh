@@ -1,18 +1,22 @@
 #!/bin/sh
 # SPIRE server のタスクで、server より先に動いて終わる（段 D の D1-a1。aws/ecs.yaml の db-init）。
-# 1. ECS が SSM から渡したファイルの中身を、タスクの中のボリュームに書く。Aurora の CA（DB_CA_PEM）と、SPIRE のルート CA の証明書と鍵
-#    （SPIRE_ROOT_CERT、SPIRE_ROOT_KEY。UpstreamAuthority の disk が読む）。
+# 1. ECS が SSM から渡したファイルの中身を、タスクの中のボリュームに書く。Aurora の CA（DB_CA_PEM）、SPIRE のルート CA の証明書と鍵
+#    （SPIRE_ROOT_CERT、SPIRE_ROOT_KEY。UpstreamAuthority の disk が読む）、bundle endpoint の TLS の証明書と鍵
+#    （SPIRE_BUNDLE_TLS_CERT、SPIRE_BUNDLE_TLS_KEY。段 D の D1-a2）。
 # 2. Aurora が止まっていれば、つなぎに行くと再開するので、つながるまで待つ（上限 3 分）。
 # 3. 管理者で db-init.sql を流し、サービスごとのデータベースとロールを作る。何度流しても同じ結果になる。
 # 環境変数: DB_HOST、DB_ADMIN_USER、DB_ADMIN_PASSWORD、DB_SPIRE_PASSWORD、DB_KEYCLOAK_PASSWORD、DB_AUTH_PASSWORD、
-#   DB_CA_PEM、SPIRE_ROOT_CERT、SPIRE_ROOT_KEY。書き出す先: /dbca/ca.pem、/spire-ca/root.crt、/spire-ca/root.key
+#   DB_CA_PEM、SPIRE_ROOT_CERT、SPIRE_ROOT_KEY、SPIRE_BUNDLE_TLS_CERT、SPIRE_BUNDLE_TLS_KEY。
+#   書き出す先: /dbca/ca.pem、/spire-ca/root.crt、/spire-ca/root.key、/spire-ca/bundle-tls.crt、/spire-ca/bundle-tls.key
 set -eu
 umask 077
 printf '%s\n' "${DB_CA_PEM:?}" > /dbca/ca.pem
 printf '%s\n' "${SPIRE_ROOT_CERT:?}" > /spire-ca/root.crt
 printf '%s\n' "${SPIRE_ROOT_KEY:?}" > /spire-ca/root.key
+printf '%s\n' "${SPIRE_BUNDLE_TLS_CERT:?}" > /spire-ca/bundle-tls.crt
+printf '%s\n' "${SPIRE_BUNDLE_TLS_KEY:?}" > /spire-ca/bundle-tls.key
 # spire-server のコンテナ（root で動く）が読む。CA の証明書は、ほかのコンテナも読めるようにする
-chmod 0644 /dbca/ca.pem /spire-ca/root.crt
+chmod 0644 /dbca/ca.pem /spire-ca/root.crt /spire-ca/bundle-tls.crt
 
 CONN="host=${DB_HOST:?} port=5432 dbname=postgres user=${DB_ADMIN_USER:?} sslmode=verify-full sslrootcert=/dbca/ca.pem connect_timeout=10"
 export PGPASSWORD="${DB_ADMIN_PASSWORD:?}"

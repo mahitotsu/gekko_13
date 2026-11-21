@@ -36,8 +36,8 @@ ensure() {
 
 # ノード: タグ gekko13-role=ecs-host を持つインスタンスの agent。インスタンスがいくつでも、この 1 つで足りる
 ensure "$NODE" -node -selector aws_iid:tag:gekko13-role:ecs-host
-# auth は認可サーバー（段 C の C-3）
-for s in bff transfer ledger auth; do
+# auth は認可サーバー。ほかは段 D の D1-a2 で載せる gekko_11 のサービス（第 1 部の bff、transfer、ledger の登録は Aurora に残るが、作らない）
+for s in auth customer-app sales-agent insurer-mcp insurer-backend insurer-audit; do
   ensure "spiffe://$TD/svc/$s" -parentID "$NODE" -x509SVIDTTL "$TTL" \
     -selector "docker:label:com.amazonaws.ecs.task-definition-family:$PREFIX-$s" \
     -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper"

@@ -5,7 +5,7 @@
 #   GEKKO13_MAX_HOSTS でインスタンスの上限を（既定 4。タスクのオートスケーリングで増える分）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
 #   GEKKO13_INSTANCE_TYPES でインスタンスの種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
-# 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（アプリ）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
+# 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（Keycloak と auth）→ flow（主の流れのサービス）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
 # 段 D の D0 から、Cognito と第 1 部のアプリ（bff、transfer、ledger）は作らない。Cognito のスタックは、第 2 部の完成のときに消す。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -29,7 +29,7 @@ HELPER=0.11.0
 # タスクも入れ替わらない。材料にコミットしていない変更があれば、ここで止まる。どのコミットから作ったかは、ラベルに残す
 REVISION=$(git rev-parse HEAD)
 APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile package.json package-lock.json packages services \
-  scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/make-fake-certs.sh scripts/stage-image.sh \
+  scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/helper-conf.sh scripts/make-fake-certs.sh scripts/stage-image.sh \
   ':!services/auth' ':!services/keycloak' ':!services/entry' ':!services/db-init' ':!**/test/**')
 AUTH_TAG=$(scripts/image-tag.sh "" services/auth)
 KEYCLOAK_TAG=$(scripts/image-tag.sh "" services/keycloak)
@@ -122,6 +122,21 @@ if ! has_param "$ROOT_KEY" && ! has_param "$ROOT_CERT"; then
 elif ! has_param "$ROOT_KEY" || ! has_param "$ROOT_CERT"; then
   echo "SPIRE の根の CA の鍵と証明書の片方だけが SSM にある。作り直すと信頼の根が替わるので、止める" >&2; exit 1
 fi
+# 固定の利用者（alice など）のパスワード（段 D の D1-a2）。ログインサーバーが、レルムの取り込みのときにハッシュにして Aurora に置く。
+# CloudFront の公開の名前で誰でも試せるので、gekko_11 の「demo」は使わない。持ち主は SSM から読む（docs/runbook.md）
+put_secret "/$PREFIX/login/demo-password" hex16
+# SPIRE の bundle endpoint（https_web）の TLS の証明書と鍵（段 D の D1-a2。gekko_11 の D-38）。SVID とは関係のない、使い捨ての自己署名の証明書で、
+# ログインサーバーが信じて、JWT-SVID を確かめる公開鍵を取る。名前は、SPIRE server のタスクの Cloud Map の名前。一緒に一度だけ作る
+BUNDLE_KEY="/$PREFIX/spire/bundle-tls-key"
+BUNDLE_CERT="/$PREFIX/spire/bundle-tls-cert"
+if ! has_param "$BUNDLE_KEY" || ! has_param "$BUNDLE_CERT"; then
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$SECRET_DIR/bundle.key" -out "$SECRET_DIR/bundle.crt" -days 3650 \
+    -subj "/CN=spire-server.svc.$PREFIX.internal" -addext "subjectAltName=DNS:spire-server.svc.$PREFIX.internal" >/dev/null 2>&1
+  aws ssm put-parameter --region "$REGION" --name "$BUNDLE_KEY" --type SecureString --overwrite --value "file://$SECRET_DIR/bundle.key" >/dev/null
+  aws ssm put-parameter --region "$REGION" --name "$BUNDLE_CERT" --type String --overwrite --value "file://$SECRET_DIR/bundle.crt" >/dev/null
+  rm -f "$SECRET_DIR/bundle.key" "$SECRET_DIR/bundle.crt"
+  echo "SSM に SPIRE の bundle endpoint の証明書を作った"
+fi
 # Aurora の証明書を確かめる CA（ap-northeast-1 の RSA2048 G1。aws/rds-ca.pem）。秘密ではないので String に置き、毎回書き直す
 aws ssm put-parameter --region "$REGION" --name "/$PREFIX/db/ca" --type String --overwrite --value "file://aws/rds-ca.pem" >/dev/null
 
@@ -205,6 +220,20 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
   "DbHost=$DB_HOST" \
   "RpId=$(rp_id)"
+
+# 主の流れのサービス（段 D の D1-a2）。ディストリビューションのドメイン名（RpId）から issuer と origin を作るので、
+# ディストリビューションがまだなければ作らない（初めてのときは、もう一度この手順を回す）
+if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
+  cfn --stack-name "$PREFIX-flow" --template-file "$(strip flow)" --parameter-overrides \
+    "ClusterName=$(out "$PREFIX-ecs" ClusterName)" \
+    "CapacityProviderName=$(out "$PREFIX-ecs" CapacityProviderName)" \
+    "NamespaceId=$(out "$PREFIX-ecs" NamespaceId)" \
+    "ExecutionRoleArn=$(out "$PREFIX-ecs" ExecutionRoleArn)" \
+    "LogGroupName=$(out "$PREFIX-ecs" LogGroupName)" \
+    "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
+    "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
+    "RpId=$(rp_id)"
+fi
 
 # 入口のリバースプロキシ。ENI は 2 つの AZ のサブネットに置く（NetworkConnector は、違う AZ の 2 つのサブネットを求める）
 cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities CAPABILITY_IAM --parameter-overrides \

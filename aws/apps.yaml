@@ -2,13 +2,13 @@ AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 のアプリのスタック（段 D の D0 で、基盤の aws/ecs.yaml から分けた）。基盤のクラスターと名前空間の上に、アプリのサービスを載せる。
 # 入口（段 D の D0-b）: CloudFront → 入口のリバースプロキシ（aws/entry.yaml の Web Functions）→ タスク。リバースプロキシは、名前空間の SRV で送り先を見つける。
 # ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で SRV に登録する。正常は、コンテナのヘルスチェックで決める（D0 の ALB と同じ URL）。
-# 振り分けはリバースプロキシがパスでする。/login は Keycloak、それ以外は edge-check（D1-a で顧客のアプリに替える）。
+# 振り分けはリバースプロキシがパスでする。/login は Keycloak、それ以外は顧客のアプリ（段 D の D1-a2。aws/flow.yaml）。edge-check は、入口から外した。
 # インスタンスの数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、インスタンスはリバースプロキシのグループからだけ動的なポートを受ける（network のスタック）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 apps on the base runtime (gekko13-ecs): the login server (keycloak), the authorization server (auth) and the edge check.
   CloudFront -> entry relay (Lambda Web Function, aws/entry.yaml) -> tasks. ECS registers healthy tasks in SRV records of the
-  namespace by host IP and dynamic port; the relay routes /login to keycloak and everything else to edge-check.
+  namespace by host IP and dynamic port; the relay routes /login to keycloak and everything else to the customer app (gekko13-flow); edge-check is no longer routed.
   Nothing assumes a host count or AZ.
 
 Metadata:
@@ -32,9 +32,6 @@ Parameters:
     Type: String
   LogGroupName:
     Type: String
-  AppImage:
-    Type: String
-    Description: URI and tag of the gekko13/node image in ECR (edge-check)
   AuthImage:
     Type: String
     Description: URI and tag of the gekko13/auth image (Spring Authorization Server) in ECR
@@ -43,10 +40,17 @@ Parameters:
     Description: URI and tag of the gekko13/keycloak image in ECR
   SpiffeHelperImage:
     Type: String
-  AuthStandinParameter:
+  DemoPasswordParameter:
     Type: String
-    Default: /gekko13/auth/standin-secret
-    Description: SSM SecureString holding the client secret of the user stand-in client of the authorization server
+    Default: /gekko13/login/demo-password
+    Description: SSM SecureString with the password of the fixed demo users, imported into Keycloak with the realm
+  SpireBundleTlsCertParameter:
+    Type: String
+    Default: /gekko13/spire/bundle-tls-cert
+    Description: SSM String with the certificate of the SPIRE bundle endpoint, trusted by Keycloak
+  AppImage:
+    Type: String
+    Description: URI and tag of the gekko13/node image in ECR (edge-check, and helper-config that writes the spiffe-helper config)
   RpId:
     Type: String
     Default: ""
@@ -108,8 +112,11 @@ Resources:
         DnsRecords: [{ Type: SRV, TTL: 10 }]
       HealthCheckCustomConfig: { FailureThreshold: 1 }
 
-  # 段 C の C-3: 認可サーバー（Spring Authorization Server）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
+  # 認可サーバー（gekko_11 の insurer-auth。段 D の D1-a2）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
   # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。入口のリバースプロキシには出さない。イメージは SVID が書かれるまで待ってから起動する。
+  # ログインサーバーの管理の API で利用者の passkey を読むため、JWT-SVID（宛先はログインサーバーの issuer）でクライアント認証する。
+  # helper-config が、その宛先を入れた spiffe-helper の設定をタスクのボリュームに書き、svid-helper はそれを読む。
+  # ログインサーバーへは、CloudFront を通した公開の名前（https）で呼ぶ。Java は既定で IPv4 を先に試すので、IPv6 を先にする
   AuthTask:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -118,17 +125,30 @@ Resources:
       NetworkMode: bridge
       ExecutionRoleArn: !Ref ExecutionRoleArn
       Volumes:
-        - { Name: config, Host: { SourcePath: /etc/gekko13/spire } }
+        - { Name: helper }
         - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
         - { Name: svid }
       ContainerDefinitions:
+        - Name: helper-config
+          Image: !Ref AppImage
+          Essential: false
+          MemoryReservation: 16
+          Command: ["sh", "scripts/helper-conf.sh", "/helper/helper.conf"]
+          Environment:
+            - { Name: JWT_AUDIENCE, Value: !Sub "https://${RpId}/login/realms/insurer" }
+          MountPoints:
+            - { SourceVolume: helper, ContainerPath: /helper }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
         - Name: svid-helper
           Image: !Ref SpiffeHelperImage
           Essential: true
           MemoryReservation: 32
-          Command: ["-config", "/etc/gekko13/spire/helper.conf"]
+          Command: ["-config", "/helper/helper.conf"]
+          DependsOn: [{ ContainerName: helper-config, Condition: SUCCESS }]
           MountPoints:
-            - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
+            - { SourceVolume: helper, ContainerPath: /helper, ReadOnly: true }
             - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
             - { SourceVolume: svid, ContainerPath: /svid }
           LogConfiguration:
@@ -161,8 +181,11 @@ Resources:
             - { Name: DB_URL, Value: !Sub "jdbc:postgresql://${DbHost}:5432/auth?sslmode=verify-full&sslrootcert=/tmp/db-ca.pem" }
             - { Name: DB_DRIVER, Value: org.postgresql.Driver }
             - { Name: DB_USER, Value: auth }
+            - { Name: LOGIN_ISSUER, Value: !Sub "https://${RpId}/login/realms/insurer" }
+            - { Name: LOGIN_URL, Value: !Sub "https://${RpId}/login" }
+            - { Name: JWT_SVID_FILE, Value: /svid/jwt_svid.token }
+            - { Name: JAVA_TOOL_OPTIONS, Value: -Djava.net.preferIPv6Addresses=true }
           Secrets:
-            - { Name: STANDIN_SECRET, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}" }
             - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbAuthPasswordParameter}" }
             - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
             # 2 つのタスクが同じ鍵でトークンを出し、確かめる
@@ -178,12 +201,16 @@ Resources:
   # レルムは、なければ取り込む（すでにあれば飛ばす）。
   # 管理者の利用者は作らない（管理画面は CloudFront から誰でも届くため）。
   # Host は CloudFront が送り先の名前に替えるので、KC_HOSTNAME に完全な URL を渡し、Host に頼らない。
+  # 段 D の D1-a2: gekko_11 の insurer-login（拡張とレルム insurer）。顧客のアプリと auth を、JWT-SVID でクライアント認証する（gekko_11 の D-38）。
+  # JWT-SVID の公開鍵は、SPIRE server の bundle endpoint（https_web）から読み、その自己署名の証明書を truststore に入れる。
+  # 固定の利用者のパスワードは、aws/deploy.sh が乱数で作って SSM に置き、レルムの取り込みのときに入る
   KeycloakTask:
     Type: AWS::ECS::TaskDefinition
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Login server behind the entry relay route for /login. Two tasks share Aurora and an Infinispan cluster over JGroups
+          Login server (gekko_11 insurer-login extension and realm) behind the entry relay route for /login.
+          Clients authenticate with JWT-SVIDs verified against the SPIRE bundle endpoint. Two tasks share Aurora and an Infinispan cluster over JGroups
           (jdbc-ping discovery), so the tasks use awsvpc to reach each other by task IP. The realm is imported if missing.
           The full URL in KC_HOSTNAME because CloudFront rewrites Host
         must: Never add a bootstrap admin user while the admin console is reachable through CloudFront
@@ -208,7 +235,7 @@ Resources:
               - CMD
               - bash
               - -c
-              - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /login/realms/gekko13/.well-known/openid-configuration HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && read -r line <&3 && [[ $line == *" 200 "* ]]'
+              - 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /login/realms/insurer/.well-known/openid-configuration HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && read -r line <&3 && [[ $line == *" 200 "* ]]'
             Interval: 10
             Timeout: 5
             Retries: 3
@@ -219,9 +246,18 @@ Resources:
             - { Name: RP_ID, Value: !Ref RpId }
             - { Name: KC_DB_URL, Value: !Sub "jdbc:postgresql://${DbHost}:5432/keycloak?sslmode=verify-full&sslrootcert=/tmp/db-ca.pem" }
             - { Name: KC_DB_USERNAME, Value: keycloak }
+            - { Name: KC_TRUSTSTORE_PATHS, Value: /tmp/bundle-ca.pem }
+            # レルムの ${…} が読む値（services/keycloak/realm/insurer.json）
+            - { Name: TRUST_DOMAIN, Value: gekko13.internal }
+            - { Name: AUTH_ISSUER, Value: https://auth:8443 }
+            - { Name: APP_ORIGIN, Value: !Sub "https://${RpId}" }
+            - { Name: AUDIT_ORIGIN, Value: !Sub "https://${RpId}/audit" }
+            - { Name: SPIRE_BUNDLE_ENDPOINT, Value: !Sub "https://spire-server.svc.${Prefix}.internal:8443" }
           Secrets:
             - { Name: KC_DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbKeycloakPasswordParameter}" }
             - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
+            - { Name: BUNDLE_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireBundleTlsCertParameter}" }
+            - { Name: DEMO_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DemoPasswordParameter}" }
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: keycloak, mode: non-blocking }

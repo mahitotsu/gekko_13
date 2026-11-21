@@ -27,18 +27,19 @@
 ```sh
 npm test
 ```
-期待する結果: 型の検査と lint が通り、テストが `21 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバー（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
+期待する結果: 型の検査（Node と、顧客のアプリの画面）と lint が通り、テストが `51 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバーとログインサーバーの拡張（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
 
-## 認可サーバーをローカルで確かめる
-`local/up.sh` は、第 1 部のサービスに加えて、認可サーバー（`services/auth`、Spring Authorization Server）を立てる。イメージは `services/auth/Dockerfile` から作り、ビルドの中で `mvn test` を回す。段 C の C-4 の判定は、次のとおりに回す。
+## ログインをローカルで確かめる（段 D の D1-a2-1）
+`local/up.sh` は、PostgreSQL、SPIRE、ログインサーバー（`services/keycloak`）、認可サーバー（`services/auth`）、顧客のアプリ（`services/customer-app`）、入口のリバースプロキシを立てる。入口は `http://gekko13.localhost:18000/` で、固定の利用者（alice など）のパスワードは `demo` である。確かめは、Docker の Playwright のブラウザと仮想の認証器で回す。
 
 ```sh
-SVID_TTL=120 local/up.sh
-node scripts/c4-check.ts
-local/down.sh
+local/up.sh
+docker run -d --rm --name gekko13-browser --network host --init --add-host gekko13.localhost:127.0.0.1 \
+  mcr.microsoft.com/playwright:v1.64.1-noble npx -y playwright@1.64.1 run-server --port 3334 --host 127.0.0.1
+node scripts/ui-login.ts
 ```
 
-期待する結果: `7/7 合格` と出る。最後の C4-7 は、SVID が入れ替わるのを待つので、1〜2 分かかる。`SVID_TTL` を付けないと、待ちは約 3 分になる。判定の中身は [findings 4-4](findings.md#4-4-spring-authorization-server-はenvoy-なしで-svid-の-mtls-を自分で終え交換したトークンを呼び手の-svid-の証明書に結んだ)。
+期待する結果: `1 パスワードでログイン`、`2 パスキーを登録`、`3 パスキーでログイン` の 3 行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。ログインサーバーの起動に 1 分ほどかかるので、`local/up.sh` の直後は失敗することがある。1 つのサービスだけを作り直すときは `local/up.sh <サービス>`（keycloak、auth、customer-app、entry）を回す。レルムの JSON を直したときは `local/reset-keycloak.sh` を回す（レルムは、すでにあれば取り込まない）。
 
 ## AWS で作る
 作る前に、変更をコミットしておく。イメージのタグは、イメージごとの材料のコミットした中身から作る（`scripts/image-tag.sh`）。材料にコミットしていない変更があると、`aws/deploy.sh` は `材料にコミットしていない変更がある` と出して止まる。材料が変わらないイメージは作り直さず、そのタスクも入れ替わらない。どのコミットから作ったかは、イメージのラベル `org.opencontainers.image.revision` に残る。
@@ -65,18 +66,25 @@ aws/scale.sh down    # 自動の増減を 0 にし、DAEMON 以外の全サー�
 期待する結果: `up` は数分で `安定した（台 2 台）` と出る。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の登録と、Keycloak と auth のデータは Aurora に残り、ルート CA も変わらないので、`up` のあとも作り直しは要らない。Aurora が止まっていれば、SPIRE server のタスクの db-init が、再開するまで待つ（約 15 秒）。`up` で戻すタスク数は、`GEKKO13_EDGE_TASKS` で変えられる。
 
 ## 入口（CloudFront とリバースプロキシ）
-入口は、CloudFront のディストリビューション（スタック `gekko13-edge`）から、入口のリバースプロキシ（スタック `gekko13-entry`、Lambda の Web Functions）を通る。CloudFront は OAC でリクエストに署名し、リバースプロキシは IAM の認証で、このディストリビューションからのリクエストだけを受ける。リバースプロキシは、パスで送り先を決める。`/login` と `/login/*` は keycloak へ、それ以外は edge-check へ送る。送り先は、名前空間 `svc.gekko13.internal` の SRV で見つける。ECS が正常なタスクを SRV に登録するので、インスタンスが入れ替わっても手で向け直すことはない。
+入口は、CloudFront のディストリビューション（スタック `gekko13-edge`）から、入口のリバースプロキシ（スタック `gekko13-entry`、Lambda の Web Functions）を通る。CloudFront は OAC でリクエストに署名し、リバースプロキシは IAM の認証で、このディストリビューションからのリクエストだけを受ける。リバースプロキシは、パスで送り先を決める。`/login` と `/login/*` は keycloak へ、それ以外は顧客のアプリ（customer-app）へ送る（段 D の D1-a2）。edge-check は、入口から外した。送り先は、名前空間 `svc.gekko13.internal` の SRV で見つける。ECS が正常なタスクを SRV に登録するので、インスタンスが入れ替わっても手で向け直すことはない。
 
 起動したあとに、入口を通して届くかを確かめる。
 
 ```sh
 D=$(aws cloudformation describe-stacks --region ap-northeast-1 --stack-name gekko13-edge \
   --query "Stacks[0].Outputs[?OutputKey=='DomainName'].OutputValue" --output text)
-for i in 1 2 3 4 5 6; do curl -s "https://$D/edge-point" | grep -o '"az":"[^"]*"'; done
-curl -s "https://$D/login/realms/gekko13/.well-known/openid-configuration" | head -c 120; echo
+curl -s "https://$D/login/realms/insurer/.well-known/openid-configuration" | head -c 120; echo
+curl -s "https://$D/config.json"; echo
 ```
 
-期待する結果: `"az":"ap-northeast-1a"` と `"az":"ap-northeast-1c"` の 2 種類が出る（AZ の名前はアカウントで違う）。続けて、`{"issuer":"https://<配信の名前>/login/realms/gekko13"` で始まる JSON が出る。
+期待する結果: `{"issuer":"https://<配信の名前>/login/realms/insurer"` で始まる JSON が出る。続けて、顧客のアプリの設定（`appOrigin` と `rpId`）が出る。
+
+ログインとパスキーは、手元と同じ `scripts/ui-login.ts` で、入口を指して確かめる。ブラウザは手元の Docker の Playwright（前の節）を使う。固定の利用者のパスワードは、`aws/deploy.sh` が乱数で作り、SSM の `/gekko13/login/demo-password` に置いてある。値を画面やファイルに残さず、環境変数で渡す。
+
+```sh
+DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/login/demo-password --with-decryption --query Parameter.Value --output text) \
+  node scripts/ui-login.ts "https://$D"
+```
 
 ディストリビューションのドメイン名（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消してもディストリビューションが残る作り（`DeletionPolicy: Retain`）にしてある。
 
@@ -123,7 +131,7 @@ aws/failover-check.sh
 - スクリプト: `aws/run-scenarios.sh`、`aws/create-user.sh`、`aws/edge-point.sh`、`aws/c3-measure.sh`、`aws/park.sh`、`scripts/vpc-origin-sg.sh`、`scripts/aws-login.ts`、`scripts/aws-collect.ts`
 - テンプレート: `aws/cognito.yaml`（スタック `gekko13-cognito` も残っている）
 
-第 1 部のサービスのコード（`services/bff`、`services/transfer`、`services/ledger`、`services/issuer`）は、ローカルの `local/up.sh` がまだ使う（C-4 の確かめ）。D1 で、第 2 部のサービスに入れ替える。
+第 1 部のサービスのコード（`services/bff`、`services/transfer`、`services/ledger`、`services/issuer`）と、C-4 の確かめ（`scripts/c4-check.ts`）は、段 D の D1-a2 で認可サーバーを gekko_11 のものに替えたので、動かない。`local/up.sh` も立てない。
 
 ## 後片付け
 インスタンスを 0 にするだけなら、`aws/scale.sh down` で足りる。全部を消すときは、スタックを作った順の逆に消す。消す前に、対象を一覧で確かめる。

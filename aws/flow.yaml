@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: "2010-09-09"
+# gekko13 の主の流れのスタック（段 D の D1-a2）。gekko_11 のサービスのうち、apps のスタックにないもの（Keycloak と auth のほか）を置く。
+# D1-a2-1 は顧客のアプリ（画面の配信元と BFF）だけ。D1-a2-2 で営業 AI エージェント、事務サービス、保険会社のシステムを、D1-a2-3 で監査サービスを足す。
+# 新しいサービスは、まず 1 タスクで、状態をメモリに持つ。冗長化は段 D の D1-a3 で行う（docs/design-decisions.md）。
+# CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
+Description: >-
+  gekko13 main-flow services on the base runtime (gekko13-ecs): the customer app (web UI and BFF) for now.
+  The entry relay finds it through the SRV record customer-app in the base namespace.
+  New services start with one task holding state in memory; redundancy comes in a later step.
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: gekko13
+  ClusterName:
+    Type: String
+  CapacityProviderName:
+    Type: String
+  NamespaceId:
+    Type: String
+    Description: ID of the base namespace (gekko13-ecs output NamespaceId). The SRV record of the customer app lives here
+  ExecutionRoleArn:
+    Type: String
+  LogGroupName:
+    Type: String
+  AppImage:
+    Type: String
+    Description: URI and tag of the gekko13/node image in ECR (customer app, and helper-config that writes the spiffe-helper config)
+  SpiffeHelperImage:
+    Type: String
+  RpId:
+    Type: String
+    Description: Passkey RP ID, the default domain of the entry CloudFront distribution. The issuer and the app origin are built from it
+
+Resources:
+  # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
+  CustomerAppDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: SRV records resolved by the entry relay. ECS registers healthy tasks by host IP and dynamic port. TTL 10 seconds
+    Properties:
+      Name: customer-app
+      NamespaceId: !Ref NamespaceId
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{ Type: SRV, TTL: 10 }]
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
+
+  # 顧客のアプリ。8080 は入口のリバースプロキシから（画面、BFF、受信箱の読み取り）。9443 は保険会社のシステムからの直送で、SVID の mTLS で受ける
+  # （D1-a2-2 で、保険会社のシステムが呼べるようにする）。BFF は、同じ SVID で、営業 AI エージェントと auth を mTLS で呼ぶ。
+  # ログインサーバーへは、JWT-SVID（宛先は issuer）でクライアント認証する。helper-config が、その宛先を入れた spiffe-helper の設定を書く
+  CustomerAppTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Customer app (web UI and BFF). Port 8080 serves the entry relay. Port 9443 takes direct notices from the insurer backend over SVID mTLS.
+          The BFF authenticates to Keycloak with a JWT-SVID whose audience is the login issuer; helper-config writes that spiffe-helper config
+        must: Never expose 9443 to the entry relay. Never pass the agent socket to the app container
+    Properties:
+      Family: !Sub "${Prefix}-customer-app"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      Volumes:
+        - { Name: helper }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid }
+      ContainerDefinitions:
+        - Name: helper-config
+          Image: !Ref AppImage
+          Essential: false
+          MemoryReservation: 16
+          Command: ["sh", "scripts/helper-conf.sh", "/helper/helper.conf"]
+          Environment:
+            - { Name: JWT_AUDIENCE, Value: !Sub "https://${RpId}/login/realms/insurer" }
+          MountPoints:
+            - { SourceVolume: helper, ContainerPath: /helper }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: customer-app, mode: non-blocking }
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/helper/helper.conf"]
+          DependsOn: [{ ContainerName: helper-config, Condition: SUCCESS }]
+          MountPoints:
+            - { SourceVolume: helper, ContainerPath: /helper, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: customer-app, mode: non-blocking }
+        - Name: app
+          Image: !Ref AppImage
+          Essential: true
+          MemoryReservation: 128
+          # svid-helper は鍵を root のグループで 0640 にして書く。app は root で動くので読める（Node のイメージの既定）
+          PortMappings:
+            - { ContainerPort: 8080, HostPort: 0, Protocol: tcp }
+            - { Name: notice, ContainerPort: 9443, Protocol: tcp }
+          HealthCheck:
+            Command: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/config.json"]
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          Environment:
+            - { Name: SERVICE, Value: customer-app }
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: JWT_SVID_FILE, Value: /svid/jwt_svid.token }
+            - { Name: TRUST_DOMAIN, Value: gekko13.internal }
+            - { Name: ISSUER, Value: !Sub "https://${RpId}/login/realms/insurer" }
+            - { Name: APP_ORIGIN, Value: !Sub "https://${RpId}" }
+            - { Name: RP_ID, Value: !Ref RpId }
+            - { Name: AUTH_ORIGIN, Value: https://auth:8443 }
+            - { Name: AGENT_ORIGIN, Value: https://sales-agent:8443 }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: customer-app, mode: non-blocking }
+
+  # 1 タスク（冗長化は D1-a3）。auth を Service Connect の名前で呼ぶので、クライアントとして Service Connect を有効にする。
+  # クライアントだけなら Cloud Map に名前を作らないので、SRV の customer-app とぶつからない（推定。同じ名前を両方で登録するとぶつかる
+  # という記録はある）。D1-a2-2 で 9443 を Service Connect で受けるときは、SRV と別の名前にする
+  CustomerAppService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ClusterName
+      ServiceName: customer-app
+      TaskDefinition: !Ref CustomerAppTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      HealthCheckGracePeriodSeconds: 60
+      ServiceRegistries: [{ RegistryArn: !GetAtt CustomerAppDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub "svc.${Prefix}.internal"

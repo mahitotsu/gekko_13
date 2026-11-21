@@ -101,6 +101,18 @@ Parameters:
   SpireRootKeyParameter:
     Type: String
     Default: /gekko13/spire/root-key
+  SpireBundleTlsCertParameter:
+    Type: String
+    Default: /gekko13/spire/bundle-tls-cert
+    Description: SSM String with the self-signed certificate of the SPIRE bundle endpoint (https_web), trusted by Keycloak
+  SpireBundleTlsKeyParameter:
+    Type: String
+    Default: /gekko13/spire/bundle-tls-key
+    Description: SSM SecureString with the private key of the SPIRE bundle endpoint certificate
+  DemoPasswordParameter:
+    Type: String
+    Default: /gekko13/login/demo-password
+    Description: SSM SecureString with the password of the fixed demo users, imported into Keycloak with the realm
   ContainerInsights:
     Type: String
     Default: disabled
@@ -193,6 +205,9 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthSigningKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootCertParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootKeyParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireBundleTlsCertParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireBundleTlsKeyParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DemoPasswordParameter}"
   SpireServerTaskRole:
     Type: AWS::IAM::Role
     # aws_iid のノードの確認で、SPIRE の server がインスタンスのタグを読む。権限を DescribeInstances より広げない。
@@ -286,6 +301,21 @@ Resources:
               log_level    = "INFO"
               default_x509_svid_ttl = "5m"
               ca_ttl       = "24h"
+              # ログインサーバーが、JWT-SVID を確かめる公開鍵を取る受け口（gekko_11 の D-38。段 D の D1-a2）。Aurora にある全部の server の鍵を返す。
+              # 証明書は aws/deploy.sh が自己署名で作って SSM に置き、タスクの db-init のコンテナが書く
+              federation {
+                bundle_endpoint {
+                  address = "0.0.0.0"
+                  port    = 8443
+                  profile "https_web" {
+                    serving_cert_file {
+                      cert_file_path     = "/spire-ca/bundle-tls.crt"
+                      key_file_path      = "/spire-ca/bundle-tls.key"
+                      file_sync_interval = "1h"
+                    }
+                  }
+                }
+              }
             }
             plugins {
               # 2 つの server が、共有の Aurora に状態を置く。宛先とパスワードは、server の起動の -expandEnv で、タスクの環境変数から入る
@@ -427,7 +457,8 @@ Resources:
       com.aws.cloudformation.Context:
         why: >-
           Two server tasks share state in Aurora and mint intermediate CAs under one shared root (UpstreamAuthority disk).
-          The db-init container runs first: it writes the Aurora CA and the root CA into task volumes and creates databases and roles.
+          The db-init container runs first: it writes the Aurora CA, the root CA and the bundle endpoint TLS pair into task volumes and creates databases and roles.
+          Port 8443 serves the trust bundle (https_web) so that Keycloak can verify JWT-SVIDs.
           The registrar creates entries and keeps writing the bundle (the root certificate) to EFS
         must: Never put the root key on EFS or in the image. It comes only from SSM through ECS secrets into a task volume
     Properties:
@@ -463,6 +494,8 @@ Resources:
             - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
             - { Name: SPIRE_ROOT_CERT, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootCertParameter}" }
             - { Name: SPIRE_ROOT_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootKeyParameter}" }
+            - { Name: SPIRE_BUNDLE_TLS_CERT, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireBundleTlsCertParameter}" }
+            - { Name: SPIRE_BUNDLE_TLS_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireBundleTlsKeyParameter}" }
           MountPoints:
             - { SourceVolume: dbca, ContainerPath: /dbca }
             - { SourceVolume: spire-ca, ContainerPath: /spire-ca }
@@ -484,7 +517,8 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 60
-          PortMappings: [{ ContainerPort: 8081, Protocol: tcp }]
+          # 8081 は agent から、8443 は bundle endpoint（ログインサーバーから。同じセキュリティグループの中だけ）
+          PortMappings: [{ ContainerPort: 8081, Protocol: tcp }, { ContainerPort: 8443, Protocol: tcp }]
           Environment:
             - { Name: AWS_REGION, Value: !Ref AWS::Region }
             - { Name: AWS_USE_DUALSTACK_ENDPOINT, Value: "true" }
