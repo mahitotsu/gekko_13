@@ -52,7 +52,12 @@
 | VPC origin | CloudFront の送り先の種類の 1 つ。プライベートのサブネットの EC2 のインスタンスなどを、ARN で指す。CloudFront が VPC の中に ENI とグループ（`CloudFront-VPCOrigins-Service-SG`）を作って届く |
 | VPC origin の組（A と B） | この検証で、VPC origin を 2 組持つ作り。CloudFront は配信が使っている VPC origin を書き換えさせないので、使っていない組を新しい台に向けてから、配信を切り替える |
 | EIGW | Egress-only のインターネットゲートウェイ。IPv6 で外へ出る通信だけを通し、外から始まる接続は通さない |
-| ALB | Application Load Balancer。HTTP の要求ごとに、送り先（ターゲット）へ振り分ける。この検証の段 D では、内部向けの ALB を CloudFront の VPC origin から指す |
+| ALB | Application Load Balancer。HTTP の要求ごとに、送り先（ターゲット）へ振り分ける。この検証の段 D の D0 では、内部向けの ALB を CloudFront の VPC origin から指した。D0-b で、入口の中継に替えた |
 | ターゲットグループ | ALB の送り先の組。ECS は、動き出したタスクを、台と、台のポートの組で登録する |
+| Web Functions | Lambda の形の 1 つ。ポートで待ち受ける Node.js の HTTP サーバーを、そのまま動かす。使わない間は 0 まで縮み、固定費がない。この検証では、入口の中継に使う |
+| 入口の中継 | この検証の段 D の D0-b から、CloudFront と台の間に置く Web Functions。パスで送り先を決め、VPC の中のタスクへ要求をそのまま送る |
+| NetworkConnector | Lambda の Web Functions と MicroVMs が、VPC のサブネットとグループを通って外へ出るための設定。ENI は Lambda が作る |
+| OAC | Origin Access Control。CloudFront が、送り先への要求に SigV4 で署名する仕組み。送り先は、署名で CloudFront からの要求だけを受ける |
+| SRV | DNS のレコードの種類の 1 つ。名前に、送り先の名前とポートの組を対応させる。ECS は bridge のタスクを、台の IP と動的なポートの組で、Cloud Map の SRV に登録する |
 | token-guard | gekko_11 の部品。受け口でトークンと呼び手を確かめ、出口でトークンを替える。gekko_11 ではサイドカーで、段 D では各アプリが読むライブラリにする |
 | 直送 | 保険会社のシステムが、契約の内容を、AI を通さずに、本人が登録した宛先へ直接送ること。本人は、手元の写しと見比べる（gekko_11） |
