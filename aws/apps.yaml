@@ -145,6 +145,14 @@ Resources:
           # app は root でない利用者のまま、グループだけ root にして鍵を読む（docs/findings.md の 4-13）
           User: "1000:0"
           PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
+          # 8443 で受けられるかを確かめる（イメージに curl がないので、bash の /dev/tcp）。Service Connect は、新しいタスクが
+          # HEALTHY になってから通信を回す（ECS の資料）。入れ替えのときも、受けられるようになってから古いタスクを止める
+          HealthCheck:
+            Command: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/8443"]
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 120
           Environment:
             - { Name: SVID_DIR, Value: /svid }
             - { Name: ISSUER, Value: https://auth:8443 }
@@ -257,6 +265,7 @@ Resources:
       # 1 つずつ入れ替える。AZ に散らす。タスクの数は、自動の増減が 2〜4 で変える（AuthScaling）
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
+      HealthCheckGracePeriodSeconds: 120
       ServiceConnectConfiguration:
         Enabled: true
         Namespace: !Ref NamespaceArn

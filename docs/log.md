@@ -74,6 +74,7 @@
 - 2026-11-21: 保存先は、ECS の上の PostgreSQL ではなく Aurora にする。ECS の上だと、載った台の中断で全部が止まるため。持ち主が決めた。
 - 2026-11-21: Aurora へは、IAM のデータベース認証ではなく、ID とパスワードでつなぐ。通信は TLS にし、Aurora の証明書を確かめる。Aurora はクライアントの証明書での認証に対応しないので、SVID の mTLS にはできない。持ち主が決めた（[design-decisions](design-decisions.md)）。
 - 2026-11-21: タスクの数の自動の増減を、Keycloak と auth に入れる（アラーム 4 つ、月約 0.4 ドル）。持ち主が承認した。
+- 2026-11-21: auth と SPIRE server に、コンテナの健康の確かめを足す。Service Connect は、新しいタスクが HEALTHY になってから通信を回す。その動きには、欠かせないコンテナに健康の確かめが要る（ECS の資料、https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-connect-concepts.html 、2026-11-21 に読んだ）。入れ替えのときに、受けられないタスクへ回さないため。持ち主が承認した。
 
 ## 次の候補（未実施）
 - design-decisions の段 D の「提案」の行を、持ち主に確かめる。

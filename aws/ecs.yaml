@@ -477,6 +477,13 @@ Resources:
           MemoryReservation: 96
           Command: ["-config", "/etc/gekko13/spire/server.conf", "-expandEnv"]
           DependsOn: [{ ContainerName: db-init, Condition: SUCCESS }]
+          # 入れ替えのとき、新しい server が受けられるようになってから、古い server を止める。固まった server は入れ替える
+          HealthCheck:
+            Command: [CMD, /opt/spire/bin/spire-server, healthcheck, -socketPath, /run/spire/server-api/api.sock]
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
           PortMappings: [{ ContainerPort: 8081, Protocol: tcp }]
           Environment:
             - { Name: AWS_REGION, Value: !Ref AWS::Region }
@@ -565,6 +572,7 @@ Resources:
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
       PlacementConstraints: [{ Type: distinctInstance }]
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
+      HealthCheckGracePeriodSeconds: 60
       NetworkConfiguration:
         AwsvpcConfiguration:
           Subnets: !Ref SubnetIds
