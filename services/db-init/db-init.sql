@@ -24,6 +24,12 @@ BEGIN
     ELSE
       EXECUTE format('ALTER ROLE %I LOGIN PASSWORD %L', r, pw);
     END IF;
+    -- データベースの持ち主をこのロールにするには、作る側（管理者）が、このロールに切り替えられる必要がある（PostgreSQL 16 から）。
+    -- ロールを作った者は、管理の権利（ADMIN）を持つが、切り替える権利（SET）は持たない。Aurora の管理者は本物の superuser ではないので、
+    -- SET を与えてから作る（手元の superuser では要らないが、害はない）
+    IF NOT pg_has_role(current_user, r, 'SET') THEN
+      EXECUTE format('GRANT %I TO %I WITH SET TRUE', r, current_user);
+    END IF;
   END LOOP;
 END
 $$;
