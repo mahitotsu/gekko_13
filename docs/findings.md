@@ -60,6 +60,8 @@
 | 4-18 | NetworkConnector の操作ロールと Web Functions の実行ロールは、信頼ポリシーに aws:SourceAccount の条件があると、Lambda に引き受けられなかった |
 | 4-19 | CloudFront は、Web Functions の送り先の OAC に、署名の仕方 always を拒み、always-amz-auth を求めた |
 | 4-20 | NetworkConnector を作るのに約 4 分、中継のリビジョンとエンドポイントは十数秒、配信の切り替えに約 3 分かかった |
+| 4-21 | 入口を Web Functions の中継にしても、台が 0 の状態から約 3〜4 分で使え、2 つの AZ のどちらの台にも届いた。台が 0 の間、配信は 503 を返した |
+| 4-22 | 名前空間の DNS は、全部のタスクが UNHEALTHY のとき、UNHEALTHY のタスクも返した |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -613,6 +615,41 @@ Cognito（`cognito-idp` と、マネージドログインのドメイン）は�
 - スタック `gekko13-entry` の出来事（2026-11-21、UTC）: `Connector` 05:36:13〜05:40:29、`Revision` 05:40:31〜05:40:35、`Endpoint` 05:40:36〜05:40:44。
 - スタック `gekko13-edge` の出来事: `Distribution` 05:42:21〜05:45:27。
 - 巻き戻し: `Connector` の DELETE_COMPLETE は 04:57:47（CREATE_FAILED の約 2 分後）。
+
+</details>
+
+### 4-21. 入口を Web Functions の中継にしても、台が 0 の状態から約 3〜4 分で使え、2 つの AZ のどちらの台にも届いた。台が 0 の間、配信は 503 を返した
+**結論:** D0-b の「台が 0 から使えるまで」を、D0 と同じ定義で 3 回測った。終点は 220 秒、246 秒、184 秒で、3 回とも 300 秒以内、毎回 2 つの AZ が現れた。plan.md の予測（約 4 分）どおりだった。ばらつきの多くは、台が ASG に加わるまでの時間（75〜152 秒）だった。edge-check は、RUNNING になってから 2〜3 秒で、CloudFront から届いた。ALB の D0（166〜193 秒。[4-15](#4-15-入口を内部向けの-alb-にすると台が-0-の状態から約-3-分で使え2-つの-az-のどちらの台にも届いた)）と比べて、入口による遅れは見えなかった。
+
+台を 0 にしている間も、配信は有効なまま、中継が 503 の `no target` を返した。測定の間の中継の記録は、次のとおりである。
+
+| 数えたもの | 件数 |
+|---|---|
+| `no target`（503） | 292（台が 0 の間と、タスクが登録される前） |
+| 送り先へ中継した要求 | 85（すべて 1 回めの送り先で通った） |
+| 送り先につながらなかった要求（502） | 0 |
+
+中継の中の時間は、中央値 5 ms、最大 179 ms だった。実行環境は、20 分の間に 1 回だけ起き（330 ms）、そのまま使われ続けた。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/scale.sh down` と `aws/d0-measure.sh` を 3 回（2026-11-21 05:53〜06:14 UTC、コミット `69f8f61`）。結果は `local/run/d0/20261121T055522Z`、`20261121T060300Z`、`20261121T061100Z` の `result.md`。
+- 内訳（始点からの秒。1 回目、2 回目、3 回目）: 台が ASG に加わった 128、152、75。edge-check が RUNNING 178、203、140。CloudFront を通して Keycloak が応えた 220、236、152。auth の起動（ログの時刻）は、3 回目が 184 で終点を決めた。
+- 中継の記録: `/aws/lambda/web/gekko13-entry` の `no-target`、`proxied`、`upstream-failed` の行を数えた（05:53 UTC 以降）。
+
+</details>
+
+### 4-22. 名前空間の DNS は、全部のタスクが UNHEALTHY のとき、UNHEALTHY のタスクも返した
+**結論:** 3 回目の測定の間、3〜5 秒ごとに 3 つを記録した。edge-check の 2 つのタスクの健康、健康なインスタンスだけを返す API（`discover-instances`）の件数、CloudFront を通した `/edge-point` の状態である。ECS は、タスクをはじめ UNHEALTHY として登録した。2 つとも UNHEALTHY の間、`discover-instances` は 0 件を返したが、CloudFront を通すと 200 が返った。中継が引く DNS は、UNHEALTHY のタスクも返したことになる。1 つが HEALTHY になると、`discover-instances` も 1 件になった。
+
+Route 53 の複数値の答えが、全部が健康でないときに全部を返す動きと合う（推定）。全部が健康になったあとで、DNS が UNHEALTHY のタスクを外すかは確かめていない。影響として、タスクが起きかけの間は、健康の確かめを通る前のタスクにも要求が届く。待ち受けの前なら、中継は送り直し、それでもつながらなければ 502 を返す。この測定では 502 は 0 件だった。タスクが 1 つしかないサービスでは、健康でなくなったタスクにも送り続ける。
+
+<details>
+<summary>根拠</summary>
+
+- 記録（2026-11-21、UTC）: 06:13:18 に 2 つとも UNHEALTHY、`discover-instances` は 0、CloudFront は 503。06:13:23 に 2 つとも UNHEALTHY のまま、CloudFront は 200。06:14:06 に 1 つが HEALTHY、`discover-instances` は 1。06:14:16 に 2 つとも HEALTHY、`discover-instances` は 2。
+- コマンド: `aws servicediscovery get-instances-health-status`、`aws servicediscovery discover-instances`、`curl https://<配信の名前>/edge-point` を、3 秒の間を置いて繰り返した。
 
 </details>
 
