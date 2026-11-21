@@ -23,7 +23,15 @@ PREFIX=gekko13
 REGION=${AWS_REGION:-ap-northeast-1}
 SPIRE=1.15.3
 HELPER=0.11.0
-TAG=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || echo "-dirty")
+# イメージのタグは、イメージごとの材料の、コミットした中身から作る（scripts/image-tag.sh）。材料が同じなら作り直さず、
+# タスクも入れ替わらない。材料にコミットしていない変更があれば、ここで止まる。どのコミットから作ったかは、ラベルに残す
+REVISION=$(git rev-parse HEAD)
+APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile package.json package-lock.json packages services \
+  scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/make-fake-certs.sh scripts/stage-image.sh \
+  ':!services/auth' ':!services/keycloak' ':!services/entry' ':!**/test/**')
+AUTH_TAG=$(scripts/image-tag.sh "" services/auth)
+KEYCLOAK_TAG=$(scripts/image-tag.sh "" services/keycloak)
+LABEL="org.opencontainers.image.revision=$REVISION"
 
 # CloudFormation は ASCII 以外の文字を「?」に置き換える。送る前に止める
 scripts/check-templates.sh
@@ -47,16 +55,16 @@ copy "ghcr.io/spiffe/spiffe-helper:$HELPER" "$(out "$PREFIX-registry" SpiffeHelp
 # アプリのイメージは arm64 で作る。Dockerfile に RUN がないので、エミュレーションは要らない。
 # spire-server の CLI を写すので、SPIRE の版を揃える
 CTX=$(scripts/stage-image.sh)
-docker buildx imagetools inspect "$APP_REPO:$TAG" >/dev/null 2>&1 || \
-  docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" -f Dockerfile -t "$APP_REPO:$TAG" --push "$CTX"
+docker buildx imagetools inspect "$APP_REPO:$APP_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" --label "$LABEL" -f Dockerfile -t "$APP_REPO:$APP_TAG" --push "$CTX"
 
 # 認可サーバーとログインサーバー（Java）。どちらも、ビルドの段はビルドする側の CPU で動くので、エミュレーションは要らない
 AUTH_REPO=$(out "$PREFIX-registry" AuthRepositoryUri)
 KEYCLOAK_REPO=$(out "$PREFIX-registry" KeycloakRepositoryUri)
-docker buildx imagetools inspect "$AUTH_REPO:$TAG" >/dev/null 2>&1 || \
-  docker buildx build --platform linux/arm64 -t "$AUTH_REPO:$TAG" --push services/auth
-docker buildx imagetools inspect "$KEYCLOAK_REPO:$TAG" >/dev/null 2>&1 || \
-  docker buildx build --platform linux/arm64 -t "$KEYCLOAK_REPO:$TAG" --push services/keycloak
+docker buildx imagetools inspect "$AUTH_REPO:$AUTH_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$AUTH_REPO:$AUTH_TAG" --push services/auth
+docker buildx imagetools inspect "$KEYCLOAK_REPO:$KEYCLOAK_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$KEYCLOAK_REPO:$KEYCLOAK_TAG" --push services/keycloak
 
 # 入口の中継（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
 ENTRY_BUCKET=$(out "$PREFIX-registry" EntryCodeBucketName)
@@ -116,7 +124,7 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "MaxInstances=$MAX_HOSTS" \
   "InstanceType=$INSTANCE_TYPE" \
   "ContainerInsights=$CONTAINER_INSIGHTS" \
-  "AppImage=$(dualstack "$APP_REPO"):$TAG" \
+  "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
   "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \
   "SpireAgentImage=$(dualstack "$(out "$PREFIX-registry" SpireAgentRepositoryUri)"):$SPIRE" \
   "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER"
@@ -138,9 +146,9 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "ExecutionRoleArn=$(out "$PREFIX-ecs" ExecutionRoleArn)" \
   "LogGroupName=$(out "$PREFIX-ecs" LogGroupName)" \
   "NamespaceId=$(out "$PREFIX-ecs" NamespaceId)" \
-  "AppImage=$(dualstack "$APP_REPO"):$TAG" \
-  "AuthImage=$(dualstack "$AUTH_REPO"):$TAG" \
-  "KeycloakImage=$(dualstack "$KEYCLOAK_REPO"):$TAG" \
+  "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
+  "AuthImage=$(dualstack "$AUTH_REPO"):$AUTH_TAG" \
+  "KeycloakImage=$(dualstack "$KEYCLOAK_REPO"):$KEYCLOAK_TAG" \
   "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
   "EdgeTaskCount=$EDGE_TASKS" \
   "RpId=$(rp_id)"

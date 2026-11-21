@@ -34,7 +34,7 @@
 - アプリは自分で mTLS を終える。身元の確認をサイドカーに任せない。Service Connect の Envoy は TCP の中継だけに使い、Service Connect の TLS は使わない（理由は `docs/design-decisions.md`）。
 - CloudFormation のテンプレートの Description と Metadata は英語で書く。CloudFormation が ASCII 以外の文字を「?」に置き換えるため。`scripts/check-templates.sh` が、コメント以外の日本語を止める。
 - `local/down.sh` は `local/run/` を全部消す。AWS の結果や控えも消えるので、残すものは先に写す。
-- 作り直すときは、先にコミットする。イメージのタグはコミットから作り、同じ `-dirty` のタグでは古いイメージが使われる。
+- AWS に送るときは、先にコミットする。イメージのタグは、イメージごとの材料のコミットした中身から作り（`scripts/image-tag.sh`）、材料にコミットしていない変更があると `aws/deploy.sh` が止まる。材料が同じなら、コミットが変わっても作り直さず、タスクも入れ替わらない。イメージに入れるファイルを増やしたり減らしたりしたら、`aws/deploy.sh` のタグの材料もそろえる。
 
 ## 文書の書き方
 人が読む文書を書く・直すときは、スキル `write-docs` に従う。規則（5 つの原則、5 つの試験、出す前の確認）の正本は、そのスキルにある。ここには写さない。
