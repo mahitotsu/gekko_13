@@ -62,6 +62,7 @@
 | 4-20 | NetworkConnector を作るのに約 4 分、中継のリビジョンとエンドポイントは十数秒、配信の切り替えに約 3 分かかった |
 | 4-21 | 入口を Web Functions の中継にしても、台が 0 の状態から約 3〜4 分で使え、2 つの AZ のどちらの台にも届いた。台が 0 の間、配信は 503 を返した |
 | 4-22 | 名前空間の DNS は、全部のタスクが UNHEALTHY のとき、UNHEALTHY のタスクも返した |
+| 4-23 | 台を全部スポットにしても、2 つの AZ に台が起き、台が 0 の状態から約 3 分半で使えた。1a では t4g.large が選ばれた |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -650,6 +651,18 @@ Route 53 の複数値の答えが、全部が健康でないときに全部を�
 
 - 記録（2026-11-21、UTC）: 06:13:18 に 2 つとも UNHEALTHY、`discover-instances` は 0、CloudFront は 503。06:13:23 に 2 つとも UNHEALTHY のまま、CloudFront は 200。06:14:06 に 1 つが HEALTHY、`discover-instances` は 1。06:14:16 に 2 つとも HEALTHY、`discover-instances` は 2。
 - コマンド: `aws servicediscovery get-instances-health-status`、`aws servicediscovery discover-instances`、`curl https://<配信の名前>/edge-point` を、3 秒の間を置いて繰り返した。
+
+</details>
+
+### 4-23. 台を全部スポットにしても、2 つの AZ に台が起き、台が 0 の状態から約 3 分半で使えた。1a では t4g.large が選ばれた
+**結論:** ASG を、オンデマンドを 0 台にし、4 つの種類（t4g.medium、c6g.large、c7g.large、t4g.large）を `price-capacity-optimized` で選ぶ形にした。台は 2 回起こし、2 回とも 2 台ともスポットで起きた。1c は t4g.medium、1a は t4g.large だった。1a では、t4g.medium より高い t4g.large が選ばれたことになる。空きの多さを優先したと見られる（推定）。D0-b の測り方で 1 回測ると、終点は 204 秒で、2 つの AZ が現れた。オンデマンドの 3 回（184〜246 秒。[4-21](#4-21-入口を-web-functions-の中継にしても台が-0-の状態から約-34-分で使え2-つの-az-のどちらの台にも届いた台が-0-の間配信は-503-を返した)）の幅に収まった。中断は、この間には起きなかった。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/deploy.sh`（コミット `e820719`）、`aws ec2 describe-instances` の `InstanceType`、`InstanceLifecycle`、`Placement.AvailabilityZone`、`aws/scale.sh down`、`aws/d0-measure.sh`（2026-11-21 06:39〜07:00 UTC）。結果は `local/run/d0/20261121T065325Z/result.md`。
+- 内訳（始点からの秒）: 台が ASG に加わった 120、edge-check と keycloak が RUNNING 182、CloudFront を通して 2 つの AZ の edge-check が応えた 194、Keycloak が応えた 204、auth の起動（ログの時刻）204。
+- スポットの価格（東京、2026-11-21、1 時間あたり）: t4g.medium は 1a 0.0170 ドル、1c 0.0188 ドル。t4g.large は 1a 0.0327 ドル、1c 0.0300 ドル（`aws ec2 describe-spot-price-history`）。
 
 </details>
 
