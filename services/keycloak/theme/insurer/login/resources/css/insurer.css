@@ -1,0 +1,175 @@
+/* ログインの画面の見た目を、顧客のアプリ（services/customer-app/web/styles.css）にそろえる。
+   色の値（トークン）は、アプリと同じ値を写す。アプリの値を変えたら、ここも同じ変更で直す。
+   Keycloak の標準の画面（keycloak.v2、PatternFly 5）の上に重ね、部品の作りは変えない。 */
+:root {
+  --ins-background: oklch(0.985 0.002 250);
+  --ins-foreground: oklch(0.21 0.02 260);
+  --ins-card: oklch(1 0 0);
+  --ins-muted-foreground: oklch(0.5 0.02 260);
+  --ins-border: oklch(0.91 0.008 250);
+  --ins-primary: oklch(0.45 0.15 255);
+  --ins-primary-hover: oklch(0.4 0.15 255);
+  --ins-primary-foreground: oklch(0.99 0 0);
+  --ins-font: system-ui, "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ins-background: oklch(0.17 0.01 260);
+    --ins-foreground: oklch(0.95 0.005 250);
+    --ins-card: oklch(0.21 0.012 260);
+    --ins-muted-foreground: oklch(0.72 0.015 260);
+    --ins-border: oklch(0.32 0.012 260);
+    --ins-primary: oklch(0.7 0.13 255);
+    --ins-primary-hover: oklch(0.76 0.12 255);
+    --ins-primary-foreground: oklch(0.17 0.02 260);
+  }
+}
+
+/* 文字と部品の色。PatternFly の変数を、アプリのトークンで置き換える。ダークのときは、PatternFly が html に pf-v5-theme-dark を付けて
+   自分の値を当てるので、そちらにも同じ値を当てる */
+:root,
+:root.pf-v5-theme-dark {
+  --pf-v5-global--FontFamily--text: var(--ins-font);
+  --pf-v5-global--FontFamily--heading: var(--ins-font);
+  --pf-v5-global--Color--100: var(--ins-foreground);
+  --pf-v5-global--Color--200: var(--ins-muted-foreground);
+  --pf-v5-global--link--Color: var(--ins-primary);
+  --pf-v5-global--link--Color--hover: var(--ins-primary-hover);
+  --pf-v5-global--primary-color--100: var(--ins-primary);
+  --pf-v5-c-button--BorderRadius: 0.375rem;
+  --pf-v5-c-button--m-primary--BackgroundColor: var(--ins-primary);
+  --pf-v5-c-button--m-primary--Color: var(--ins-primary-foreground);
+  --pf-v5-c-button--m-primary--hover--BackgroundColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-primary--focus--BackgroundColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-primary--active--BackgroundColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-secondary--Color: var(--ins-primary);
+  --pf-v5-c-button--m-secondary--hover--Color: var(--ins-primary-hover);
+  --pf-v5-c-button--m-secondary--BorderColor: var(--ins-primary);
+  --pf-v5-c-button--m-secondary--hover--BorderColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-secondary--after--BorderColor: var(--ins-primary);
+  --pf-v5-c-button--m-secondary--hover--after--BorderColor: var(--ins-primary-hover);
+  --pf-v5-c-form-control--BorderRadius: 0.375rem;
+}
+
+/* 背景は、暗い模様をやめて、アプリと同じ明るい地にする */
+.login-pf body,
+#keycloak-bg {
+  background: var(--ins-background) none;
+  color: var(--ins-foreground);
+  font-family: var(--ins-font);
+}
+.pf-v5-c-login {
+  background: var(--ins-background);
+  min-height: 100vh;
+  align-items: flex-start;
+  padding-top: 0;
+}
+.pf-v5-c-login__container {
+  grid-template-columns: min(46rem, 100%);
+  padding-top: 0;
+}
+
+/* ヘッダーは、アプリの上の帯と同じく、印と名前を左に並べる */
+.pf-v5-c-login__header {
+  padding: 0.75rem 0;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--ins-border);
+  background: var(--ins-card);
+  margin-inline: calc(50% - 50vw);
+  padding-inline: calc(50vw - 50%);
+}
+#kc-header-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 1rem;
+  color: var(--ins-foreground);
+  padding: 0;
+}
+.ins-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.5rem;
+  background: var(--ins-primary);
+  color: var(--ins-primary-foreground);
+  font-size: 0.875rem;
+}
+.ins-sub {
+  color: var(--ins-muted-foreground);
+}
+
+/* カードは、アプリのカードと同じく、角を丸め、薄い枠と影にする。上の青い帯は外す */
+.pf-v5-c-login__main {
+  background: var(--ins-card);
+  border: 1px solid var(--ins-border);
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  max-width: 46rem;
+}
+.pf-v5-c-login__main-header {
+  border-top: none;
+  padding-top: 1.25rem;
+}
+.pf-v5-c-login__main-header .pf-v5-c-title,
+#kc-page-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--ins-foreground);
+}
+.pf-v5-c-form__label-text {
+  font-weight: 500;
+  color: var(--ins-foreground);
+}
+
+/* PatternFly の指定（ヘッダーの白い文字、上の余白、カードの広い内側の余白）より強く当てる */
+#keycloak-bg .pf-v5-c-login__container {
+  padding-block-start: 0;
+  margin-block-start: 0;
+}
+#keycloak-bg #kc-header {
+  min-height: 0;
+  padding-block: 0.75rem;
+  margin-block-start: 0;
+}
+#keycloak-bg #kc-header-wrapper,
+#keycloak-bg #kc-header-wrapper span {
+  color: var(--ins-foreground);
+  min-height: 0;
+  margin: 0;
+  line-height: 1.5;
+}
+#keycloak-bg #kc-header-wrapper .ins-badge {
+  color: var(--ins-primary-foreground);
+}
+#keycloak-bg #kc-header-wrapper .ins-sub {
+  color: var(--ins-muted-foreground);
+}
+#keycloak-bg .pf-v5-c-login__main-header,
+#keycloak-bg .pf-v5-c-login__main-body,
+#keycloak-bg .pf-v5-c-login__main-footer {
+  padding-inline: 1.25rem;
+}
+#keycloak-bg .pf-v5-c-login__main-body {
+  padding-block-end: 1.25rem;
+}
+
+/* ボタンの色。PatternFly は、ダークのときにボタンの要素の上で変数を決め直すので、ボタンにも直接当てる */
+#keycloak-bg .pf-v5-c-button {
+  --pf-v5-c-button--m-primary--BackgroundColor: var(--ins-primary);
+  --pf-v5-c-button--m-primary--Color: var(--ins-primary-foreground);
+  --pf-v5-c-button--m-primary--hover--BackgroundColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-primary--hover--Color: var(--ins-primary-foreground);
+  --pf-v5-c-button--m-primary--focus--BackgroundColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-primary--focus--Color: var(--ins-primary-foreground);
+  --pf-v5-c-button--m-primary--active--BackgroundColor: var(--ins-primary-hover);
+  --pf-v5-c-button--m-primary--active--Color: var(--ins-primary-foreground);
+  --pf-v5-c-button--m-secondary--Color: var(--ins-primary);
+  --pf-v5-c-button--m-secondary--hover--Color: var(--ins-primary-hover);
+  --pf-v5-c-button--m-secondary--after--BorderColor: var(--ins-primary);
+  --pf-v5-c-button--m-secondary--hover--after--BorderColor: var(--ins-primary-hover);
+}

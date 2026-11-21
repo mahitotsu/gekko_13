@@ -1,6 +1,11 @@
 {
   "realm": "insurer",
   "loginTheme": "insurer",
+  "displayName": "教材保険会社",
+  "displayNameHtml": "<span class=\"ins-badge\">教</span><span>教材保険会社</span><span class=\"ins-sub\">ログイン</span>",
+  "internationalizationEnabled": true,
+  "supportedLocales": ["ja"],
+  "defaultLocale": "ja",
   "enabled": true,
   "sslRequired": "none",
   "accessTokenLifespan": 300,
@@ -18,7 +23,7 @@
   "webAuthnPolicyPasswordlessAuthenticatorAttachment": "platform",
   "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": true,
   "localizationTexts": {
-    "en": {
+    "ja": {
       "webauthn-registration-title": "パスキーを登録します。このパスキーで、次からのログインと、申込みの署名をします",
       "webauthn-registration-init-label": "パスキー",
       "deleteCredentialTitle": "{0} を消します",
