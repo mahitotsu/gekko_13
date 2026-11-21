@@ -78,12 +78,15 @@ Resources:
                   - !GetAtt CentralLogGroup.Arn
                   - !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/web/${Prefix}-entry.local:*"
 
-  # NetworkConnector が ENI を作るときに Lambda が引き受けるロール（Lambda の資料の「Operator role permissions」に従う）
+  # NetworkConnector が ENI を作るときに Lambda が引き受けるロール（Lambda の資料の「Operator role permissions」に従う）。
+  # 信頼ポリシーに aws:SourceAccount の条件を付けると、Lambda が引き受けられず、作成が拒まれた（docs/findings.md）。資料のとおり条件なしにする
   ConnectorOperatorRole:
     Type: AWS::IAM::Role
     Metadata:
       com.aws.cloudformation.Context:
-        why: Assumed by Lambda to create the network connector ENIs, following the Lambda guide (operator role permissions)
+        why: >-
+          Assumed by Lambda to create the network connector ENIs, following the Lambda guide (operator role permissions).
+          The trust policy has no condition: with aws:SourceAccount, Lambda could not assume the role
         must: Do not grant Elastic IP actions (service-managed EIPs have a fixed hourly cost)
     Properties:
       AssumeRolePolicyDocument:
@@ -92,7 +95,6 @@ Resources:
           - Effect: Allow
             Principal: { Service: lambda.amazonaws.com }
             Action: sts:AssumeRole
-            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
       Policies:
         - PolicyName: connector-enis
           PolicyDocument:
