@@ -30,7 +30,8 @@ Parameters:
     Description: Domain name of the relay endpoint (gekko13-entry output EndpointDomainName)
 
 Resources:
-  # Web Functions の送り先は、種類 lambda、いつも署名（always）にする（Lambda の資料。ほかの署名の仕方は拒まれる）
+  # Web Functions の送り先は、種類 lambda、署名の仕方 always-amz-auth にする（Lambda の資料、gekko_12 の実測 3-8）。
+  # always にすると、配信の更新が「Lambda-Web origins require always-amz-auth signing behavior」で拒まれた（docs/findings.md）
   EntryOac:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
@@ -38,7 +39,7 @@ Resources:
         Name: !Sub "${Prefix}-entry"
         Description: !Sub "${Prefix} entry relay (Lambda Web Function)"
         OriginAccessControlOriginType: lambda
-        SigningBehavior: always
+        SigningBehavior: always-amz-auth
         SigningProtocol: sigv4
 
   # キャッシュはしない（CachingDisabled）。送り先には、Host を除く利用者の値を渡す（AllViewerExceptHostHeader）。
