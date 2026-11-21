@@ -58,7 +58,9 @@ Resources:
     Type: AWS::IAM::Role
     Metadata:
       com.aws.cloudformation.Context:
-        why: The relay only writes its own logs. It calls no AWS API (targets come from DNS)
+        why: >-
+          The relay only writes its own logs. It calls no AWS API (targets come from DNS).
+          The trust policy has no condition: with aws:SourceAccount, the revision was rejected (the role could not be assumed)
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -66,7 +68,6 @@ Resources:
           - Effect: Allow
             Principal: { Service: lambda.amazonaws.com }
             Action: sts:AssumeRole
-            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
       Policies:
         - PolicyName: logs
           PolicyDocument:
