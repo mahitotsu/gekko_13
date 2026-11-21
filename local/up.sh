@@ -46,6 +46,12 @@ EOF
 fi
 # 認可サーバーの、利用者の代わりの窓口（user-standin）の client_secret
 [ -f run/auth.env ] || printf 'STANDIN_SECRET=%s\n' "$(openssl rand -hex 16)" > run/auth.env
+# 共有の保存先（段 D の D1-a1）の、管理者とサービスごとのパスワード。AWS では Aurora、ここでは PostgreSQL のコンテナ
+if [ ! -f run/db.env ]; then
+  printf 'DB_ADMIN=%s\nDB_SPIRE=%s\nDB_KEYCLOAK=%s\nDB_AUTH=%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" > run/db.env
+fi
+# shellcheck disable=SC1091
+. run/db.env
 
 docker build -q -t "$IMAGE" -f ../Dockerfile "$(../scripts/stage-image.sh)" >/dev/null
 docker buildx build -q --load -t "$AUTH_IMAGE" ../services/auth >/dev/null
@@ -54,6 +60,13 @@ docker volume create gekko13-agent-sockets >/dev/null
 
 run() { docker run -d --restart unless-stopped --network "$NET" --label gekko13=1 "$@" >/dev/null; }
 srv() { docker exec gekko13-spire-server /opt/spire/bin/spire-server "$@"; }
+
+# 共有の保存先。データベースとロールは、AWS と同じ services/db-init/db-init.sql で作る
+run --name gekko13-postgres --network-alias postgres -e "POSTGRES_PASSWORD=$DB_ADMIN" postgres:17
+until docker exec gekko13-postgres pg_isready -q -h 127.0.0.1; do sleep 1; done
+sleep 2
+docker exec -i -e "PGPASSWORD=$DB_ADMIN" gekko13-postgres psql -q -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 \
+  -v "spire_password=$DB_SPIRE" -v "keycloak_password=$DB_KEYCLOAK" -v "auth_password=$DB_AUTH" -f - < ../services/db-init/db-init.sql >/dev/null
 
 run --name gekko13-spire-server --network-alias spire-server \
   -v "$HERE/spire/server.conf:/etc/spire/server.conf:ro" \
@@ -113,6 +126,7 @@ for s in "${JAVA_SERVICES[@]}"; do
   run --name "gekko13-$s" --network-alias "$s" --memory 512m \
     --label "com.amazonaws.ecs.task-definition-family=gekko13-$s" --label "com.amazonaws.ecs.container-name=app" \
     --env-file "run/$s.env" -e SVID_DIR=/svid -e ISSUER=https://auth:8443 \
+    -e DB_URL=jdbc:postgresql://postgres:5432/auth -e DB_DRIVER=org.postgresql.Driver -e DB_USER=auth -e "DB_PASSWORD=$DB_AUTH" \
     -v "$HERE/run/svid/$s:/svid:ro" \
     -p "127.0.0.1:${PORT[$s]}:${INNER[$s]}" "$AUTH_IMAGE"
 done

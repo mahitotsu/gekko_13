@@ -3,10 +3,17 @@ package jp.gekko13.auth;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.RSAPublicKeySpec;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +26,7 @@ import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -26,7 +34,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
-import org.springframework.security.oauth2.server.authorization.InMemoryOAuth2AuthorizationService;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
 import org.springframework.security.oauth2.server.authorization.authentication.OAuth2TokenExchangeAuthenticationProvider;
@@ -127,13 +136,19 @@ public class AuthConfig {
 			.build();
 	}
 
+	/**
+	 * 認可の記録（交換の元のトークン、交換の記録）は、データベースに置く。複数のタスクのどれに替えを頼んでも、同じ記録を引く（段 D の D1-a1）。
+	 * サービスの登録は、設定から毎回同じものを作るので、メモリに置いたままにする。
+	 */
 	@Bean
-	OAuth2AuthorizationService authorizationService() {
-		return new InMemoryOAuth2AuthorizationService();
+	OAuth2AuthorizationService authorizationService(JdbcTemplate jdbc, RegisteredClientRepository clients) {
+		return new JdbcOAuth2AuthorizationService(jdbc, clients);
 	}
 
 	/**
 	 * トークンの形を整える。cnf と act は、標準の部品が先に書く。
+	 * 認可の記録はデータベースに JSON で置き、読み戻すときに Jackson の許可の一覧で型を確かめる。List.of や Map.of の型は一覧にないので、
+	 * ArrayList と LinkedHashMap で入れる（List.of のままでは、記録を読み戻せずに交換が失敗した。docs/findings.md）。
 	 * 利用者の代わりのトークンは、宛先を bff にし、may_act で bff に替えを許す。交換では、求めた宛先を aud にする。
 	 */
 	@Bean
@@ -146,13 +161,16 @@ public class AuthConfig {
 			String client = context.getRegisteredClient().getClientId();
 			if (STANDIN.equals(client)
 					&& AuthorizationGrantType.CLIENT_CREDENTIALS.equals(context.getAuthorizationGrantType())) {
-				context.getClaims().audience(List.of(BFF));
-				context.getClaims().claim("may_act", Map.of("iss", issuer(context), "sub", BFF));
+				context.getClaims().audience(new ArrayList<>(List.of(BFF)));
+				Map<String, Object> mayAct = new LinkedHashMap<>();
+				mayAct.put("iss", issuer(context));
+				mayAct.put("sub", BFF);
+				context.getClaims().claim("may_act", mayAct);
 			}
 			if (context.getAuthorizationGrant() instanceof OAuth2TokenExchangeAuthenticationToken exchange) {
 				Set<String> audiences = exchange.getAudiences();
 				if (audiences.size() == 1) {
-					context.getClaims().audience(List.copyOf(audiences));
+					context.getClaims().audience(new ArrayList<>(audiences));
 				}
 			}
 		};
@@ -171,16 +189,38 @@ public class AuthConfig {
 		}
 	}
 
-	/** トークンの発行の鍵。起動ごとにメモリ上に作る。 */
+	/**
+	 * トークンの発行の鍵。AUTH_SIGNING_KEY（RSA の秘密鍵、PKCS#8 の PEM）があれば、それを使う。複数のタスクが同じ鍵で出し、確かめる
+	 * （段 D の D1-a1。aws/deploy.sh が作って SSM に置き、ECS が渡す）。鍵の ID は公開鍵の拇印（RFC 7638）にし、どのタスクでも同じにする。
+	 * なければ（手元の確かめ）、起動ごとにメモリ上に作る。
+	 */
 	@Bean
-	JWKSource<SecurityContext> jwkSource() throws Exception {
-		KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-		generator.initialize(2048);
-		KeyPair pair = generator.generateKeyPair();
-		RSAKey key = new RSAKey.Builder((RSAPublicKey) pair.getPublic()).privateKey((RSAPrivateKey) pair.getPrivate())
-			.keyID(UUID.randomUUID().toString())
-			.build();
+	JWKSource<SecurityContext> jwkSource(@Value("${AUTH_SIGNING_KEY:}") String pem) throws Exception {
+		RSAKey key;
+		if (pem.isBlank()) {
+			KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+			generator.initialize(2048);
+			KeyPair pair = generator.generateKeyPair();
+			key = new RSAKey.Builder((RSAPublicKey) pair.getPublic()).privateKey((RSAPrivateKey) pair.getPrivate())
+				.keyID(UUID.randomUUID().toString())
+				.build();
+		}
+		else {
+			key = sharedKey(pem);
+		}
 		return new ImmutableJWKSet<>(new JWKSet(key));
+	}
+
+	/** PKCS#8 の PEM から、秘密鍵と、そこから導いた公開鍵の組を作る。 */
+	static RSAKey sharedKey(String pem) throws Exception {
+		String body = pem.replaceAll("-----(BEGIN|END) PRIVATE KEY-----", "").replaceAll("\\s", "");
+		KeyFactory factory = KeyFactory.getInstance("RSA");
+		RSAPrivateCrtKey priv = (RSAPrivateCrtKey) factory
+			.generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(body)));
+		RSAPublicKey pub = (RSAPublicKey) factory
+			.generatePublic(new RSAPublicKeySpec(priv.getModulus(), priv.getPublicExponent()));
+		RSAKey key = new RSAKey.Builder(pub).privateKey(priv).build();
+		return new RSAKey.Builder(key).keyID(key.computeThumbprint().toString()).build();
 	}
 
 	@Bean

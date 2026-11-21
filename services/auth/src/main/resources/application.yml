@@ -5,7 +5,20 @@ server:
   ssl:
     bundle: svid
     client-auth: want
+# 認可の記録は、データベースに置く（段 D の D1-a1）。AWS では、AWS の JDBC ラッパーで IAM のデータベース認証にし、パスワードを置かない。
+# 表は起動のときに、なければ作る（schema.sql。2 つのタスクが同時に作らないよう、アドバイザリーロックを取る）
 spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER:auth}
+    password: ${DB_PASSWORD:}
+    driver-class-name: ${DB_DRIVER:software.amazon.jdbc.Driver}
+    hikari:
+      maximum-pool-size: 5
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
   ssl:
     bundle:
       watch:

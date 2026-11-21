@@ -11,5 +11,6 @@ RUN --mount=type=cache,target=/root/.m2 mvn -q -B package
 FROM eclipse-temurin:21-jre
 COPY --from=build /src/target/auth.jar /app/auth.jar
 USER 1000
-# spiffe-helper が SVID を書くまで待ってから起動する。SSL バンドルは、起動のときにファイルがないと失敗するため
-ENTRYPOINT ["sh", "-c", "until [ -s \"$SVID_DIR/svid.pem\" ] && [ -s \"$SVID_DIR/svid_bundle.pem\" ]; do sleep 1; done; exec java -XX:MaxRAMPercentage=75 -jar /app/auth.jar"]
+# spiffe-helper が SVID を書くまで待ってから起動する。SSL バンドルは、起動のときにファイルがないと失敗するため。
+# Aurora の証明書を確かめる CA（DB_CA_PEM。ECS が SSM から渡す）があれば、ファイルに書く。JDBC の宛先（DB_URL）が /tmp/db-ca.pem を指す
+ENTRYPOINT ["sh", "-c", "if [ -n \"${DB_CA_PEM:-}\" ]; then printf '%s\\n' \"$DB_CA_PEM\" > /tmp/db-ca.pem; fi; until [ -s \"$SVID_DIR/svid.pem\" ] && [ -s \"$SVID_DIR/svid_bundle.pem\" ]; do sleep 1; done; exec java -XX:MaxRAMPercentage=75 -jar /app/auth.jar"]

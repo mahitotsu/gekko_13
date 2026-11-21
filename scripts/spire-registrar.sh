@@ -16,15 +16,21 @@ srv() { spire-server "$@" -socketPath "$SOCK"; }
 until srv healthcheck >/dev/null 2>&1; do sleep 2; done
 echo "registrar: server is healthy"
 
-# 同じ SPIFFE ID の登録があれば作らない
+# 同じ SPIFFE ID の登録があれば作らない。server は 2 タスクで、registrar も 2 つ同時に動く（段 D の D1-a1）。
+# 両方が「ない」と見てから作りに行くと、後の方は同じ登録で拒まれる。そのときは確かめ直し、あれば作れたとみなす
+exists() { srv entry show -spiffeID "$1" | grep -q "Entry ID"; }
 ensure() {
   id=$1
   shift
-  if srv entry show -spiffeID "$id" | grep -q "Entry ID"; then
+  if exists "$id"; then
     echo "registrar: exists $id"
-  else
-    srv entry create -spiffeID "$id" "$@" >/dev/null
+  elif srv entry create -spiffeID "$id" "$@" >/dev/null 2>&1; then
     echo "registrar: created $id"
+  elif exists "$id"; then
+    echo "registrar: created by the other server $id"
+  else
+    echo "registrar: failed to create $id" >&2
+    return 1
   fi
 }
 
