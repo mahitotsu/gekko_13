@@ -62,7 +62,7 @@ aws/scale.sh up      # 自動の増減を 2〜4 に戻し、spire-server、auth�
 aws/scale.sh down    # 自動の増減を 0 にし、DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ
 ```
 
-期待する結果: `up` は数分で `安定した（台 2 台）` と出る。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の登録と、Keycloak と auth のデータは Aurora に残り、ルート CA も変わらないので、`up` のあとも作り直しは要らない。Aurora が止まっていれば、SPIRE server のタスクの db-init が、再起動するまで待つ（約 15 秒）。`up` で戻すタスク数は、`GEKKO13_EDGE_TASKS` で変えられる。
+期待する結果: `up` は数分で `安定した（台 2 台）` と出る。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の登録と、Keycloak と auth のデータは Aurora に残り、ルート CA も変わらないので、`up` のあとも作り直しは要らない。Aurora が止まっていれば、SPIRE server のタスクの db-init が、再開するまで待つ（約 15 秒）。`up` で戻すタスク数は、`GEKKO13_EDGE_TASKS` で変えられる。
 
 ## 入口（CloudFront とリバースプロキシ）
 入口は、CloudFront のディストリビューション（スタック `gekko13-edge`）から、入口のリバースプロキシ（スタック `gekko13-entry`、Lambda の Web Functions）を通る。CloudFront は OAC でリクエストに署名し、リバースプロキシは IAM の認証で、このディストリビューションからのリクエストだけを受ける。リバースプロキシは、パスで送り先を決める。`/login` と `/login/*` は keycloak へ、それ以外は edge-check へ送る。送り先は、名前空間 `svc.gekko13.internal` の SRV で見つける。ECS が正常なタスクを SRV に登録するので、インスタンスが入れ替わっても手で向け直すことはない。

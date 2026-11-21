@@ -2,13 +2,13 @@
 # AWS の段: シナリオを、プローブの 3 つの役（probe-bff、probe-transfer、probe-ledger。普段はタスク数 0）として回す。
 # 各役は、本物のファミリーのタスクとして自分の SVID を得て、Service Connect の中から攻撃する（「乗っ取られたタスク」）。
 # 試験の間だけタスク数を 1 にし、終わったら必ず 0 に戻す。結果は scripts/aws-collect.ts がまとめ、local/run/ に置く。
-# どの台にプローブが置かれてもよい（台の数と配置に依らない）。
+# どのインスタンスにプローブが置かれてもよい（インスタンスの数と配置に依らない）。
 # 前提: aws/deploy.sh で作り、aws/scale.sh up で動かし、aws/create-user.sh と node scripts/aws-login.ts を済ませた
 #       （リフレッシュトークンは 60 分で切れる）。
 # 使い方:
 #   aws/run-scenarios.sh                シナリオ（1-a、1-b、3-a〜3-g）。タスクの置き場所も記録する（段 B の B-1）
 #   aws/run-scenarios.sh soak 30        入れ替えの試験を 30 分（probe-bff だけが連鎖を呼び続ける）
-#   aws/run-scenarios.sh failover 30    soak と同じ試験の途中で、SPIRE server を別の AZ（なければ別の台）に移す（段 B の B-4）。
+#   aws/run-scenarios.sh failover 30    soak と同じ試験の途中で、SPIRE server を別の AZ（なければ別のインスタンス）に移す（段 B の B-4）。
 #                                       移す時刻は、始めてから FAILOVER_AFTER 分（既定 10）
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -58,7 +58,7 @@ logs_with_time() {
 }
 host_of() { ecs describe-container-instances --cluster "$CLUSTER" --container-instances "$1" --query 'containerInstances[0].ec2InstanceId' --output text; }
 
-# B-1: bff、transfer、ledger のタスクの置き場所。1 行に「サービス タスク AZ 台」
+# B-1: bff、transfer、ledger のタスクの置き場所。1 行に「サービス タスク AZ インスタンス」
 placement() {
   for s in bff transfer ledger; do
     local tasks
@@ -70,10 +70,10 @@ placement() {
   done
 }
 
-# B-4: SPIRE server を、今の AZ 以外（別の AZ に台がなければ、今の台以外）に移す。サービスに制約を付けて、新しいデプロイを強制する。
-# 最小 0 %、最大 100 % なので、古いタスクを止めてから新しいタスクを起こす。結果は「キー=値」の行で出す。
+# B-4: SPIRE server を、今の AZ 以外（別の AZ にインスタンスがなければ、今のインスタンス以外）に移す。サービスに制約を付けて、新しいデプロイを強制する。
+# 最小 0 %、最大 100 % なので、古いタスクを止めてから新しいタスクを起動する。結果は「キー=値」の行で出す。
 # 新しいタスクが動いたら、すぐに制約を外す。制約は次にタスクを置くときだけに効き、動いているタスクは動かさない。
-# 外さないと、制約に合う台がなくなったとき（段 A の 1 つの AZ に戻したときなど）に、server を置けなくなる。
+# 外さないと、制約に合うインスタンスがなくなったとき（段 A の 1 つの AZ に戻したときなど）に、server を置けなくなる。
 # CloudFormation は、テンプレートに書いていない制約を戻さない（docs/findings.md）
 failover() {
   local old az ci host others expr kind new
@@ -121,7 +121,7 @@ fi
 START_MS=$(($(date +%s) * 1000))
 # タスク数は 0 から 1 にするだけで、新しいデプロイを強制しない（強制すると、最初に起きたタスクが入れ替えられる。docs/findings.md）
 for r in $ROLES; do ecs update-service --cluster "$CLUSTER" --service "probe-$r" --desired-count 1 >/dev/null; done
-# サービスが安定してから、動いているタスクを取る。台が起きるのを待つことがあるので、services-stable を 3 回（30 分）まで繰り返す
+# サービスが安定してから、動いているタスクを取る。インスタンスが起きるのを待つことがあるので、services-stable を 3 回（30 分）まで繰り返す
 PROBES=$(for r in $ROLES; do printf 'probe-%s ' "$r"; done)
 for i in 1 2 3; do
   # shellcheck disable=SC2086

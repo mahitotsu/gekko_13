@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # AWS の段の資源を、決まった順番で作る。実行すると費用が出る（EC2 は動いている間、1 時間ごと）。
 # 使い方: aws/deploy.sh
-#   GEKKO13_AZS=2 を付けると、台を 2 つの AZ に置く。既定は 1。入口の中継の ENI は、いつも 2 つの AZ のサブネットに置く。
-#   GEKKO13_MAX_HOSTS で台の上限を（既定 4。タスクの数の自動の増減で増える分）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
-#   GEKKO13_INSTANCE_TYPES で台の種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
-#   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。台は全部スポットで起こす。
-# 順番: registry → イメージと中継の zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（アプリ）→ entry（入口の中継）→ edge（CloudFront の配信）。
+#   GEKKO13_AZS=2 を付けると、インスタンスを 2 つの AZ に置く。既定は 1。入口のリバースプロキシの ENI は、いつも 2 つの AZ のサブネットに置く。
+#   GEKKO13_MAX_HOSTS でインスタンスの上限を（既定 4。タスクのオートスケーリングで増える分）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
+#   GEKKO13_INSTANCE_TYPES でインスタンスの種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
+#   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
+# 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（アプリ）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
 # 段 D の D0 から、Cognito と第 1 部のアプリ（bff、transfer、ledger）は作らない。Cognito のスタックは、第 2 部の完成のときに消す。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -73,7 +73,7 @@ DB_INIT_REPO=$(out "$PREFIX-registry" DbInitRepositoryUri)
 docker buildx imagetools inspect "$DB_INIT_REPO:$DB_INIT_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --label "$LABEL" -t "$DB_INIT_REPO:$DB_INIT_TAG" --push services/db-init
 
-# 入口の中継（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
+# 入口のリバースプロキシ（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
 ENTRY_BUCKET=$(out "$PREFIX-registry" EntryCodeBucketName)
 ENTRY_ZIP=$(scripts/stage-entry.sh)
 ENTRY_KEY="entry/$(sha256sum "$ENTRY_ZIP" | cut -c1-64).zip"
@@ -106,8 +106,8 @@ put_secret "/$PREFIX/db/master-password" hex24
 for r in spire keycloak auth; do put_secret "/$PREFIX/db/$r-password" hex24; done
 # auth のトークンの発行の鍵（RSA、PKCS#8 の PEM）。複数のタスクが同じ鍵で出し、確かめる
 put_secret "/$PREFIX/auth/signing-key" openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
-# SPIRE の根の CA（ECDSA P-256、5 年）。全部の server が、この下で中間の CA を作る。鍵と証明書は、一緒に一度だけ作る。
-# 片方だけあるときは止める（作り直すと、信頼の根が替わり、全部の台の agent が server を信じなくなる）
+# SPIRE のルート CA（ECDSA P-256、5 年）。全部の server が、この下で中間 CA を作る。鍵と証明書は、一緒に一度だけ作る。
+# 片方だけあるときは止める（作り直すと、トラストアンカーが替わり、全部のインスタンスの agent が server を信じなくなる）
 ROOT_KEY="/$PREFIX/spire/root-key"
 ROOT_CERT="/$PREFIX/spire/root-cert"
 if ! has_param "$ROOT_KEY" && ! has_param "$ROOT_CERT"; then
@@ -133,7 +133,7 @@ cfn --stack-name "$PREFIX-db" --template-file aws/db.yaml --parameter-overrides 
   "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)"
 DB_HOST=$(out "$PREFIX-db" DbHost)
 
-# パスキーの RP ID は、入口の配信の名前。配信がまだなければ空にする（配信を作ったあとで、もう一度実行する）
+# パスキーの RP ID は、入口のディストリビューションのドメイン名。ディストリビューションがまだなければ空にする（ディストリビューションを作ったあとで、もう一度実行する）
 rp_id() {
   aws cloudformation describe-stacks --region "$REGION" --stack-name "$PREFIX-edge" \
     --query "Stacks[0].Outputs[?OutputKey=='DomainName'].OutputValue" --output text 2>/dev/null || true
@@ -147,8 +147,8 @@ fi
 
 # scale.sh down のあとは、spire-server のタスク数が 0 のまま残る。テンプレートの値（1）は変わらないので、
 # スタックの更新では戻らず、server のいないサービスが安定しないまま更新が待ち続ける。更新の前に 1 に戻す。
-# 置き方の制約（B-4 の試験が付ける）が残っていれば、外す。CloudFormation は、テンプレートに書いていない制約を戻さないので、
-# 残っていると、制約に合う台がないときに server を置けず、更新が待ち続ける（docs/findings.md）
+# 配置制約（B-4 の試験が付ける）が残っていれば、外す。CloudFormation は、テンプレートに書いていない制約を戻さないので、
+# 残っていると、制約に合うインスタンスがないときに server を置けず、更新が待ち続ける（docs/findings.md）
 if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services spire-server \
   --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q spire-server; then
   aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 2 \
@@ -206,7 +206,7 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "DbHost=$DB_HOST" \
   "RpId=$(rp_id)"
 
-# 入口の中継。ENI は 2 つの AZ のサブネットに置く（NetworkConnector は、違う AZ の 2 つのサブネットを求める）
+# 入口のリバースプロキシ。ENI は 2 つの AZ のサブネットに置く（NetworkConnector は、違う AZ の 2 つのサブネットを求める）
 cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities CAPABILITY_IAM --parameter-overrides \
   "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
   "EntrySecurityGroupId=$(out "$PREFIX-network" EntrySecurityGroupId)" \
@@ -215,8 +215,8 @@ cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities C
   "CodeVersion=$ENTRY_VERSION" \
   "NamespaceName=$(out "$PREFIX-ecs" NamespaceName)"
 
-# 入口の配信。送り先は、入口の中継のエンドポイント 1 つ。台が入れ替わっても、向け直しは要らない。
-# 配信を初めて作ったときは、RP ID がまだ空なので、もう一度この手順を回す（keycloak のタスク数が 0 のままになる）
+# 入口のディストリビューション。送り先は、入口のリバースプロキシのエンドポイント 1 つ。インスタンスが入れ替わっても、向け直しは要らない。
+# ディストリビューションを初めて作ったときは、RP ID がまだ空なので、もう一度この手順を回す（keycloak のタスク数が 0 のままになる）
 cfn --stack-name "$PREFIX-edge" --template-file aws/edge.yaml --parameter-overrides \
   "EntryFunctionArn=$(out "$PREFIX-entry" FunctionArn)" \
   "EntryEndpointArn=$(out "$PREFIX-entry" EndpointArn)" \

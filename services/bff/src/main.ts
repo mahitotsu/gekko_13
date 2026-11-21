@@ -1,5 +1,5 @@
 // 入口のサービス。利用者のトークンを受け、BFF として交換して transfer を mTLS で呼ぶ。
-// 入口（利用者からの受け口）は、後で CloudFront の後ろに置く。この検証では平文の HTTP にする（計画の「後回し」）。
+// 入口（利用者からのエンドポイント）は、後で CloudFront の後ろに置く。この検証では平文の HTTP にする（計画の「後回し」）。
 import { createServer } from "node:http";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { actorTokenSource, exchange } from "../../../packages/token-check/src/index.ts";

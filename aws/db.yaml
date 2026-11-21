@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の共有の保存先（段 D の D1-a1）。Aurora Serverless v2（PostgreSQL 17.5）を 1 つ置き、Keycloak、SPIRE server、auth が共有する。
-# 最小 0 ACU で、つながりがなくなって 5 分で止まり、計算の費用は 0 になる。つなぎに行くと起き直す（約 15 秒。AWS の資料）。
+# 最小 0 ACU で、つながりがなくなって 5 分で止まり、計算の費用は 0 になる。つなぎに行くと再起動する（約 15 秒。AWS の資料）。
 # 書き込みのインスタンスは 1 つだけ（読み取りのインスタンスは置かない。動かしている間の費用が倍になるため）。保存は AZ をまたいで残る。
 # サービスは、ID とパスワードでつなぎ、TLS で Aurora の証明書を確かめる（verify-full）。TLS でない接続は、パラメーターで拒む。
 # Aurora はクライアントの証明書での認証に対応しないので、SVID の mTLS にはしない（docs/design-decisions.md）。
 # 管理者のパスワードは、aws/deploy.sh が SSM の SecureString に置き、ここで読む（Secrets Manager は固定費がかかるので使わない）。
-# 台（ECS のホストと SPIRE server の ENI）のグループから 5432 だけを受ける。
+# インスタンス（ECS のホストと SPIRE server の ENI）のグループから 5432 だけを受ける。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 shared datastore (stage D1-a1): one Aurora Serverless v2 cluster (PostgreSQL 17.5) shared by Keycloak, the SPIRE server and auth.
@@ -60,7 +60,7 @@ Resources:
         - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: no outbound }
       Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
 
-  # 台のグループは、出口を絞っている（network のスタック）。Aurora への 5432 だけを、ここで足す
+  # インスタンスのグループは、出口を絞っている（network のスタック）。Aurora への 5432 だけを、ここで足す
   HostEgressToDb:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:

@@ -6,7 +6,7 @@ OUT=local/run/image
 rm -rf "$OUT" && mkdir -p "$OUT"
 cp package.json package-lock.json "$OUT/"
 cp -r packages services "$OUT/"
-# 認可サーバー（Java）、ログインサーバー（Keycloak）、db-init は、それぞれ別のイメージにする。入口の中継は zip で置く（scripts/stage-entry.sh）。
+# 認可サーバー（Java）、ログインサーバー（Keycloak）、db-init は、それぞれ別のイメージにする。入口のリバースプロキシは zip で置く（scripts/stage-entry.sh）。
 # ここで除くものは、aws/deploy.sh のタグの材料からも除く（材料と中身をそろえる）
 rm -rf "$OUT/services/auth" "$OUT/services/keycloak" "$OUT/services/entry" "$OUT/services/db-init"
 find "$OUT" -type d -name test -prune -exec rm -rf {} +

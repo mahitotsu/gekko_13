@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証で使うコンテナのイメージ置き場（ECR）。アプリのイメージ、認可サーバーとログインサーバーのイメージ、SPIRE と spiffe-helper の写しを置く。
-# 入口の中継（Web Functions。段 D の D0-b）の zip の置き場（S3）もここに置く。Web Functions は、バージョニングを有効にした S3 からしかコードを読まない。
+# 入口のリバースプロキシ（Web Functions。段 D の D0-b）の zip の置き場（S3）もここに置く。Web Functions は、バージョニングを有効にした S3 からしかコードを読まない。
 # ghcr.io は IPv6 で届かない恐れがあるので、インスタンスはここからだけ取る。ほかのスタックより先に作る。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
@@ -19,7 +19,7 @@ Parameters:
     AllowedPattern: "[a-z0-9-]+"
 
 Resources:
-  # 入口の中継の zip。キーは中身の SHA-256 にする（aws/deploy.sh）。古い版は 7 日で消す
+  # 入口のリバースプロキシの zip。キーは中身の SHA-256 にする（aws/deploy.sh）。古い版は 7 日で消す
   EntryCodeBucket:
     Type: AWS::S3::Bucket
     Metadata:

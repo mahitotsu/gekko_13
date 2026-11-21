@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 使わない間の固定費を止める。台を 0 にするだけでは、入口の ALB、Cloud Map のホストゾーン、アラーム、ECR のイメージの費用が残る。
-# 順に、台を 0 にする → 配信を止めて ALB から切り離す（Parked=true）→ gekko13-apps → gekko13-ecs → gekko13-registry を消す。
-# 残すもの: CloudFront の配信（止めたまま。名前と RP ID は変わらない）、gekko13-network（VPC と EFS。SPIRE の CA と登録が残る）、
+# 使わない間の固定費を止める。インスタンスを 0 にするだけでは、入口の ALB、Cloud Map のホストゾーン、アラーム、ECR のイメージの費用が残る。
+# 順に、インスタンスを 0 にする → ディストリビューションを止めて ALB から切り離す（Parked=true）→ gekko13-apps → gekko13-ecs → gekko13-registry を消す。
+# 残すもの: CloudFront のディストリビューション（止めたまま。名前と RP ID は変わらない）、gekko13-network（VPC と EFS。SPIRE の CA と登録が残る）、
 #   Cognito（第 1 部）、SSM の引数。どれも固定費がないか、月 0.001 ドル未満。
 # 戻すときは aws/deploy.sh を回す（イメージの作り直しと、VPC origin の作り直しで 30 分ほど。推定）。
 # 消す操作は戻せない。回す前に、持ち主の承認を得る（CLAUDE.md）。
@@ -21,7 +21,7 @@ delete() {
 
 if exists "$PREFIX-ecs"; then aws/scale.sh down; fi
 
-# 配信が使っている VPC origin は消せず、VPC origin が指す ALB も消せない。先に配信を止めて、VPC origin を外す
+# ディストリビューションが使っている VPC origin は消せず、VPC origin が指す ALB も消せない。先にディストリビューションを止めて、VPC origin を外す
 echo "配信を止めて、ALB から切り離す（数分〜10 分ほど）"
 aws cloudformation deploy --region "$REGION" --stack-name "$PREFIX-edge" --template-file aws/edge.yaml \
   --no-fail-on-empty-changeset --parameter-overrides "Parked=true" "AlbArn=" "AlbDnsName="

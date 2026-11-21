@@ -1,4 +1,4 @@
-// 入口の中継（段 D の D0-b）を起こす。Web Functions は、環境変数 AWS_LAMBDA_HTTP_ENDPOINT（host:port）で待ち受けさせる。
+// 入口のリバースプロキシ（段 D の D0-b）を起動する。Web Functions は、環境変数 AWS_LAMBDA_HTTP_ENDPOINT（host:port）で待ち受けさせる。
 // - ROUTES: 振り分け。例 "/login=keycloak,/=edge-check"
 // - NAMESPACE: 送り先の SRV を引く名前空間。例 "svc.gekko13.internal"
 // - STATIC_TARGETS: ローカルの確かめ用。あれば SRV を引かずに、この送り先へ送る。例 "keycloak=127.0.0.1:8180,edge-check=127.0.0.1:8080"

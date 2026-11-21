@@ -34,7 +34,7 @@ ensure() {
   fi
 }
 
-# ノード: タグ gekko13-role=ecs-host を持つインスタンスの agent。台がいくつでも、この 1 つで足りる
+# ノード: タグ gekko13-role=ecs-host を持つインスタンスの agent。インスタンスがいくつでも、この 1 つで足りる
 ensure "$NODE" -node -selector aws_iid:tag:gekko13-role:ecs-host
 # auth は認可サーバー（段 C の C-3）
 for s in bff transfer ledger auth; do
@@ -43,7 +43,7 @@ for s in bff transfer ledger auth; do
     -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper"
 done
 
-# CA は入れ替わるので、バンドルを 60 秒ごとに書き直す。新しい台の agent が、いつ起きても今のバンドルを読めるように
+# CA は入れ替わるので、バンドルを 60 秒ごとに書き直す。新しいインスタンスの agent が、いつ起きても今のバンドルを読めるように
 while :; do
   if srv bundle show > "$OUT/bundle.crt.tmp" && ! cmp -s "$OUT/bundle.crt.tmp" "$OUT/bundle.crt" 2>/dev/null; then
     mv "$OUT/bundle.crt.tmp" "$OUT/bundle.crt"

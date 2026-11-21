@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 段 D の D0 と D0-b: 台が 0 の状態から、入口（D0-b からは CloudFront → 入口の中継）を通して使えるまでの時間を測る。
+# 段 D の D0 と D0-b: インスタンスが 0 の状態から、入口（D0-b からは CloudFront → 入口のリバースプロキシ）を通して使えるまでの時間を測る。
 # 始点: タスク数を戻した時刻。終点: 次の 3 つがそろった時刻（docs/log.md の 2026-11-21 の定義）。
-#   - CloudFront を通して、Keycloak のレルムの discovery が、配信の名前を issuer にして返る
+#   - CloudFront を通して、Keycloak のレルムの discovery が、ディストリビューションのドメイン名を issuer にして返る
 #   - auth のログに「Started AuthApplication」が出る
 #   - CloudFront を通した /edge-point の応答に、2 つの違う AZ が現れる
-# 内訳として、台が ASG に加わった時刻、各サービスが RUNNING になった時刻、Cloud Map のインスタンスが健康になった時刻も取る。
+# 内訳として、インスタンスが ASG に加わった時刻、各サービスが RUNNING になった時刻、Cloud Map のインスタンスが HEALTHY になった時刻も取る。
 # 結果は local/run/d0/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/d0-measure.sh
-# 実行すると費用が出る。終わっても台は動いたまま。使い終わったら aws/scale.sh down で 0 にする。
+# 実行すると費用が出る。終わってもインスタンスは動いたまま。使い終わったら aws/scale.sh down で 0 にする。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -58,7 +58,7 @@ while :; do
       --query 'length(Status.* | [?@==`HEALTHY`])' --output text 2>/dev/null || echo 0)
     [ "$h" -ge 1 ] && mark "$k が Cloud Map で健康になった"
   done
-  # 入口を通した応答。edge-check は呼ぶたびに中継が送り先を選ぶので、何度か呼んで AZ を集める
+  # 入口を通した応答。edge-check は呼ぶたびにリバースプロキシが送り先を選ぶので、何度か呼んで AZ を集める
   if [ -z "${AT[CloudFront を通して Keycloak が応えた]:-}" ] &&
     curl -s --max-time 10 "https://$DOMAIN/login/realms/gekko13/.well-known/openid-configuration" |
     grep -q "\"issuer\":\"https://$DOMAIN/login/realms/gekko13\""; then

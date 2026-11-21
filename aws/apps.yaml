@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 のアプリのスタック（段 D の D0 で、基盤の aws/ecs.yaml から分けた）。基盤のクラスターと名前空間の上に、アプリのサービスを載せる。
-# 入口（段 D の D0-b）: CloudFront → 入口の中継（aws/entry.yaml の Web Functions）→ タスク。中継は、名前空間の SRV で送り先を見つける。
-# ECS が、健康なタスクを、台の IP と動的なポートの組で SRV に登録する。健康は、コンテナの健康の確かめで決める（D0 の ALB と同じ URL）。
-# 振り分けは中継がパスでする。/login は Keycloak、それ以外は edge-check（D1-a で顧客のアプリに替える）。
-# 台の数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、台は中継のグループからだけ動的なポートを受ける（network のスタック）。
+# 入口（段 D の D0-b）: CloudFront → 入口のリバースプロキシ（aws/entry.yaml の Web Functions）→ タスク。リバースプロキシは、名前空間の SRV で送り先を見つける。
+# ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で SRV に登録する。正常は、コンテナのヘルスチェックで決める（D0 の ALB と同じ URL）。
+# 振り分けはリバースプロキシがパスでする。/login は Keycloak、それ以外は edge-check（D1-a で顧客のアプリに替える）。
+# インスタンスの数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、インスタンスはリバースプロキシのグループからだけ動的なポートを受ける（network のスタック）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 apps on the base runtime (gekko13-ecs): the login server (keycloak), the authorization server (auth) and the edge check.
@@ -81,8 +81,8 @@ Conditions:
   HasRpId: !Not [!Equals [!Ref RpId, ""]]
 
 Resources:
-  # 入口の中継が引く SRV。ECS が、健康なタスクを、台の IP と動的なポートの組で登録する（bridge なので SRV だけ）。
-  # TTL は 10 秒。止まったタスクには、この間だけ送ることがあり、中継がつながらなければ別のタスクへ送り直す。
+  # 入口のリバースプロキシが引く SRV。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する（bridge なので SRV だけ）。
+  # TTL は 10 秒。止まったタスクには、この間だけ送ることがあり、リバースプロキシがつながらなければ別のタスクへリトライする。
   KeycloakDiscovery:
     Type: AWS::ServiceDiscovery::Service
     Metadata:
@@ -109,7 +109,7 @@ Resources:
       HealthCheckCustomConfig: { FailureThreshold: 1 }
 
   # 段 C の C-3: 認可サーバー（Spring Authorization Server）。SVID で mTLS を自分で終える（C-4。docs/findings.md の 4-4）。
-  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。入口の中継には出さない。イメージは SVID が書かれるまで待ってから起動する。
+  # Service Connect は TCP の中継だけに使い、auth:8443 で受ける。入口のリバースプロキシには出さない。イメージは SVID が書かれるまで待ってから起動する。
   AuthTask:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -138,7 +138,7 @@ Resources:
           Image: !Ref AuthImage
           Essential: true
           # JVM はこの上限の 75% をヒープにする（services/auth/Dockerfile の MaxRAMPercentage）。
-          # Cpu は取り分の目安で、上限ではない。タスクの数の自動の増減が、この予約に対する使用率を見る
+          # Cpu は取り分の目安で、上限ではない。タスクのオートスケーリングが、この予約に対する使用率を見る
           Memory: 512
           Cpu: 512
           # svid-helper は root で動き、鍵を root のグループで 0640 にして書く（基盤の UserData の helper.conf）。
@@ -173,7 +173,7 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: auth, mode: non-blocking }
 
-  # ログインサーバー（Keycloak）。入口の中継が、/login と /login/* を送る。保存先は共有の Aurora で、2 タスクで動かす（段 D の D1-a1）。
+  # ログインサーバー（Keycloak）。入口のリバースプロキシが、/login と /login/* を送る。保存先は共有の Aurora で、2 タスクで動かす（段 D の D1-a1）。
   # タスクどうしは JGroups（7800）でキャッシュを共有するので、タスクの IP で直接つながる awsvpc にする。相手はデータベースで見つける（jdbc-ping）。
   # レルムは、なければ取り込む（すでにあれば飛ばす）。
   # 管理者の利用者は作らない（管理画面は CloudFront から誰でも届くため）。
@@ -226,7 +226,7 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: keycloak, mode: non-blocking }
 
-  # 確かめの受け口。応答に、タスクと AZ を返す。D0 では、2 つの AZ のどちらの台にも届くかを、これで確かめる。
+  # 確かめのエンドポイント。応答に、タスクと AZ を返す。D0 では、2 つの AZ のどちらのインスタンスにも届くかを、これで確かめる。
   EdgeCheckTask:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -262,7 +262,7 @@ Resources:
       TaskDefinition: !Ref AuthTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
       DesiredCount: 2
-      # 1 つずつ入れ替える。AZ に散らす。タスクの数は、自動の増減が 2〜4 で変える（AuthScaling）
+      # ローリングアップデートする。AZ に散らす。タスクの数は、オートスケーリングが 2〜4 で変える（AuthScaling）
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
       HealthCheckGracePeriodSeconds: 120
@@ -271,8 +271,8 @@ Resources:
         Namespace: !Ref NamespaceArn
         Services: [{ PortName: app, DiscoveryName: auth, ClientAliases: [{ Port: 8443, DnsName: auth }] }]
 
-  # 配信の名前（RpId）がまだないと、KC_HOSTNAME が作れないので、タスク数を 0 にしておく。
-  # 起動からレルムの取り込みまでに時間がかかるので、健康の確かめを 180 秒待つ
+  # ディストリビューションのドメイン名（RpId）がまだないと、KC_HOSTNAME が作れないので、タスク数を 0 にしておく。
+  # 起動からレルムの取り込みまでに時間がかかるので、ヘルスチェックを 180 秒待つ
   KeycloakService:
     Type: AWS::ECS::Service
     Properties:
@@ -290,7 +290,7 @@ Resources:
       HealthCheckGracePeriodSeconds: 180
       ServiceRegistries: [{ RegistryArn: !GetAtt KeycloakDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
 
-  # AZ に散らし、同じ台に 2 つ置かない。タスク数が 2 なら、台が 2 台になり、AZ が分かれる
+  # AZ に散らし、同じインスタンスに 2 つ置かない。タスク数が 2 なら、インスタンスが 2 台になり、AZ が分かれる
   EdgeCheckService:
     Type: AWS::ECS::Service
     Properties:
@@ -305,7 +305,7 @@ Resources:
       HealthCheckGracePeriodSeconds: 60
       ServiceRegistries: [{ RegistryArn: !GetAtt EdgeCheckDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
 
-  # タスクの数の自動の増減（段 D の D1-a1）。CPU の使用率（予約に対する割合）を 60 % に保つよう、2〜4 で変える。
+  # タスクのオートスケーリング（段 D の D1-a1）。CPU の使用率（予約に対する割合）を 60 % に保つよう、2〜4 で変える。
   # 1 つの方針で、CloudWatch のアラームが 2 つできる（1 つ月 0.1 ドル。持ち主が承認済み）。
   # aws/scale.sh down は、先に最小と最大を 0 にしてから、タスクを 0 にする（ここで 2 に戻されないように）
   KeycloakScalingTarget:

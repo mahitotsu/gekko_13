@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証の実行基盤（段 D の D0 から、基盤とアプリの 2 つのスタックに分けた。アプリは aws/apps.yaml）。
-# ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances 台）に、SPIRE の server と agent を載せる。入口（段 D の D0-b から Web Functions の中継）は aws/entry.yaml に置く。
-# 台の数と AZ を前提にしない。アプリどうしは Service Connect（TCP の中継だけ）で呼び、mTLS はアプリが終える。
-# agent は Cloud Map の DNS 名で server に届く。server は 2 タスクで、状態を共有の Aurora（aws/db.yaml）に置き、共有の根の CA の下で中間の CA を作る。
-# agent が最初に信じるバンドル（根の証明書）は EFS に置く（network のスタック）。
-# 使わない間は aws/scale.sh down で、タスク数を 0 にし、台も 0 にする。AWS の名前は、IPv6 で届くデュアルスタックのものを使う。
+# ECS の EC2 で、キャパシティプロバイダー（ASG、0〜MaxInstances インスタンス）に、SPIRE の server と agent を載せる。入口（段 D の D0-b から Web Functions のリバースプロキシ）は aws/entry.yaml に置く。
+# インスタンスの数と AZ を前提にしない。アプリどうしは Service Connect（TCP の中継だけ）で呼び、mTLS はアプリが終える。
+# agent は Cloud Map の DNS 名で server に届く。server は 2 タスクで、状態を共有の Aurora（aws/db.yaml）に置き、共有のルート CA の下で中間 CA を作る。
+# agent が最初に信じるバンドル（ルート証明書）は EFS に置く（network のスタック）。
+# 使わない間は aws/scale.sh down で、タスク数を 0 にし、インスタンスも 0 にする。AWS の名前は、IPv6 で届くデュアルスタックのものを使う。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 base runtime on ECS (EC2) with a capacity provider (ASG, 0 to MaxInstances hosts): SPIRE server and agent. The entry relay lives in aws/entry.yaml.
@@ -121,7 +121,7 @@ Resources:
       LogGroupName: !Sub "/${Prefix}/ecs"
       RetentionInDays: 7
 
-  # アプリどうしの Service Connect、SPIRE server の A レコード、入口の中継が引く SRV（段 D の D0-b）が使う名前空間。
+  # アプリどうしの Service Connect、SPIRE server の A レコード、入口のリバースプロキシが引く SRV（段 D の D0-b）が使う名前空間。
   # プライベートのホストゾーンができるので、月に 0.5 ドルの固定費がかかる（持ち主が承認済み）。
   Namespace:
     Type: AWS::ServiceDiscovery::PrivateDnsNamespace
@@ -295,8 +295,8 @@ Resources:
                   connection_string = "dbname=spire user=spire password=${!SPIRE_DB_PASSWORD} host=${!DB_HOST} port=5432 sslmode=verify-full sslrootcert=/dbca/ca.pem"
                 }
               }
-              # 全部の server が、同じ根の CA の下で中間の CA を作る。バンドルは根の証明書だけになり、server が起き直しても変わらない。
-              # 根の証明書と鍵は、aws/deploy.sh が作って SSM に置き、タスクの db-init のコンテナが書く
+              # 全部の server が、同じルート CA の下で中間 CA を作る。バンドルはルート証明書だけになり、server が再起動しても変わらない。
+              # ルート証明書と鍵は、aws/deploy.sh が作って SSM に置き、タスクの db-init のコンテナが書く
               UpstreamAuthority "disk" {
                 plugin_data {
                   cert_file_path = "/spire-ca/root.crt"
@@ -308,7 +308,7 @@ Resources:
                   disable_instance_profile_selectors = true
                 }
               }
-              # 中間の CA の鍵は、タスクのメモリに置く。2 つの server で、鍵のファイルを奪い合わない。起き直すと、根の下で作り直す
+              # 中間 CA の鍵は、タスクのメモリに置く。2 つの server で、鍵のファイルを奪い合わない。再起動すると、ルート CA の下で作り直す
               KeyManager "memory" {
                 plugin_data {}
               }
@@ -354,10 +354,10 @@ Resources:
             key_file_mode         = 0640
             EOF
 
-  # 台の数は、キャパシティプロバイダーのマネージドスケーリングが決める（タスクが 0 なら 0 台）。
-  # 台は、全部スポットで起こす（オンデマンドは 0 台）。種類は 4 つ並べ、空きが多く安いものから選ぶ（price-capacity-optimized）。
-  # 中断の予告を受けると、ECS のエージェントが台からタスクを逃がす（UserData の ECS_ENABLE_SPOT_INSTANCE_DRAINING）。
-  # CapacityRebalance で、中断の危険が高まった台を、前もって入れ替える。
+  # インスタンスの数は、キャパシティプロバイダーのマネージドスケーリングが決める（タスクが 0 なら 0 台）。
+  # インスタンスは、全部スポットで起動する（オンデマンドは 0 台）。種類は 4 つ並べ、空きが多く安いものから選ぶ（price-capacity-optimized）。
+  # 中断の予告を受けると、ECS のエージェントがインスタンスからタスクを逃がす（UserData の ECS_ENABLE_SPOT_INSTANCE_DRAINING）。
+  # CapacityRebalance で、中断の危険が高まったインスタンスを、前もって入れ替える。
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Metadata:
@@ -391,7 +391,7 @@ Resources:
       Tags:
         - { Key: AmazonECSManaged, Value: "true", PropagateAtLaunch: true }
 
-  # マネージドの終了保護は切る。スタックを消すときに、保護された台が残って止まるのを避けるため。
+  # マネージドの終了保護は切る。スタックを消すときに、保護されたインスタンスが残って止まるのを避けるため。
   # マネージドスケーリングは CloudWatch のアラームを 2 つ作る（月に約 0.2 ドル。持ち主が承認済み）。
   CapacityProvider:
     Type: AWS::ECS::CapacityProvider
@@ -418,9 +418,9 @@ Resources:
       CapacityProviders: [!Ref CapacityProvider]
       DefaultCapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
 
-  # server は 2 タスクで、状態を共有の Aurora に置く（段 D の D1-a1）。どちらの server の SVID も、同じ根の CA に連なる。
-  # 最初に db-init のコンテナが動いて終わる。Aurora の CA と根の CA をタスクの中に書き、Aurora にデータベースとロールを作る（services/db-init）。
-  # registrar は、登録を作り、バンドル（根の証明書）を EFS に書き続ける。2 つのタスクで同時に動いても、同じ登録は作らない。
+  # server は 2 タスクで、状態を共有の Aurora に置く（段 D の D1-a1）。どちらの server の SVID も、同じルート CA に連なる。
+  # 最初に db-init のコンテナが動いて終わる。Aurora の CA とルート CA をタスクの中に書き、Aurora にデータベースとロールを作る（services/db-init）。
+  # registrar は、登録を作り、バンドル（ルート証明書）を EFS に書き続ける。2 つのタスクで同時に動いても、同じ登録は作らない。
   SpireServerTask:
     Type: AWS::ECS::TaskDefinition
     Metadata:
@@ -568,7 +568,7 @@ Resources:
       TaskDefinition: !Ref SpireServerTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProvider, Weight: 1 }]
       DesiredCount: 2
-      # 1 つずつ入れ替える（台を足さずに、止まらずに更新する）。2 つの AZ に散らし、1 台に 1 つ
+      # ローリングアップデートする（インスタンスを足さずに、止まらずに更新する）。2 つの AZ に散らし、1 台に 1 つ
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 100 }
       PlacementConstraints: [{ Type: distinctInstance }]
       PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
@@ -579,7 +579,7 @@ Resources:
           SecurityGroups: [!Ref SecurityGroupId]
       ServiceRegistries: [{ RegistryArn: !GetAtt SpireServerDiscovery.Arn }]
 
-  # DAEMON は、キャパシティプロバイダーの戦略を取れない。起動タイプ EC2 のまま、どの台にも 1 つ置く。
+  # DAEMON は、キャパシティプロバイダーの戦略を取れない。起動タイプ EC2 のまま、どのインスタンスにも 1 つ置く。
   SpireAgentService:
     Type: AWS::ECS::Service
     DependsOn: CapacityProviderAssociation

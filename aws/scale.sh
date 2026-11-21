@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# AWS の段: 使わない間は down で、各サービスのタスク数を 0 にし、キャパシティプロバイダーに台を 0 まで縮めさせる。up で戻す。
-# 台の数は、マネージドスケーリングが決める。down のときだけ、タスクが 0 になってから ASG の希望台数を直接 0 にする
+# AWS の段: 使わない間は down で、各サービスのタスク数を 0 にし、キャパシティプロバイダーにインスタンスを 0 まで縮めさせる。up で戻す。
+# インスタンスの数は、マネージドスケーリングが決める。down のときだけ、タスクが 0 になってから ASG の希望台数を直接 0 にする
 # （マネージドスケーリングの縮小は、アラームが 15 分待つため。docs/findings.md）。
-# SPIRE server の状態は EFS にあるので、台が入れ替わっても CA と登録は残る。入口の中継は名前空間の SRV で送り先を見つけるので、向け直しは要らない。
+# SPIRE server の状態は EFS にあるので、インスタンスが入れ替わっても CA と登録は残る。入口のリバースプロキシは名前空間の SRV で送り先を見つけるので、向け直しは要らない。
 # 使い方:
-#   aws/scale.sh down        DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ（数分）
+#   aws/scale.sh down        DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、インスタンスが 0 になるまで待つ（数分）
 #   aws/scale.sh up          spire-server、auth、keycloak を 2、edge-check を GEKKO13_EDGE_TASKS（既定 2）にして、安定するまで待つ。
-#                            auth と keycloak のタスクの数の自動の増減を、最小 2、最大 4 に戻す
+#                            auth と keycloak のタスクのオートスケーリングを、最小 2、最大 4 に戻す
 #   GEKKO13_NO_WAIT=1 を付けると、up はタスク数を戻すだけで待たない（測るスクリプトが、自分で時刻を取るため）
 set -euo pipefail
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -17,7 +17,7 @@ out() { aws cloudformation describe-stacks --region "$REGION" --stack-name gekko
 CLUSTER=$(out ClusterName)
 ASG=$(out AutoScalingGroupName)
 set_count() { aws ecs update-service --region "$REGION" --cluster "$CLUSTER" --service "$1" --desired-count "$2" >/dev/null; }
-# タスクの数の自動の増減（段 D の D1-a1。apps のスタック）の幅を変える。止めるときは 0 にしないと、自動の増減が最小の 2 に戻してしまう
+# タスクのオートスケーリング（段 D の D1-a1。apps のスタック）の幅を変える。止めるときは 0 にしないと、オートスケーリングが最小の 2 に戻してしまう
 AUTOSCALED="keycloak auth"
 set_range() {
   for s in $AUTOSCALED; do
@@ -67,13 +67,13 @@ case "$MODE" in
     echo "台が 0 になった"
     ;;
   up)
-    # 幅を先に戻す。0 のままタスク数を 2 にすると、自動の増減が 0 に戻してしまう
+    # 幅を先に戻す。0 のままタスク数を 2 にすると、オートスケーリングが 0 に戻してしまう
     set_range 2 4
     for s in spire-server auth keycloak; do set_count "$s" 2; done
     set_count edge-check "$EDGE_TASKS"
     if [ "${GEKKO13_NO_WAIT:-}" = 1 ]; then echo "タスク数を戻した（待たない）"; exit 0; fi
     echo "タスク数を戻した。台が起き、サービスが安定するまで待つ"
-    # services-stable は 10 分で切れる。台が起きるのに時間がかかるので、4 回（40 分）まで繰り返す
+    # services-stable は 10 分で切れる。インスタンスが起きるのに時間がかかるので、4 回（40 分）まで繰り返す
     for i in 1 2 3 4; do
       # shellcheck disable=SC2086
       aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services $UP_SERVICES 2>/dev/null && break

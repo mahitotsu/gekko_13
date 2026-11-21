@@ -1,10 +1,10 @@
-// 段 C の確認用のサービス。CloudFront から台の上のサービスに届くか（C-1）と、パスキーの RP ID（C-2）を確かめる。
-// - 2 つの受け口で受ける。8080 は顧客のアプリの役（app）、8081 はログインサーバーの役（login）。配信は /login/* を 8081 へ送る。
-// - どの受け口・タスク・AZ で受けたか、CloudFront を通ったかを JSON で返す（/edge-point など、下の画面と API のほかのパス）。
+// 段 C の確認用のサービス。CloudFront からインスタンスの上のサービスに届くか（C-1）と、パスキーの RP ID（C-2）を確かめる。
+// - 2 つのエンドポイントで受ける。8080 は顧客のアプリの役（app）、8081 はログインサーバーの役（login）。ディストリビューションは /login/* を 8081 へ送る。
+// - どのエンドポイント・タスク・AZ で受けたか、CloudFront を通ったかを JSON で返す（/edge-point など、下の画面と API のほかのパス）。
 // - login の /login/ でパスキーを登録し、app の /app/ で、ある文書の SHA-256 を challenge にして署名する（段 D の「まとめたハッシュへの署名」の代わり）。
 //   資格情報はメモリに置く（タスクは 1 つ）。検証は @simplewebauthn/server が行う。
-// - RP ID は、配信の既定のドメイン（環境変数 RP_ID）。空なら localhost（ローカルの確かめ用）。
-// 平文の HTTP で受ける（CloudFront から VPC の中の台へは HTTP にする。段 D で見直す）。ECS ではホストポートを固定する。
+// - RP ID は、ディストリビューションの既定のドメイン（環境変数 RP_ID）。空なら localhost（ローカルの確かめ用）。
+// 平文の HTTP で受ける（CloudFront から VPC の中のインスタンスへは HTTP にする。段 D で見直す）。ECS ではホストポートを固定する。
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { hostname } from "node:os";
@@ -22,7 +22,7 @@ import { appPage, loginPage } from "./pages.ts";
 const APP_PORT = Number(process.env.APP_PORT ?? process.env.PORT ?? 8080);
 const LOGIN_PORT = Number(process.env.LOGIN_PORT ?? 8081);
 const RP_ID = process.env.RP_ID || "localhost";
-// ブラウザーから見た origin。CloudFront の後ろなら https の配信の名前。ローカルでは 2 つの受け口が別の origin になる
+// ブラウザーから見た origin。CloudFront の後ろなら https のディストリビューションのドメイン名。ローカルでは 2 つのエンドポイントが別の origin になる
 const ORIGINS = RP_ID === "localhost" ? [`http://localhost:${APP_PORT}`, `http://localhost:${LOGIN_PORT}`] : [`https://${RP_ID}`];
 // 署名する文書。段 D では、最終の案と申込みをまとめたハッシュになる
 const DOCUMENT = "gekko13 C-2: 申込みの内容（試し）";

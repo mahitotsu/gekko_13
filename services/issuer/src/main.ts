@@ -1,8 +1,8 @@
 // ローカルでだけ使う、Cognito の token exchange の模擬。トークンの形は gekko_12 の実測に合わせる。
 // - client_credentials のトークン: sub と client_id が client。
-// - 交換したトークン: sub は利用者、client_id は要求した client、act.client_id は actor の client（実測 1-5）。
+// - 交換したトークン: sub は利用者、client_id はリクエストした client、act.client_id は actor の client（実測 1-5）。
 //   act は入れ子にせず、最後の actor で上書きする（実測 1-3）。有効期限は交換元から延ばさない（実測 1-4）。
-// - 要求した scope が交換元か client の許可になければ、削らずに invalid_grant で拒む（実測 1-2）。
+// - リクエストした scope が交換元か client の許可になければ、削らずに invalid_grant で拒む（実測 1-2）。
 // 本物の Cognito に替えても、サービスの側は設定だけで済むようにする。
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";

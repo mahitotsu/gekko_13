@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の検証のネットワークと、SPIRE server の状態を置く EFS。IPv6 を軸にし、NAT ゲートウェイも VPC エンドポイントも置かない（固定費を出さない）。
 # サブネットはプライベートにする。IGW への経路を持たず、外へは Egress-only のインターネットゲートウェイ（EIGW）から IPv6 で出る。
-# 外からは、入口の中継（Web Functions。段 D の D0-b）が NetworkConnector で VPC に置く ENI からだけ受ける。サブネットは 2 つの AZ に 1 つずつ。
+# 外からは、入口のリバースプロキシ（Web Functions。段 D の D0-b）が NetworkConnector で VPC に置く ENI からだけ受ける。サブネットは 2 つの AZ に 1 つずつ。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 network and the EFS that holds SPIRE server state. IPv6 first, with no NAT gateway and no VPC endpoints (no fixed monthly cost).
@@ -53,7 +53,7 @@ Resources:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref InternetGateway
 
-  # 1 つめの AZ のサブネット。段 A（1 AZ）は、ここだけに台を置く。IPv6 で外へ出る。
+  # 1 つめの AZ のサブネット。段 A（1 AZ）は、ここだけにインスタンスを置く。IPv6 で外へ出る。
   # 公開 IPv4 を自動で付けない（付けると 1 時間ごとに課金される）。
   Subnet:
     Type: AWS::EC2::Subnet
@@ -72,7 +72,7 @@ Resources:
       EnableDns64: false
       Tags: [{ Key: Name, Value: !Ref Prefix }]
 
-  # 2 つめの AZ のサブネット。段 B（マルチ AZ）で台を置く。段 A では EFS のマウントターゲットだけがある。
+  # 2 つめの AZ のサブネット。段 B（マルチ AZ）でインスタンスを置く。段 A では EFS のマウントターゲットだけがある。
   Subnet2:
     Type: AWS::EC2::Subnet
     DependsOn: Ipv6Block
@@ -127,8 +127,8 @@ Resources:
       RouteTableId: !Ref RouteTable
 
   # ホスト、SPIRE server のタスクの ENI（awsvpc）、EFS のマウントターゲットが共有するグループ。
-  # VPC の外からの通信を受けない。受けるのは、同じグループの中からだけ（台をまたぐ Service Connect、SPIRE の 8081、EFS の 2049）。
-  # 入ってくる規則を外へ広げない。外からの入口は、入口の中継のグループからだけにする（HostIngressFromEntry）。
+  # VPC の外からの通信を受けない。受けるのは、同じグループの中からだけ（インスタンスをまたぐ Service Connect、SPIRE の 8081、EFS の 2049）。
+  # 入ってくる規則を外へ広げない。外からの入口は、入口のリバースプロキシのグループからだけにする（HostIngressFromEntry）。
   HostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Metadata:
@@ -165,8 +165,8 @@ Resources:
       ToPort: 65535
       Description: members of this group only
 
-  # 段 D の D0-b: 入口の中継（Web Functions）が、NetworkConnector で VPC に ENI を置き、台のタスクへ送る。
-  # 中継のグループは何も受けず、台の動的なポート（bridge のタスクの受け口）と、VPC の DNS へだけ出る。
+  # 段 D の D0-b: 入口のリバースプロキシ（Web Functions）が、NetworkConnector で VPC に ENI を置き、インスタンスのタスクへ送る。
+  # リバースプロキシのグループは何も受けず、インスタンスの動的なポート（bridge のタスクのエンドポイント）と、VPC の DNS へだけ出る。
   # VPC の DNS（Amazon が用意する名前の解決）への通信は、グループの規則に依らず通る（AWS の資料）。規則は、出口を明示するために書く。
   EntrySecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -186,7 +186,7 @@ Resources:
         - { IpProtocol: tcp, FromPort: 53, ToPort: 53, CidrIp: 169.254.169.253/32, Description: Amazon-provided DNS }
       Tags: [{ Key: Name, Value: !Sub "${Prefix}-entry" }]
 
-  # 台は、入口の中継からだけ、動的なホストのポートを受ける。外からの受信は、この規則のほかに足さない。
+  # インスタンスは、入口のリバースプロキシからだけ、動的なホストのポートを受ける。外からの受信は、この規則のほかに足さない。
   HostIngressFromEntry:
     Type: AWS::EC2::SecurityGroupIngress
     Metadata:
@@ -201,7 +201,7 @@ Resources:
       ToPort: 65535
       Description: entry relay only
 
-  # awsvpc の Keycloak のタスク（段 D の D1-a1）は、タスクの IP の 8080 で受ける。ENI は台のグループを使う
+  # awsvpc の Keycloak のタスク（段 D の D1-a1）は、タスクの IP の 8080 で受ける。ENI はインスタンスのグループを使う
   HostIngressFromEntryKeycloak:
     Type: AWS::EC2::SecurityGroupIngress
     Metadata:
@@ -217,7 +217,7 @@ Resources:
       Description: entry relay to awsvpc Keycloak
 
   # SPIRE server のデータストア（sqlite）と鍵、agent が最初に信じるバンドル。
-  # ECS のスタックを作り直しても、台が入れ替わっても、CA と登録が残るように、ECS の外に置く。
+  # ECS のスタックを作り直しても、インスタンスが入れ替わっても、CA と登録が残るように、ECS の外に置く。
   FileSystem:
     Type: AWS::EFS::FileSystem
     Metadata:

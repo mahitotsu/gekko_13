@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の入口の中継（段 D の D0-b）。CloudFront の配信（aws/edge.yaml）が OAC で署名して呼ぶ、Lambda の Web Functions。
-# 中継は、パスで送り先のサービスを決め、名前空間の SRV で見つけたタスクへ、VPC の中を平文の HTTP で送る（services/entry）。
-# VPC へは NetworkConnector で出る。ENI は Lambda が 2 つの AZ のサブネットに作り、中継のグループ（network のスタック）を付ける。
-# 固定費がない。使わない間も消さずに置く（台とタスクを 0 にするだけ）。サービス管理の Elastic IP は付けない（固定費になる）。
-# エンドポイントは IAM の認証にし、署名のない直接の呼び出しを拒む。CloudFront だけに呼ばせる許可は、配信の側（aws/edge.yaml）が付ける。
+# gekko13 の入口のリバースプロキシ（段 D の D0-b）。CloudFront のディストリビューション（aws/edge.yaml）が OAC で署名して呼ぶ、Lambda の Web Functions。
+# リバースプロキシは、パスで送り先のサービスを決め、名前空間の SRV で見つけたタスクへ、VPC の中を平文の HTTP で送る（services/entry）。
+# VPC へは NetworkConnector で出る。ENI は Lambda が 2 つの AZ のサブネットに作り、リバースプロキシのグループ（network のスタック）を付ける。
+# 固定費がない。使わない間も消さずに置く（インスタンスとタスクを 0 にするだけ）。サービス管理の Elastic IP は付けない（固定費になる）。
+# エンドポイントは IAM の認証にし、署名のない直接の呼び出しを拒む。CloudFront だけに呼ばせる許可は、ディストリビューションの側（aws/edge.yaml）が付ける。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 entry relay (stage D0-b): a Lambda Web Function that CloudFront calls with OAC signing. It routes by path and relays
@@ -115,7 +115,7 @@ Resources:
                 Action: [ec2:DescribeNetworkInterfaces, ec2:DescribeSubnets, ec2:DescribeSecurityGroups, ec2:DescribeVpcs]
                 Resource: "*"
 
-  # IPv4 だけにする。送り先は VPC の中の台（プライベートの IPv4）だけで、外へは出ない
+  # IPv4 だけにする。送り先は VPC の中のインスタンス（プライベートの IPv4）だけで、外へは出ない
   Connector:
     Type: AWS::Lambda::NetworkConnector
     Properties:
@@ -134,7 +134,7 @@ Resources:
       FunctionName: !Sub "${Prefix}-entry"
 
   # リビジョンは作ったあとに変えられない。コードか設定が変わると、CloudFormation が新しいリビジョンに置き換える。
-  # 待つ上限は 30 秒（CloudFront の送り先の応答の待ちと同じ）。中継が送り先を待つのは 25 秒まで（services/entry/src/main.ts）
+  # 待つ上限は 30 秒（CloudFront の送り先の応答の待ちと同じ）。リバースプロキシが送り先を待つのは 25 秒まで（services/entry/src/main.ts）
   Revision:
     Type: AWS::Lambda::WebFunctionRevision
     DependsOn: [CentralLogGroup, LocalLogGroup]

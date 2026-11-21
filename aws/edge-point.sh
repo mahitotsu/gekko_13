@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 入口の CloudFront の配信（スタック gekko13-edge）の VPC origin を、確認用のサービス（edge-check）が動いている台に向け、
-# 効くまでの時間を測る（段 C の C-1b）。/login/* は Keycloak（段 C の C-3）。配信がなければ作る。配信は消さない（RP ID を保つため）。
-# CloudFront は、配信に結び付いた VPC origin を更新させない（409）。そこで、使っていない組（A か B）を新しい台に向け、
-# 同じスタックの更新で、配信をその組に切り替える。台が変わっていなければ、何も変えない。
-# CloudFront が VPC に作るグループ（CloudFront-VPCOrigins-Service-SG）を、network のスタックに渡し、台がそこから受けるようにする。
+# 入口の CloudFront のディストリビューション（スタック gekko13-edge）の VPC origin を、確認用のサービス（edge-check）が動いているインスタンスに向け、
+# 効くまでの時間を測る（段 C の C-1b）。/login/* は Keycloak（段 C の C-3）。ディストリビューションがなければ作る。ディストリビューションは消さない（RP ID を保つため）。
+# CloudFront は、ディストリビューションに結び付いた VPC origin を更新させない（409）。そこで、使っていない組（A か B）を新しいインスタンスに向け、
+# 同じスタックの更新で、ディストリビューションをその組に切り替える。インスタンスが変わっていなければ、何も変えない。
+# CloudFront が VPC に作るグループ（CloudFront-VPCOrigins-Service-SG）を、network のスタックに渡し、インスタンスがそこから受けるようにする。
 # 使い方: aws/edge-point.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,7 +22,7 @@ read -r ARN_ACCOUNT DNS < <(aws ec2 describe-instances --region "$REGION" --inst
 ARN="arn:aws:ec2:$REGION:$ARN_ACCOUNT:instance/$HOST"
 echo "送り先の台: $HOST（タスク ${TASK##*/}）"
 
-# 今の組と、それぞれが指す台。最初の作り（組がひとつ、InstanceArn）からも引き継ぐ
+# 今の組と、それぞれが指すインスタンス。最初の作り（組がひとつ、InstanceArn）からも引き継ぐ
 param() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
   --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue|[0]" --output text 2>/dev/null || echo None; }
 ACTIVE=$(param ActiveSlot) A=$(param InstanceArnA) B=$(param InstanceArnB)
@@ -34,7 +34,7 @@ else
   NEXT=$([ "$ACTIVE" = A ] && echo B || echo A)
   if [ "$NEXT" = A ]; then A=$ARN; else B=$ARN; fi
 fi
-# まだ一度も使っていない組は、新しい台を指して作る（配信に結び付く前なので作れる）
+# まだ一度も使っていない組は、新しいインスタンスを指して作る（ディストリビューションに結び付く前なので作れる）
 [ "$A" != None ] || A=$ARN
 [ "$B" != None ] || B=$ARN
 echo "組: $ACTIVE → $NEXT"
@@ -46,14 +46,14 @@ CFN_DONE=$(date +%s)
 DOMAIN=$(out "$STACK" DomainName)
 echo "配信: $DOMAIN（スタックの更新に $((CFN_DONE - START)) 秒）"
 
-# 台の受信の規則。グループは最初の VPC origin でできるので、初回だけ network のスタックが変わる
+# インスタンスの受信の規則。グループは最初の VPC origin でできるので、初回だけ network のスタックが変わる
 SG=$(scripts/vpc-origin-sg.sh)
 [ -n "$SG" ] || { echo "CloudFront-VPCOrigins-Service-SG が VPC にない" >&2; exit 1; }
 aws cloudformation deploy --region "$REGION" --stack-name gekko13-network --template-file aws/network.yaml \
   --no-fail-on-empty-changeset --parameter-overrides "CloudFrontVpcOriginSg=$SG" >/dev/null
 
-# 2 つの受け口が応えるまで待つ（上限 30 分）。app（8080）は、この台の edge-check のタスクを返すこと。
-# login（8081）は Keycloak（段 C の C-3）で、レルムの discovery が、配信の名前を issuer にして返すこと
+# 2 つのエンドポイントが応えるまで待つ（上限 30 分）。app（8080）は、このインスタンスの edge-check のタスクを返すこと。
+# login（8081）は Keycloak（段 C の C-3）で、レルムの discovery が、ディストリビューションのドメイン名を issuer にして返すこと
 wait_for() {
   local path=$1 pattern=$2 deadline=$((START + 1800)) last=""
   until last=$(curl -s --max-time 15 "https://$DOMAIN$path") && grep -q "$pattern" <<<"$last"; do

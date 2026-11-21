@@ -157,7 +157,7 @@ async function main() {
   const r6 = await exchange(transfer, "transfer-client", subject, actor);
   record({ id: "C4-6", title: "transfer が、盗んだ bff のトークンで交換を求める", expected: "400 invalid_grant", actual: summary(r6), pass: r6.status === 400 });
 
-  // C4-7: SVID の入れ替わり
+  // C4-7: SVID のローテーション
   const auth0 = svidOf("auth").serial;
   const served0 = await serverSerial(bff.bundle);
   const bff0 = bff.serial;

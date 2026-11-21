@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 入口の中継（Web Functions）の zip を local/run/entry.zip に作り、そのパスを出す。依存のパッケージは使わない。
+# 入口のリバースプロキシ（Web Functions）の zip を local/run/entry.zip に作り、そのパスを出す。依存のパッケージは使わない。
 # zip の直下に index.js（services/entry/index.js）を置き、TypeScript は JavaScript に変えて入れる。
 # 中身が同じなら同じ zip になるように、時刻をそろえ、並びを固定する（S3 のキーを中身のハッシュにするため）。
 set -euo pipefail

@@ -1,5 +1,5 @@
 // 委任のトークンを確かめ、mTLS で確かめた相手（SPIFFE ID）と、トークンの呼び出し元（act.client_id）を照合する。
-// Cognito の token exchange では、client_id は交換を要求した client、act.client_id は actor の client になり、
+// Cognito の token exchange では、client_id は交換をリクエストした client、act.client_id は actor の client になり、
 // 両者は食い違いうる（gekko_12 の実測 1-5）。そのため、両方の一致と、SPIFFE ID との対応を確かめる。
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 
@@ -7,7 +7,7 @@ export interface Policy {
   issuer: string;
   /** 受け入れる相手の SPIFFE ID と、その相手の Cognito の app client ID の対応。ここにない相手は拒む。 */
   callers: Record<string, string>;
-  /** この受け口で要る scope。 */
+  /** このエンドポイントで要る scope。 */
   requiredScope: string;
 }
 

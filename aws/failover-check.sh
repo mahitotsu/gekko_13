@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 段 D の D1-a1: 台を 1 台、予告なしに止めて（スポットの中断より厳しい条件）、入口からの要求がどれだけ失敗するかを測る。
+# 段 D の D1-a1: インスタンスを 1 台、予告なしに止めて（スポットの中断より厳しい条件）、入口からのリクエストがどれだけ失敗するかを測る。
 # 止める前から 2 秒ごとに、CloudFront を通して /edge-point と Keycloak の discovery を呼び、時刻と状態を記録する。
 # 止めたあと、代わりの auth のタスクが起動するまで（SVID がないと起動しないので、新しいタスクに SVID が出たことも分かる）を待つ。
 # 結果は local/run/failover/<時刻>/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/failover-check.sh [止めたあとに見る秒（既定 480）]
-# 実行すると費用が出る。台を 1 台止めるので、ASG が代わりの台を起こす。前提: 台が 2 台で、全部のサービスが安定している。
+# 実行すると費用が出る。インスタンスを 1 台止めるので、ASG が代わりのインスタンスを起動する。前提: インスタンスが 2 台で、全部のサービスが安定している。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -22,7 +22,7 @@ hosts=$(aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto-s
 [ "$(wc -w <<<"$hosts")" -ge 2 ] || { echo "台が 2 台ない（$hosts）。aws/scale.sh up のあとで回す" >&2; exit 1; }
 VICTIM=$(awk '{print $1}' <<<"$hosts")
 AZ=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$VICTIM" --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' --output text)
-# 止める台に載っているタスク（サービスごと）
+# 止めるインスタンスに載っているタスク（サービスごと）
 container_instance=$(aws ecs list-container-instances --region "$REGION" --cluster "$CLUSTER" --filter "ec2InstanceId == $VICTIM" --query 'containerInstanceArns[0]' --output text)
 aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --container-instance "$container_instance" --query 'taskArns' --output text |
   xargs -r -n 100 aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --query 'tasks[].group' --output text --tasks |

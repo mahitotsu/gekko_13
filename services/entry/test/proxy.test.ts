@@ -51,7 +51,7 @@ describe("SRV の解決", () => {
   });
 });
 
-// 偽の送り先と中継を立てて、要求を通す
+// 偽の送り先とリバースプロキシを立てて、リクエストを通す
 const servers: Server[] = [];
 afterEach(() => {
   for (const s of servers.splice(0)) s.close();

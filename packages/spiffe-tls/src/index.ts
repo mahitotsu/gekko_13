@@ -1,4 +1,4 @@
-// SVID のファイル（spiffe-helper が書く）を使って、mTLS の受け口と呼び出しを作る。
+// SVID のファイル（spiffe-helper が書く）を使って、mTLS のエンドポイントと呼び出しを作る。
 // アプリは自分で mTLS を終える。ECS の bridge モードでは同じタスクのコンテナもネットワークを共有せず、
 // プロキシの後ろのアプリが直接届いてしまうため（計画の「mTLS を終える場所」）。
 import { createHash, X509Certificate } from "node:crypto";
@@ -108,7 +108,7 @@ export class SvidSource {
 export type Handler = (req: IncomingMessage, res: ServerResponse, peerId: string) => unknown;
 
 /**
- * クライアント証明書を必ず求める HTTPS の受け口。信頼するのは SPIRE のバンドルだけ。
+ * クライアント証明書を必ず求める HTTPS のエンドポイント。信頼するのは SPIRE のバンドルだけ。
  * SVID が入れ替わったら setSecureContext で差し替える。差し替えは、新しい接続から効く。
  */
 export function createMtlsServer(source: SvidSource, handler: Handler, log: (o: object) => void = () => {}): Server {
@@ -145,7 +145,7 @@ export interface CallResult {
 
 /**
  * 相手の SPIFFE ID を確かめて、そのときの SVID で mTLS をかけて呼ぶ。
- * 接続は要求ごとにつなぎ直す（agent: false）。使い回すと、入れ替わる前の証明書で示し続ける（gekko_11 の F-G54）。
+ * 接続はリクエストごとにつなぎ直す（agent: false）。使い回すと、入れ替わる前の証明書で示し続ける（gekko_11 の F-G54）。
  */
 export function mtlsCall(
   svid: Pick<Svid, "cert" | "key" | "bundle">,

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 段 C の C-3: 台が 0 の状態から、ログインサーバー（Keycloak）と認可サーバー（auth）が使えるまでの時間を測る。
+# 段 C の C-3: インスタンスが 0 の状態から、ログインサーバー（Keycloak）と認可サーバー（auth）が使えるまでの時間を測る。
 # 始点: タスク数を戻した時刻。終点: 次の 2 つがそろった時刻（docs/log.md の 2026-11-20 の定義）。
-#   - CloudFront を通して、Keycloak のレルムの discovery が、配信の名前を issuer にして返る（aws/edge-point.sh が待つ）
+#   - CloudFront を通して、Keycloak のレルムの discovery が、ディストリビューションのドメイン名を issuer にして返る（aws/edge-point.sh が待つ）
 #   - auth のログに「Started AuthApplication」が出る
 # VPC origin の向け直し（aws/edge-point.sh）も含める。edge-check のタスクが動き出したら、すぐに向け直しを始める。
 # そのあと HOLD 分（既定 10）置いて、メモリの不足で止まったタスクがないかと、Container Insights のメモリの最大を見る。
 # 結果は local/run/c3/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/c3-measure.sh [HOLD の分。0 で省く]
-# 実行すると費用が出る。終わっても台は動いたまま。使い終わったら aws/scale.sh down で 0 にする。
+# 実行すると費用が出る。終わってもインスタンスは動いたまま。使い終わったら aws/scale.sh down で 0 にする。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -55,7 +55,7 @@ while :; do
     [ "$running" -ge 1 ] && mark "$name が RUNNING"
   done < <(aws ecs describe-services --region "$REGION" --cluster "$CLUSTER" --services $SERVICES \
     --query 'services[].[serviceName,runningCount]' --output text)
-  # 向け直しは、edge-check のタスクがいる台に向ける。動き出したらすぐに始める
+  # 向け直しは、edge-check のタスクがいるインスタンスに向ける。動き出したらすぐに始める
   if [ -z "$EDGE_PID" ] && [ -n "${AT[edge-check が RUNNING]:-}" ]; then
     mark "向け直しを始めた"
     aws/edge-point.sh > "$RUN/edge-point.txt" 2>&1 &

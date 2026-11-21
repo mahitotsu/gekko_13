@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
-# gekko13 の入口の CloudFront の配信。配信の既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
-# 配信を作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消しても配信は残す（DeletionPolicy: Retain）。
-# 送り先は、入口の中継（aws/entry.yaml の Web Functions）のエンドポイント 1 つ（段 D の D0-b）。振り分けは中継がパスでする。
-# CloudFront は OAC で要求に署名し、中継のリソースポリシーが、この配信からの呼び出しだけを許す。
-# 中継には固定費がないので、使わない間も配信は止めない（台とタスクを 0 にするだけ。D0 の Parked はやめた）。
+# gekko13 の入口の CloudFront のディストリビューション。ディストリビューションの既定のドメイン（dXXXX.cloudfront.net）を、パスキーの RP ID にする。
+# ディストリビューションを作り直すと名前が変わり、登録したパスキーが使えなくなるので、スタックを消してもディストリビューションは残す（DeletionPolicy: Retain）。
+# 送り先は、入口のリバースプロキシ（aws/entry.yaml の Web Functions）のエンドポイント 1 つ（段 D の D0-b）。振り分けはリバースプロキシがパスでする。
+# CloudFront は OAC でリクエストに署名し、リバースプロキシのリソースポリシーが、このディストリビューションからの呼び出しだけを許す。
+# リバースプロキシには固定費がないので、使わない間もディストリビューションは止めない（インスタンスとタスクを 0 にするだけ。D0 の Parked はやめた）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 entry CloudFront distribution. Its default domain (dXXXX.cloudfront.net) becomes the passkey RP ID,
@@ -31,7 +31,7 @@ Parameters:
 
 Resources:
   # Web Functions の送り先は、種類 lambda、署名の仕方 always-amz-auth にする（Lambda の資料、gekko_12 の実測 3-8）。
-  # always にすると、配信の更新が「Lambda-Web origins require always-amz-auth signing behavior」で拒まれた（docs/findings.md）
+  # always にすると、ディストリビューションの更新が「Lambda-Web origins require always-amz-auth signing behavior」で拒まれた（docs/findings.md）
   EntryOac:
     Type: AWS::CloudFront::OriginAccessControl
     Properties:
@@ -43,7 +43,7 @@ Resources:
         SigningProtocol: sigv4
 
   # キャッシュはしない（CachingDisabled）。送り先には、Host を除く利用者の値を渡す（AllViewerExceptHostHeader）。
-  # Web Functions は、Host がエンドポイントの名前でない要求を拒むので、Host は送らない（gekko_12 の実測 3-8）。
+  # Web Functions は、Host がエンドポイントの名前でないリクエストを拒むので、Host は送らない（gekko_12 の実測 3-8）。
   Distribution:
     Type: AWS::CloudFront::Distribution
     DeletionPolicy: Retain
@@ -81,7 +81,7 @@ Resources:
           OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
           Compress: true
 
-  # Web Function のリソースポリシーは 1 つだけで、この資源が丸ごと持つ。CloudFront に、この配信からだけ、このエンドポイントを呼ばせる
+  # Web Function のリソースポリシーは 1 つだけで、この資源が丸ごと持つ。CloudFront に、このディストリビューションからだけ、このエンドポイントを呼ばせる
   EntryInvokePolicy:
     Type: AWS::Lambda::ResourcePolicy
     Metadata:

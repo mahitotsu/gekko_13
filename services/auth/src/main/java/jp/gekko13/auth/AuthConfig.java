@@ -191,7 +191,7 @@ public class AuthConfig {
 
 	/**
 	 * トークンの発行の鍵。AUTH_SIGNING_KEY（RSA の秘密鍵、PKCS#8 の PEM）があれば、それを使う。複数のタスクが同じ鍵で出し、確かめる
-	 * （段 D の D1-a1。aws/deploy.sh が作って SSM に置き、ECS が渡す）。鍵の ID は公開鍵の拇印（RFC 7638）にし、どのタスクでも同じにする。
+	 * （段 D の D1-a1。aws/deploy.sh が作って SSM に置き、ECS が渡す）。鍵の ID は公開鍵のサムプリント（RFC 7638）にし、どのタスクでも同じにする。
 	 * なければ（手元の確かめ）、起動ごとにメモリ上に作る。
 	 */
 	@Bean

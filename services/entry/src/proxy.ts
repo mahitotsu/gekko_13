@@ -1,7 +1,7 @@
-// 入口の中継（段 D の D0-b）。CloudFront から呼ばれる Web Functions の中で動き、パスで送り先のサービスを決め、
-// VPC の中のタスクへ、要求をそのまま送る。送り先は、名前空間の SRV（ECS が台の IP と動的なポートで登録する）で見つける。
+// 入口のリバースプロキシ（段 D の D0-b）。CloudFront から呼ばれる Web Functions の中で動き、パスで送り先のサービスを決め、
+// VPC の中のタスクへ、リクエストをそのまま送る。送り先は、名前空間の SRV（ECS がインスタンスの IP と動的なポートで登録する）で見つける。
 // - 振り分けは、パスの接頭辞を区切り（/）の単位で比べる。/login は /login と /login/... に合い、/loginx には合わない。
-// - 本文は読み切ってから送る。つながる前に失敗したときだけ、別のタスクへ送り直す（本文を 2 度届けない）。
+// - 本文は読み切ってから送る。つながる前に失敗したときだけ、別のタスクへリトライする（本文を 2 度届けない）。
 // - 応答は、状態とヘッダーと本文を、そのまま返す。hop-by-hop のヘッダーだけを除く。
 import { promises as dns } from "node:dns";
 import { Agent, request, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
@@ -76,7 +76,7 @@ export function srvResolver(namespace: string, ttlMs: number, lookup: SrvLookup 
   };
 }
 
-// RFC 9110 の 7.6.1。中継が終える接続のヘッダーで、送り先へは渡さない
+// RFC 9110 の 7.6.1。リバースプロキシが終える接続のヘッダーで、送り先へは渡さない
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"]);
 
 export function forwardHeaders(headers: IncomingHttpHeaders): IncomingHttpHeaders {
@@ -108,11 +108,11 @@ export function shuffle<T>(xs: T[], random = Math.random): T[] {
 export type ProxyOptions = {
   routes: Route[];
   resolver: Resolver;
-  /** 送り先の応答を待つ上限。Web Functions の要求の上限より短くする */
+  /** 送り先の応答を待つ上限。Web Functions のリクエストの上限より短くする */
   timeoutMs: number;
   /** 読み切る本文の上限 */
   maxBodyBytes: number;
-  /** 1 つの要求で試す送り先の数の上限 */
+  /** 1 つのリクエストで試す送り先の数の上限 */
   maxAttempts: number;
   log: (o: object) => void;
   random?: () => number;
@@ -136,7 +136,7 @@ export function createProxy(o: ProxyOptions) {
       up.on("response", (res) => resolve({ kind: "response", res }));
       up.on("timeout", () => up.destroy(new Error("送り先が時間内に応えなかった")));
       up.on("error", (error) => {
-        // つながる前の失敗と、使い回した接続が切れていた冪等な要求は、別のタスクへ送り直してよい
+        // つながる前の失敗と、使い回した接続が切れていた冪等なリクエストは、別のタスクへリトライてよい
         const reused = up.reusedSocket && (error as NodeJS.ErrnoException).code === "ECONNRESET" && IDEMPOTENT.has(req.method ?? "");
         resolve({ kind: !connected || reused ? "retryable" : "fatal", error });
       });

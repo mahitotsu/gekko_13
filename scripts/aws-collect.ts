@@ -31,7 +31,7 @@ function print(r: Result) {
 
 /**
  * B-1: タスクが 2 つ以上あるサービスで、タスクが 2 つ以上の AZ に分かれたか。
- * placement.txt は 1 行に「サービス タスク AZ 台」。どのサービスも 1 タスク（段 A）なら、判定しない。
+ * placement.txt は 1 行に「サービス タスク AZ インスタンス」。どのサービスも 1 タスク（段 A）なら、判定しない。
  */
 function placementResult(file: string | undefined): Result | undefined {
   if (!file || !existsSync(file)) return undefined;
@@ -142,7 +142,7 @@ function timedLines(file: string) {
 const authorityOf = (msg: string) => /msg="X509 CA activated".*local_authority_id=(\w+)/.exec(msg)?.[1];
 
 /**
- * B-4: 入れ替えの試験の途中で、SPIRE server を別の AZ（なければ別の台）に移した。
+ * B-4: 入れ替えの試験の途中で、SPIRE server を別の AZ（なければ別のインスタンス）に移した。
  * 予測: CA の識別子は変わらない。server が SVID の有効期限（5 分）の中で起き直せば、連鎖の失敗は 0 件。
  */
 function failover(files: string[]) {
