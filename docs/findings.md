@@ -63,6 +63,14 @@
 | 4-21 | 入口を Web Functions のリバースプロキシにしても、インスタンスが 0 の状態から約 3〜4 分で使え、2 つの AZ のどちらのインスタンスにも届いた。インスタンスが 0 の間、ディストリビューションは 503 を返した |
 | 4-22 | 名前空間の DNS は、全部のタスクが UNHEALTHY のとき、UNHEALTHY のタスクも返した |
 | 4-23 | インスタンスを全部スポットにしても、2 つの AZ にインスタンスが起き、インスタンスが 0 の状態から約 3 分半で使えた。1a では t4g.large が選ばれた |
+| 4-24 | Aurora の管理者は superuser でなく、ロールへ切り替える権利（SET）がないと、そのロールを持ち主にしたデータベースを作れなかった |
+| 4-25 | 2 つの SPIRE server が、空のデータベースに同時にスキーマを作ると、片方がぶつかって止まった。ECS が再起動したあとは通った |
+| 4-26 | Keycloak の 2 タスクは、ログインの画面を作ったタスクを止めても、もう片方がセッションを引き継いだ（CloudFront を通して） |
+| 4-27 | SPIRE server の片方が止まっても、残った server が、新しいタスクに SVID を出した |
+| 4-28 | インスタンスを 1 台、予告なしに止めても、入口のリクエストの失敗は 418 回のうち 1 回だった。代わりの auth は残ったインスタンスに置かれ、AZ が偏った |
+| 4-29 | auth の 2 タスクは、同じ署名鍵（同じ鍵の ID）を持った |
+| 4-30 | AZ の偏りの直しを有効にすると、偏ったタスクを ECS が並べ直した。`MaximumPercent` を 200 % にすると、ローリングアップデートの間にインスタンスが 1 台増えた |
+| 4-31 | Aurora と冗長化を足しても、インスタンスが 0 の状態から約 3 分半〜4 分で使えた。Aurora は、つながりがなくなって 5 分ほどで一時停止し、再開は 5 秒ほどだった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -663,6 +671,103 @@ Route 53 の複数値の答えが、全部が正常でないときに全部を�
 - コマンド: `aws/deploy.sh`（コミット `e820719`）、`aws ec2 describe-instances` の `InstanceType`、`InstanceLifecycle`、`Placement.AvailabilityZone`、`aws/scale.sh down`、`aws/d0-measure.sh`（2026-11-21 06:39〜07:00 UTC）。結果は `local/run/d0/20261121T065325Z/result.md`。
 - 内訳（始点からの秒）: インスタンスが ASG に加わった 120、edge-check と keycloak が RUNNING 182、CloudFront を通して 2 つの AZ の edge-check が応えた 194、Keycloak が応えた 204、auth の起動（ログの時刻）204。
 - スポットの価格（東京、2026-11-21、1 時間あたり）: t4g.medium は 1a 0.0170 ドル、1c 0.0188 ドル。t4g.large は 1a 0.0327 ドル、1c 0.0300 ドル（`aws ec2 describe-spot-price-history`）。
+
+</details>
+
+### 4-24. Aurora の管理者は superuser でなく、ロールへ切り替える権利（SET）がないと、そのロールを持ち主にしたデータベースを作れなかった
+**結論:** db-init の `CREATE DATABASE spire OWNER spire` が、Aurora で `must be able to SET ROLE "spire"` に拒まれた。PostgreSQL 16 からは、データベースの持ち主を別のロールにするには、作る側がそのロールに切り替えられる必要がある。ロールを作った者は管理の権利（ADMIN）を持つが、切り替える権利（SET）は持たない。手元の PostgreSQL の管理者は本物の superuser なので、この制限にかからず、手元の確かめでは見つからなかった。管理者に `GRANT spire TO <管理者> WITH SET TRUE` を与えてから作ると通った。手元でも、superuser でない管理者（CREATEROLE と CREATEDB だけ）で、同じ誤りと直りを確かめた。
+
+<details>
+<summary>根拠</summary>
+
+- db-init のログ（2026-11-21 08:3x UTC）: `psql:/db-init.sql:35: ERROR:  must be able to SET ROLE "spire"`。直したコミットは `3847343`。
+- 手元: `postgres:17` に `CREATE ROLE admin2 LOGIN CREATEROLE CREATEDB` を作り、その管理者で流した。直す前は同じ誤り、直したあとは 2 つ同時でも通った。
+- 一度だけのタスク（`gekko13-dbfix:1`）で、直した SQL を Aurora に流し、そのとき動いていた更新を通した。
+
+</details>
+
+### 4-25. 2 つの SPIRE server が、空のデータベースに同時にスキーマを作ると、片方がぶつかって止まった。ECS が再起動したあとは通った
+**結論:** SPIRE server の 2 タスクが、空の `spire` のデータベースに同時に起動した。片方は `duplicate key value violates unique constraint "pg_type_typname_nsp_index"` で止まった。スキーマを作る処理（表の作成）が、同時に走ってぶつかったと見られる（推定）。もう片方がスキーマを作り終えたあと、ECS が再起動したタスクは通った。データベースが空のときに、一度だけ起きる。
+
+<details>
+<summary>根拠</summary>
+
+- spire-server のログ（2026-11-21 10:29 UTC）: `Fatal run error ... pq: duplicate key value violates unique constraint "pg_type_typname_nsp_index" (23505)`。
+- その前に動いたもう 1 つのタスクは、登録を作り、バンドルを書き、agent の SVID を更新していた。
+
+</details>
+
+### 4-26. Keycloak の 2 タスクは、ログインの画面を作ったタスクを止めても、もう片方がセッションを引き継いだ（CloudFront を通して）
+**結論:** CloudFront を通してログインの画面を開き、セッションの Cookie を受け取った。Cookie の `AUTH_SESSION_ID` の末尾のノードの名前から、画面を作ったタスクを特定し、そのタスクだけを止めた。止めたあと、同じ Cookie で違うパスワードを送ると、200 で「Invalid username or password」が返った。Cookie を付けないと、400 で「cookie not found」だった。もう片方の Keycloak が、JGroups で共有したセッションを引き継いだ。plan.md の D1-a1 の予測 3 のとおり。
+
+<details>
+<summary>根拠</summary>
+
+- 2026-11-21 11:29〜11:30 UTC。セッションのノード `ip-10-13-1-104-19348` は、タスク `450d33ca…` の起動のログの `Node name` と一致した。`aws ecs stop-task` で止め、STOPPED を確かめてから送った。
+- 手元でも、2 つのコンテナで同じ結果だった。
+
+</details>
+
+### 4-27. SPIRE server の片方が止まっても、残った server が、新しいタスクに SVID を出した
+**結論:** インスタンスを止める試し（4-28）で、SPIRE server の片方と auth の片方が、一緒に止まった。代わりの auth は、止めてから 24 秒で残ったインスタンスに作られ、68 秒で SVID を受け取った。代わりの SPIRE server は、配置制約（1 台に 1 つ）のため、代わりのインスタンスを待って 85 秒で作られ、172 秒で待ち受けを始めた。代わりの auth の SVID は、残った 1 つの server が出したことになる。plan.md の D1-a1 の予測 4 のとおり。
+
+<details>
+<summary>根拠</summary>
+
+- 2026-11-21 11:34:15 UTC に止めた。時刻は、ECS のタスクの `createdAt`、svid-helper のログの `X.509 certificates updated`、spire-server のログの `Starting Server APIs` から取った。
+- その前の試し（SPIRE server と auth を同時に止めた）では、代わりの server が先に起動したので、この判定には使わない。その間も、agent は、残った server で SVID を更新し続けた。
+
+</details>
+
+### 4-28. インスタンスを 1 台、予告なしに止めても、入口のリクエストの失敗は 418 回のうち 1 回だった。代わりの auth は残ったインスタンスに置かれ、AZ が偏った
+**結論:** 1c のインスタンス（spire-server、Keycloak、auth、edge-check が 1 つずつ載っていた）を、`terminate-instances` で予告なしに止めた。止めてから 8 分のあいだ、2 秒ごとに CloudFront を通して `/edge-point` と Keycloak の discovery を呼んだ。失敗は、止めてから 4 秒後の Keycloak の 1 回だけ（5 秒で応えが返らなかった）で、plan.md の D1-a1 の予測 6（1 分以内に収まる）のとおりだった。
+
+代わりの auth は、配置制約がないので、残った 1a のインスタンスに置かれた。代わりのインスタンスが起動したあとも、auth は 2 つとも 1a に残った。ECS は、動いているタスクを自分では並べ直さない。AZ の偏りの直し（`AvailabilityZoneRebalancing`）は無効で、しかも `MaximumPercent` が 100 % だと効かない（ECS の資料）。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/failover-check.sh`（2026-11-21 11:33:50〜11:42 UTC）。結果は `local/run/failover/20261121T113350Z/result.md`。
+- 呼んだ数は `/edge-point` と discovery が 209 回ずつ。失敗は discovery の 1 回（状態 000）。
+- 資料: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-rebalancing.html （2026-11-21 に読んだ）。
+
+</details>
+
+### 4-29. auth の 2 タスクは、同じ署名鍵（同じ鍵の ID）を持った
+**結論:** auth が起動するときに、署名鍵の ID（公開鍵のサムプリント）をログに出すようにした。2 つのタスクのログは、どちらも `shared=true` で、鍵の ID が同じだった。片方が出したトークンを、もう片方が確かめられる鍵の形である。実際にトークンを出して、もう片方で確かめたのではない（D1-a2 で、BFF がトークンを交換するときに確かめる）。plan.md の D1-a1 の予測 5 は、鍵の形までを確かめた。
+
+<details>
+<summary>根拠</summary>
+
+- auth のログの `signing key: shared=true, kid=...`（2026-11-21 12:2x UTC、コミット `4d80532`）。2 つのタスクの kid が一致した。
+
+</details>
+
+### 4-30. AZ の偏りの直しを有効にすると、偏ったタスクを ECS が並べ直した。`MaximumPercent` を 200 % にすると、ローリングアップデートの間にインスタンスが 1 台増えた
+**結論:** 4 つのサービスで `AvailabilityZoneRebalancing` を有効にし、`MaximumPercent` を 200 % にした。デプロイのあと 1 つの AZ に偏った edge-check を、ECS は、もう一方の AZ に新しいタスクを起動してから古いタスクを止める形で、並べ直した。並べ直しの間も、タスクは 2 つ以上動いていた。偏りを見つけるまでには、サービスが安定してから 15 分ほどかかった。その間に偏った側の AZ が止まると、そのサービスは止まる。
+
+`MaximumPercent` を 200 % にしたので、ECS は、古いタスクを止める前に、新しいタスクを 1 つ多く起動しようとした。配置制約が 1 台に 1 つの spire-server は、2 台では置けず、キャパシティプロバイダーがインスタンスを 3 台目まで増やした。止まらずに更新できる代わりに、更新の間の時間と費用が少し増える。
+
+<details>
+<summary>根拠</summary>
+
+- edge-check のサービスの記録（2026-11-21、日本時間）: 21:29:13 `has reached a steady state`、21:44:42 `is not AZ balanced with 2 tasks in ap-northeast-1a, 0 tasks in ap-northeast-1c. AZ Rebalancing in progress.`、21:44:42 `has started 1 tasks in ap-northeast-1c to AZ Rebalance`、21:45:21 `has stopped 1 running tasks in ap-northeast-1a due to AZ Rebalancing`、21:45:32 `stopped AZ Rebalancing.`
+- インスタンスの数: `aws autoscaling describe-auto-scaling-groups` で、spire-server のローリングアップデートの間に 2 台から 3 台になった（コミット `4d80532` のデプロイ）。
+- 資料: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-rebalancing-event-messages-list.html （2026-11-21 に読んだ）。似た例として、Classmethod の記事（https://dev.classmethod.jp/articles/amazon-ecs-az-rebalancing-speeds-mean-time-recovery-event ）は、Fargate で「初回デプロイから 15 分後ほど」に並べ直したと書いている。
+
+</details>
+
+### 4-31. Aurora と冗長化を足しても、インスタンスが 0 の状態から約 3 分半〜4 分で使えた。Aurora は、つながりがなくなって 5 分ほどで一時停止し、再開は 5 秒ほどだった
+**結論:** D1-a1 の作り（Aurora、SPIRE server と Keycloak と auth の 2 タスク）で、3 回測った。1 回ごとに、インスタンスを 0 にし、Aurora が 0 ACU になるのを待ってから、D0-b と同じ定義で測った。終点は 228 秒、234 秒、210 秒で、3 回とも 300 秒以内、毎回 2 つの AZ が現れた。plan.md の D1-a1 の予測 2 のとおりだった。終点を決めたのは、3 回とも auth の起動だった。D0-b（184〜246 秒。[4-21](#4-21-入口を-web-functions-のリバースプロキシにしてもインスタンスが-0-の状態から約-34-分で使え2-つの-az-のどちらのインスタンスにも届いたインスタンスが-0-の間ディストリビューションは-503-を返した)）と比べて、ほとんど延びなかった。
+
+Aurora は、インスタンスが 0 になってから 220〜307 秒で 0 ACU になった。タスクはインスタンスより先に止まるので、最後のつながりが切れてから 5 分ほどと見られ、予測 1 のとおりだった。再開は、db-init の待ちが 0〜1 回（1 回 5 秒）で通り、予測の約 15 秒より短かった。
+
+<details>
+<summary>根拠</summary>
+
+- コマンド: `aws/scale.sh down`、CloudWatch の `ServerlessDatabaseCapacity`（1 分ごとの最小値）が 0 になるまで待つ、`aws/d0-measure.sh`（2026-11-21 12:46〜13:24 UTC、コミット `4d80532` の作り）。結果は `local/run/d0/20261121T125427Z`、`20261121T130611Z`、`20261121T131739Z` の `result.md`。
+- 内訳（始点からの秒。1 回目、2 回目、3 回目）: インスタンスが ASG に加わった 117、134、106。CloudFront を通して Keycloak が応えた 200、206、186。auth の起動（ログの時刻）228、234、210。
+- db-init のログ: 1 回目は 2 つとも 1 回待って +191 秒で終わった。2 回目は片方が 1 回待った。3 回目は 2 つとも待たずに +180 秒で終わった。
 
 </details>
 
