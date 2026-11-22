@@ -47,7 +47,7 @@ gekko_11 の 7 つのサービス（gekko_11 の architecture の 2-1 節）は�
 
 | 点 | gekko_11 | 段 D | 替える理由 |
 |---|---|---|---|
-| エンドポイントの確かめ | 各 Pod の Envoy と token-guard（gekko_11 の D-16） | アプリの中。TypeScript のサービスは token-guard をライブラリとして読み、Java のサービスは Spring Security、Python の事務サービスは自前の確かめで、同じ判定をする | bridge モードでは、サイドカーの後ろのアプリにも直接届く |
+| エンドポイントの確かめ | 各 Pod の Envoy と token-guard（gekko_11 の D-16） | アプリの中。TypeScript のサービスは token-guard をライブラリとして読み、Java の保険会社のシステムは servlet のフィルターと nimbus-jose-jwt（計画では Spring Security と書いた。design-decisions の判断 50）、Python の事務サービスは自前の確かめで、同じ判定をする | bridge モードでは、サイドカーの後ろのアプリにも直接届く |
 | 入口の振り分け | 入口の Envoy が、名前で振り分ける（gekko_11 の D-25） | CloudFront から呼ぶ入口のリバースプロキシ（Lambda の Web Functions）が、パスで振り分ける。`/login` は Keycloak、`/audit` は監査の画面、それ以外は顧客のアプリ | パスキーの RP ID が、ディストリビューションのドメイン名 1 つしかない |
 | 記録の集約 | Alloy と、名前空間ごとの Loki（gekko_11 の D-30） | CloudWatch Logs。書いた者は、ECS が付けるログストリームの名前で決める | 固定費のない、AWS の標準の仕組みで足りる |
 | データ | 永続のボリューム | Aurora Serverless v2 に置き、全部のサービスで共有する。インスタンスを 0 にしても残る | サービスを複数のタスクにするには、共有の保存先が要る。持ち主の決定（4-6） |

@@ -30,7 +30,7 @@ npm test
 期待する結果: 型の検査（Node と、顧客のアプリの画面）と lint が通り、テストが `76 passed` になる。続けて、事務サービス（Python）の lint と試験が `21 passed` になり、監査サービス（Go）の試験が `ok` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバーとログインサーバーの拡張（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
 
 ## ログインをローカルで確かめる
-`local/up.sh` は、PostgreSQL、SPIRE、入口のリバースプロキシと、次のサービスを立てる。ログインサーバー（`services/keycloak`）、認可サーバー（`services/auth`）、顧客のアプリ（`services/customer-app`）、営業 AI エージェント、事務サービス、保険会社のシステムである。入口は `http://gekko13.localhost:18000/` で、固定の利用者（alice など）のパスワードは `demo` である。確かめは、Docker の Playwright のブラウザと仮想の認証器で回す。
+`local/up.sh` は、PostgreSQL、SPIRE、入口のリバースプロキシと、次のサービスを立てる。ログインサーバー（`services/keycloak`）、認可サーバー（`services/auth`）、顧客のアプリ（`services/customer-app`）、営業 AI エージェント、事務サービス、保険会社のシステム、監査サービスである。入口は `http://gekko13.localhost:18000/` で、固定の利用者（alice など）のパスワードは `demo` である。確かめは、Docker の Playwright のブラウザと仮想の認証器で回す。
 
 ```sh
 local/up.sh
@@ -87,10 +87,10 @@ aws/scale.sh up      # 自動の増減を 2〜4 に戻し、spire-server、auth�
 aws/scale.sh down    # 自動の増減を 0 にし、DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ
 ```
 
-期待する結果: `up` は数分で `安定した（台 2 台）` と出る。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の登録と、Keycloak と auth のデータは Aurora に残り、ルート CA も変わらないので、`up` のあとも作り直しは要らない。Aurora が止まっていれば、SPIRE server のタスクの db-init が、再開するまで待つ（約 15 秒）。`up` で戻すタスク数は、`GEKKO13_EDGE_TASKS` で変えられる。
+期待する結果: `up` は数分で `安定した（台 N 台）` と出る。主の流れのサービスを足してからは、起動の途中で 6 台まで増え、安定すると 3 台ほどになった（2026-11-22）。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の登録と、Keycloak と auth のデータは Aurora に残り、ルート CA も変わらないので、`up` のあとも作り直しは要らない。Aurora が止まっていれば、SPIRE server のタスクの db-init が、再開するまで待つ（約 15 秒）。
 
 ## 入口（CloudFront とリバースプロキシ）
-入口は、CloudFront のディストリビューション（スタック `gekko13-edge`）から、入口のリバースプロキシ（スタック `gekko13-entry`、Lambda の Web Functions）を通る。CloudFront は OAC でリクエストに署名し、リバースプロキシは IAM の認証で、このディストリビューションからのリクエストだけを受ける。リバースプロキシは、パスで送り先を決める。`/login` と `/login/*` は keycloak へ、それ以外は顧客のアプリ（customer-app）へ送る（段 D の D1-a2）。edge-check は、入口から外した。送り先は、名前空間 `svc.gekko13.internal` の SRV で見つける。ECS が正常なタスクを SRV に登録するので、インスタンスが入れ替わっても手で向け直すことはない。
+入口は、CloudFront のディストリビューション（スタック `gekko13-edge`）から、入口のリバースプロキシ（スタック `gekko13-entry`、Lambda の Web Functions）を通る。CloudFront は OAC でリクエストに署名し、リバースプロキシは IAM の認証で、このディストリビューションからのリクエストだけを受ける。リバースプロキシは、パスで送り先を決める。`/login` と `/login/*` は keycloak へ、`/audit` と `/audit/*` は監査サービス（insurer-audit）へ、それ以外は顧客のアプリ（customer-app）へ送る。送り先は、名前空間 `svc.gekko13.internal` の SRV で見つける。ECS が正常なタスクを SRV に登録するので、インスタンスが入れ替わっても手で向け直すことはない。
 
 起動したあとに、入口を通して届くかを確かめる。
 
@@ -110,7 +110,7 @@ DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/lo
   node scripts/ui-login.ts "https://$D"
 ```
 
-主の流れ（段 D の D1-a2-2）は、手元と同じ `scripts/ui-flow.ts` に入口を渡して確かめる（固定の利用者のパスワードの渡し方は上と同じ）。
+主の流れと監査の画面は、手元と同じ `scripts/ui-flow.ts` に入口を渡して確かめる（固定の利用者のパスワードの渡し方は上と同じ）。
 
 レルムの JSON（`services/keycloak/realm/insurer.json`）を直したときは、`aws/reset-keycloak.sh --yes` で Aurora の Keycloak のデータベースを作り直し、取り込み直させる。利用者が登録したパスキーとセッションは消え、戻せない。回す前に持ち主の承認を得る。作り直したあとは、auth のタスクを入れ替える（`aws ecs update-service --service auth --force-new-deployment`）。auth は、作り直す前の Keycloak の管理のトークンを持ち続け、連絡先とパスキーの一覧の呼び出しが 401 になる。
 
@@ -192,8 +192,8 @@ SPIRE のルート CA を消すと、次に作るときは新しい根になる�
 - **`aws/deploy.sh` が「Templates with a size greater than 51,200 bytes」で止まる:** 送る前のコメントの除去が効いていない。`aws/deploy.sh` は ECS とアプリのテンプレートの行頭のコメントを除いてから送る。コメントでない行が増えて 51,200 バイトを超えたら、テンプレートをさらに分ける（[findings 4-12](findings.md#4-12-日本語のコメントを含めた-ecs-のテンプレートは直接送れる大きさ51200-バイトを超えた)）。
 - **起動テンプレートを変えたのに、インスタンスが古いまま:** スタックの更新の前から起きていたインスタンスは、古い起動テンプレートのまま残る。インスタンスの大きさを変えたときは、`aws/scale.sh down` で 0 にしてから起動する（[findings 4-14](findings.md#4-14-ecs-のスタックの更新が止まる前に起きたインスタンスは古い起動テンプレートのまま残った)）。
 - **auth が「Error reading certificate or key from file」で起きない:** インスタンスの helper の設定（`/etc/gekko13/spire/helper.conf`）に `key_file_mode = 0640` がない。古い起動テンプレートのインスタンスで起きる。インスタンスを入れ替える（[findings 4-13](findings.md#4-13-spiffe-helper-は-root-で動き鍵を-0600-で書いたのでroot-でない利用者のアプリは鍵を読めなかった)）。
-- **インスタンスが予告なく入れ替わった:** スポットの中断か、中断の危険が高まったインスタンスの入れ替え（CapacityRebalance）である。ECS のエージェントが、予告を受けてタスクを別のインスタンスへ逃がす。1 タスクのサービス（spire-server、auth、keycloak）は、再起動するまで 3〜4 分止まり、Keycloak の利用者とパスキーは消える（推定）。`aws autoscaling describe-scaling-activities` で理由を見る。
-- **CloudFront を通すと 503 の `no target` になる:** リバースプロキシが、送り先の SRV を見つけられない。タスクが正常でないか、まだ起きていない。`aws servicediscovery get-instances-health-status --service-id <id>` で見る（id は `gekko13-apps` の出力）。タスクのヘルスチェックのパスが 200 を返すかを確かめる。
+- **インスタンスが予告なく入れ替わった:** スポットの中断か、中断の危険が高まったインスタンスの入れ替え（CapacityRebalance）である。ECS のエージェントが、予告を受けてタスクを別のインスタンスへ逃がす。1 タスクのサービス（主の流れの 5 つ）は、別のインスタンスで起き直すまで止まり、メモリに持つ状態（セッション、会話、契約）は消える（推定。冗長化は D1-a3 で行う）。spire-server、auth、keycloak は 2 タスクで、データは Aurora に残る。`aws autoscaling describe-scaling-activities` で理由を見る。
+- **CloudFront を通すと 503 の `no target` になる:** リバースプロキシが、送り先の SRV を見つけられない。タスクが正常でないか、まだ起きていない。`aws servicediscovery get-instances-health-status --service-id <id>` で見る（id は `gekko13-apps` か `gekko13-flow` の出力）。タスクのヘルスチェックのパスが 200 を返すかを確かめる。
 - **CloudFront を通すと 502 の `bad gateway` になる:** リバースプロキシが、見つけたタスクにつながらない。リバースプロキシの記録の `upstream-failed` を見る。インスタンスのグループが、リバースプロキシのグループから動的なポート（32768〜65535）を受けているかを確かめる。
 - **CloudFront を通すと 403 になる:** リバースプロキシのリソースポリシーが、このディストリビューションを許していない。`aws lambda-web get-resource-policy` で、`aws:SourceArn` がディストリビューションの ARN かを確かめる。
 - **アプリのスタックの作成が、サービスを作るところで止まる:** 基盤のスタックから消したサービスが、まだ DRAINING で残っているおそれがある（推定）。`aws/deploy.sh` は 10 分まで待つ。それでも止まれば、`aws ecs describe-services` で状態を見て、待ってから回し直す。
