@@ -1,0 +1,23 @@
+// 署名の揃った書類を、事務サービスへ提出する。提出するかは LLM（台本）が決め、運ぶのは、この決まった処理である。
+// gekko_11 の vulnerable の乗っ取りの再現（手口 A8）は、写していない。
+import { callMcp, type ToolResult } from "./mcp.ts";
+import type { Thread } from "./thread.ts";
+
+export async function submitSigned(t: Thread, call: typeof callMcp = callMcp): Promise<ToolResult> {
+  const { intent, intentAssertion, application, assertion } = t.signed;
+  if (!intent || !intentAssertion || !application || !assertion) {
+    return { isError: true, body: { error: "意向確認書面と申込書の署名が揃っていない" } };
+  }
+  const sent = application;
+  const r = await call(t.ctx, "submit_application", {
+    intent,
+    intent_assertion: intentAssertion,
+    application: sent,
+    assertion,
+    offer_jws: t.offer?.offerJws,
+  });
+  t.signed = {};
+  const refused = r.isError || (r.body?.status ?? 0) >= 400 || Boolean(r.body?.error);
+  t.record("agent_tool", { name: "submit_application", nonce: sent.nonce, status: refused ? "refused" : "ok", contract_id: r.body?.contract?.contractId, error: r.body?.error });
+  return r;
+}

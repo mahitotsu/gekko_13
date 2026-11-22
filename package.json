@@ -6,7 +6,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "tsc --noEmit && tsc --noEmit -p services/customer-app/web && eslint . && vitest run && scripts/check-templates.sh",
+    "test": "tsc --noEmit && tsc --noEmit -p services/customer-app/web && eslint . && vitest run && scripts/test-python.sh && scripts/check-templates.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "local:up": "local/up.sh",
@@ -14,16 +14,18 @@
     "scenarios": "node scripts/scenarios.ts"
   },
   "dependencies": {
+    "@ag-ui/core": "1.0.3",
     "@hono/node-server": "2.1.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@simplewebauthn/server": "13.3.3",
     "canonicalize": "5.1.0",
     "hono": "4.13.0",
     "jose": "^6.2.17",
-    "openid-client": "6.8.1"
+    "openid-client": "6.8.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@ag-ui/client": "1.0.3",
-    "@ag-ui/core": "1.0.3",
     "@eslint/js": "^9.39.5",
     "@simplewebauthn/browser": "13.2.2",
     "@tailwindcss/vite": "4.3.3",

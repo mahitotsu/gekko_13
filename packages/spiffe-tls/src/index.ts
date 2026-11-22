@@ -37,6 +37,14 @@ export function peerIdOf(req: IncomingMessage): string | undefined {
   return spiffeIdOf(cert?.subjectaltname);
 }
 
+/** 相手の証明書の x5t#S256（RFC 8705。DER の SHA-256 の base64url）。トークンの cnf と照らす。 */
+export function peerX5tS256(req: IncomingMessage): string | undefined {
+  const socket = req.socket as TLSSocket;
+  if (!socket.authorized) return undefined;
+  const raw = socket.getPeerCertificate()?.raw;
+  return raw ? createHash("sha256").update(raw).digest("base64url") : undefined;
+}
+
 async function readSvid(dir: string): Promise<Svid> {
   const [cert, key, bundle] = await Promise.all(
     ["svid.pem", "svid_key.pem", "svid_bundle.pem"].map((f) => readFile(join(dir, f), "utf8")),

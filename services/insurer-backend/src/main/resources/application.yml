@@ -1,0 +1,34 @@
+# 保険会社のシステム（段 D の D1-a2-2）。SVID で TLS を自分で終え、相手の証明書を必ず求める（client-auth: need）。
+# spiffe-helper が SVID_DIR に書き、入れ替わったら読み直す（reload-on-update）。受け口は 9443 だけ。
+server:
+  port: ${APP_PORT:9443}
+gekko:
+  trust-domain: ${TRUST_DOMAIN:gekko13.internal}
+  issuer: ${ISSUER:https://auth:8443}
+  auth-url: ${AUTH_URL:https://auth:8443}
+  customer-app-url: ${CUSTOMER_APP_URL:https://customer-app-notice:9443}
+  rp-id: ${RP_ID:localhost}
+  origins: ${WEBAUTHN_ORIGINS:http://localhost:4000}
+---
+# SVID の TLS。試験（test のプロファイル）では、SVID のファイルがないので使わない
+spring:
+  config:
+    activate:
+      on-profile: "!test"
+  ssl:
+    bundle:
+      watch:
+        file:
+          quiet-period: 1s
+      pem:
+        svid:
+          reload-on-update: true
+          keystore:
+            certificate: file:${SVID_DIR:/svid}/svid.pem
+            private-key: file:${SVID_DIR:/svid}/svid_key.pem
+          truststore:
+            certificate: file:${SVID_DIR:/svid}/svid_bundle.pem
+server:
+  ssl:
+    bundle: svid
+    client-auth: need

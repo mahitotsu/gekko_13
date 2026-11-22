@@ -1,0 +1,154 @@
+{
+  "description": "サービスのトークン（B、C）の受け口の確かめの共通の例。scripts/make-vectors.ts が作る。鍵は試験の専用。確かめる順: 相手の SPIFFE ID → Authorization: Bearer → 署名 → typ → iss → aud → exp → cnf の x5t#S256 と相手の証明書",
+  "now": 1795000000,
+  "service": "insurer-mcp",
+  "issuer": "https://auth:8443",
+  "allowedCallers": [
+    "spiffe://gekko13.internal/svc/sales-agent"
+  ],
+  "jwks": {
+    "keys": [
+      {
+        "kty": "RSA",
+        "n": "wF-mVfU-VHiPGcIxy_aBI-XhHTOTDmOiu8GT_wqiC-UekCaMnxkMGYKWgyGVoNjS61Z-Js7ffoqpl2mC_KA6YBatmXTt3fpHV4n9LWzcXa_hcUtX5jyHPf0s3-q_2mLoUIIBqjYrqFExavSkBM4ch7G_bBRL6ncSCXf0pCLxhz0t9U_bCwq9XKHJmfJXPBlDz9a8K1FOOq0IKt8v53dg9tTb2Lb8fbxyr92TjdAvjEu3pUnRoqXXMVn8Pt007ekA6EU6aUtgbCbzDl6k1jEYxYy_7e-ptjtmjNbYyx4c-WptgucpJji9KytVYk3mpAeW79fif-yjrm57NavO_XHmFQ",
+        "e": "AQAB",
+        "kid": "vectors",
+        "alg": "RS256",
+        "use": "sig"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "正しいトークン",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.EOO3G9JHLrpawEfSGHyOLKlKYwygor4ptjOjdAxbINHv_vfWO9RX7Z4e8hZ-JYCWqPzT4j_2A0bEw1jFxzHHPWnZ6-rye9FWfn6G9yROsWB6Doxj_quG7uD--2TuKLnm8N4BG6t0BUQsF7lhh1o6ee19i3PH2EWSFhe5Xas8WBL22lQo1nrvCLqRRw_GVc47n9BFnO7Ek-x4NEQ5MJukpGIVzDtPzdM__GMYlORd-e--sjCusQZs1GKyvtRr8GLSeQGLnAfwXO6WXRq2ttntaLYzcIA0VL6fSBRTIhZ-b3ofp_ZSy698s1Tkq7DQnUXQP_q8Oxp1jzNXmPu2NNlRBw",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "ok"
+    },
+    {
+      "name": "aud が配列で、自分を含む",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjpbImluc3VyZXItbWNwIiwib3RoZXIiXSwiaWF0IjoxNzk0OTk5OTkwLCJleHAiOjE3OTUwMDAwNjAsImp0aSI6InZlY3Rvci1qdGkiLCJzY29wZSI6ImFwcGx5IiwiY25mIjp7Ing1dCNTMjU2IjoicTVQZWVyQ2VydGlmaWNhdGVUaHVtYnByaW50MDAwMDAwMDAwMDAwMDAwMCJ9LCJhY3QiOnsic3ViIjoic2FsZXMtYWdlbnQifX0.ILY6_PUNs2ZTsY9aA4oYaW2HXragif1_ermWM2N3D1mZAgRAFqggBVdU_Tkt1_cGewOcFbjW89-tByYSoKzPDTgF_iGoBxlDrjEXPOEHmNx4QJRrshp3rATwJOwCEhIMHx1DwjP7P1rbfj4UK8VjGLmk5j_7G8cB3qkZBtasj-HnTrqxregATP8bWMug52Oxc3p3l_eHrETKXFgy4EPZiJkM_4YtC-S5AIRg9uOjEOeq2UyVni9v1OpCcVLEZ6Ll0vh0VJ7oS5U1dQS3xY-j-rvwsc1kWGN_ze7w2d3xEmZSnbbYjEKszwNYXoxFs0XJ9D3rtqTsNym56znDeIC6xQ",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "ok"
+    },
+    {
+      "name": "相手の証明書がない",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.EOO3G9JHLrpawEfSGHyOLKlKYwygor4ptjOjdAxbINHv_vfWO9RX7Z4e8hZ-JYCWqPzT4j_2A0bEw1jFxzHHPWnZ6-rye9FWfn6G9yROsWB6Doxj_quG7uD--2TuKLnm8N4BG6t0BUQsF7lhh1o6ee19i3PH2EWSFhe5Xas8WBL22lQo1nrvCLqRRw_GVc47n9BFnO7Ek-x4NEQ5MJukpGIVzDtPzdM__GMYlORd-e--sjCusQZs1GKyvtRr8GLSeQGLnAfwXO6WXRq2ttntaLYzcIA0VL6fSBRTIhZ-b3ofp_ZSy698s1Tkq7DQnUXQP_q8Oxp1jzNXmPu2NNlRBw",
+      "peer": {},
+      "expect": "no_peer"
+    },
+    {
+      "name": "呼んでよい相手ではない",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.EOO3G9JHLrpawEfSGHyOLKlKYwygor4ptjOjdAxbINHv_vfWO9RX7Z4e8hZ-JYCWqPzT4j_2A0bEw1jFxzHHPWnZ6-rye9FWfn6G9yROsWB6Doxj_quG7uD--2TuKLnm8N4BG6t0BUQsF7lhh1o6ee19i3PH2EWSFhe5Xas8WBL22lQo1nrvCLqRRw_GVc47n9BFnO7Ek-x4NEQ5MJukpGIVzDtPzdM__GMYlORd-e--sjCusQZs1GKyvtRr8GLSeQGLnAfwXO6WXRq2ttntaLYzcIA0VL6fSBRTIhZ-b3ofp_ZSy698s1Tkq7DQnUXQP_q8Oxp1jzNXmPu2NNlRBw",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/intruder",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "wrong_caller"
+    },
+    {
+      "name": "Authorization がない",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "no_token"
+    },
+    {
+      "name": "Bearer でない",
+      "authorization": "DPoP eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.EOO3G9JHLrpawEfSGHyOLKlKYwygor4ptjOjdAxbINHv_vfWO9RX7Z4e8hZ-JYCWqPzT4j_2A0bEw1jFxzHHPWnZ6-rye9FWfn6G9yROsWB6Doxj_quG7uD--2TuKLnm8N4BG6t0BUQsF7lhh1o6ee19i3PH2EWSFhe5Xas8WBL22lQo1nrvCLqRRw_GVc47n9BFnO7Ek-x4NEQ5MJukpGIVzDtPzdM__GMYlORd-e--sjCusQZs1GKyvtRr8GLSeQGLnAfwXO6WXRq2ttntaLYzcIA0VL6fSBRTIhZ-b3ofp_ZSy698s1Tkq7DQnUXQP_q8Oxp1jzNXmPu2NNlRBw",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "no_token"
+    },
+    {
+      "name": "別の鍵の署名",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.SnTVkJlJ2RE4S6qhzfRRx_fcQ-rO7b_itZ2C_y1h6oNwwakqC4FB93x9FNDbbJqHdXkBS-yLNwQxhrftRK8PFIMZ-_Hpg-ulFZ5Ioswx8sL7WL33a56y1VVEhHW2LFqzQ4PwrjA9HtmylGQHWQTFJDkcbZMUs_MMyqiV8XIT6lIyA997Cjh3kzVSSXKMfL5bJp9284s1RX4W-6xIgUx80N8jQ5kHiuk1ajPoSXIp7dzFgIW3a_XaHO6P-JQt4KF1bHD85eIjrVLcMo00gk5pYgEJS00d1IgijSNKlluRVXrIs4zrNtkr5_CIy4fykuHjLkUWt3f7PPWa_PG5Obfn3A",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "bad_signature"
+    },
+    {
+      "name": "中身を書き換えた",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6Im1hbGxvcnkiLCJhdWQiOiJpbnN1cmVyLW1jcCIsImlhdCI6MTc5NDk5OTk5MCwiZXhwIjoxNzk1MDAwMDYwLCJqdGkiOiJ2ZWN0b3ItanRpIiwic2NvcGUiOiJhcHBseSIsImNuZiI6eyJ4NXQjUzI1NiI6InE1UGVlckNlcnRpZmljYXRlVGh1bWJwcmludDAwMDAwMDAwMDAwMDAwMDAifSwiYWN0Ijp7InN1YiI6InNhbGVzLWFnZW50In19.EOO3G9JHLrpawEfSGHyOLKlKYwygor4ptjOjdAxbINHv_vfWO9RX7Z4e8hZ-JYCWqPzT4j_2A0bEw1jFxzHHPWnZ6-rye9FWfn6G9yROsWB6Doxj_quG7uD--2TuKLnm8N4BG6t0BUQsF7lhh1o6ee19i3PH2EWSFhe5Xas8WBL22lQo1nrvCLqRRw_GVc47n9BFnO7Ek-x4NEQ5MJukpGIVzDtPzdM__GMYlORd-e--sjCusQZs1GKyvtRr8GLSeQGLnAfwXO6WXRq2ttntaLYzcIA0VL6fSBRTIhZ-b3ofp_ZSy698s1Tkq7DQnUXQP_q8Oxp1jzNXmPu2NNlRBw",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "bad_signature"
+    },
+    {
+      "name": "署名なし（alg が none）",
+      "authorization": "Bearer eyJhbGciOiJub25lIiwidHlwIjoiYXQrand0In0.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "bad_signature"
+    },
+    {
+      "name": "typ が at+jwt でない",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.N3mkcWFVXfvpNYIyOEnzwzb-phg5D_gyfBS8cBX1APwZvaWB9KJxkrM6sAu-tXeqPY-ot76oKUbNiiAbB9RLm2a6gm9WcE3-f3A82FemK3tjhwZAPPfIW6_sNGXOczKfRB1v5Mgq6yrKAQGJTHD0Bvu6ZBmZGX6SzPBdK4-XM7R4KZwKjuR2vwCypzwD2WVNRU9r0ujJ5ev7o4BSKPRocEj2j0cPpAt3fuq7GvnWtbphDGJe_LPuYuzcfpBV8DL6vLyzapedth3QoOF4QQrXLwe3Dx_gz8ezYP6URm-Tp25vNDYv365iyRfgX4QdUVap2kzWaRGB4zrC8xgG_Bjl3w",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "bad_typ"
+    },
+    {
+      "name": "発行者が違う",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2xvZ2luLmV4YW1wbGUvcmVhbG1zL2luc3VyZXIiLCJzdWIiOiJhbGljZSIsImF1ZCI6Imluc3VyZXItbWNwIiwiaWF0IjoxNzk0OTk5OTkwLCJleHAiOjE3OTUwMDAwNjAsImp0aSI6InZlY3Rvci1qdGkiLCJzY29wZSI6ImFwcGx5IiwiY25mIjp7Ing1dCNTMjU2IjoicTVQZWVyQ2VydGlmaWNhdGVUaHVtYnByaW50MDAwMDAwMDAwMDAwMDAwMCJ9LCJhY3QiOnsic3ViIjoic2FsZXMtYWdlbnQifX0.M8O7xql_AQF-A1EjisA22qsBDOuS2Palnn-gLksocuKWswjIETtHs0n087KoNhsBux_oV1kM84qqWTKRdBSKkprmkZKYqxWWaxhJmw3xNaSDzCje616V0zJJdRuERPj_uikOgbuDSjpSNuh4IWVw7a5ZZfXUbORz1Jb9sl3QRWH463WOi55m8yFOSJeNZdtlGcukxRVGEUfqaNXx0e6vChFkrRSx4HF2YAB1zSJ7AbUWlmylSCeeEZrjI51-rAGJj0ZW4BY8ji80KKqhlUwdgSfShKZluHZH3ebU6aVDrHsmcD8KbX81ICy83lhOxzb0pppMaglC4zDO1mHdPZTHEQ",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "bad_issuer"
+    },
+    {
+      "name": "宛先が違う",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1iYWNrZW5kIiwiaWF0IjoxNzk0OTk5OTkwLCJleHAiOjE3OTUwMDAwNjAsImp0aSI6InZlY3Rvci1qdGkiLCJzY29wZSI6ImFwcGx5IiwiY25mIjp7Ing1dCNTMjU2IjoicTVQZWVyQ2VydGlmaWNhdGVUaHVtYnByaW50MDAwMDAwMDAwMDAwMDAwMCJ9LCJhY3QiOnsic3ViIjoic2FsZXMtYWdlbnQifX0.ZEbSIHgw4dHuBh5RubLKJXVZ2q0HTgPXv1B3PAcr-3n-qBRmn5y5sj1yHdwq8HCgiGwoXTzdsbtz1wfsFNf2o1rgOeZtjweLWHViS91c9wjyw6bFHonuU5Mp8byXdqHTVZZ6VNJ5dQVCAgMlnpKD1AbWYpPdISLeFFUKNiBE9scC85hUdMfakqH5XoVyghFljZMHcNqW-jZjEGDWU45x_2TXqNNNeDcPS4T23KNDw86aGJkzD84uIHxiyc3N-xo_LbelFstIyNbsMVvPvmQRmtXXSkDNNkvOTt8EdQQayploVQTvnDtv95FQ01KhNnFlv7ylz4fPF_5Ley34X6kHqg",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "bad_audience"
+    },
+    {
+      "name": "期限が切れた",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk4ODAsImV4cCI6MTc5NDk5OTk5OSwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJxNVBlZXJDZXJ0aWZpY2F0ZVRodW1icHJpbnQwMDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.rJXxoGktNl1KJGhzh8hh5kUEC-msK8aI7RFAW95XyRFtn-5a-8v32CGhS17TQ18XTy00d6bK_VS7vsv5RMD_it9TsF75Scav2EebBDhFZeWECNRu0J-ZN3V-QCv0o0osfaS2nmyZnO22HPEU6lUo9aLl2EhAhILjb5yKN91oNGZQeI4U92AHMObOwxYnMYHzONYe4ma1pGqF9efW4HxMejiWGJJV86UoYVjm9AGSAXeNZtSOXrVgbYJtCP4VyTdeO8jAZv1TnCPQctqQosCck9uCncqv0-fRqG4iECAQoYEr1nbUKAfqysdzTHmSgeRCgyIW3h5VtW01dV2v6P2Dmg",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "expired"
+    },
+    {
+      "name": "別の証明書に結ばれている",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJjbmYiOnsieDV0I1MyNTYiOiJ6ek90aGVyQ2VydGlmaWNhdGVUaHVtYnByaW50MDAwMDAwMDAwMDAwMDAwIn0sImFjdCI6eyJzdWIiOiJzYWxlcy1hZ2VudCJ9fQ.VMg6fmGjGm37ANQaHqfS6dcKKH4I36V_ey4fUHjAqmA2MR31pyNDBNi1neVMUUdtbiHYsVkFawWsmQ0q6QG0fCuLeK-OOwHWx5GXTp1GG4qGSbuLbXl7OL7Gll-VjPLOWZClKFUTYWavddlyd3MshWRwnRw3g7qtNVcmVkaJ41QyRtH6IYU0JebpK_k8uX3UJf1dzKgsuzhZpoHsgEhQMC41Pn7tr9xEDTGvPpRDq-_0a0pFpj1Trv-LFyLbA_afLELYmDkMpwsgsD-alqIlepXk2_i_wjMFqEqyNLMo-1_4MszhqTkb-xChJ13ToUGRgtklo5tY72yIcQifs0MVJA",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "not_bound"
+    },
+    {
+      "name": "証明書に結ばれていない",
+      "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6InZlY3RvcnMiLCJ0eXAiOiJhdCtqd3QifQ.eyJpc3MiOiJodHRwczovL2F1dGg6ODQ0MyIsInN1YiI6ImFsaWNlIiwiYXVkIjoiaW5zdXJlci1tY3AiLCJpYXQiOjE3OTQ5OTk5OTAsImV4cCI6MTc5NTAwMDA2MCwianRpIjoidmVjdG9yLWp0aSIsInNjb3BlIjoiYXBwbHkiLCJhY3QiOnsic3ViIjoic2FsZXMtYWdlbnQifX0.f-GJ9Vy2z8K4bGgTAZR77ywDHwuJcqVWITeU1rgafyz5Yt3rV2iQ4l74y0GB7SRwjp8-8JfQfHdsHKduR6m_jxQrZaxnBqkeqbIZVBBjWo2E28Oxa8SDahbUgTDhlpwtmdrjGAN2Zb8OA-NBskwXiPH1jqHGKkIofEdSOi1WqLHl2guXy61RpiW0f5u6yu7kli-Ckn-aMrf7a8Z7vyhHB2PWRub4rCYx4R-reOkF4sXcZL0itlpySHxoB5qBbYLsHWYiMJuyBs4KIeGTbEs7pjFn6Gom16G2ck9pKvG8XFW9YZtAx-rgnJR11qWQpWcRgISTGXrpRf4WjBMfhIw30g",
+      "peer": {
+        "spiffeId": "spiffe://gekko13.internal/svc/sales-agent",
+        "x5tS256": "q5PeerCertificateThumbprint0000000000000000"
+      },
+      "expect": "not_bound"
+    }
+  ]
+}

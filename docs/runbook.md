@@ -27,10 +27,10 @@
 ```sh
 npm test
 ```
-期待する結果: 型の検査（Node と、顧客のアプリの画面）と lint が通り、テストが `51 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバーとログインサーバーの拡張（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
+期待する結果: 型の検査（Node と、顧客のアプリの画面）と lint が通り、テストが `83 passed` になる。続けて、事務サービス（Python）の lint と試験が `21 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバーとログインサーバーの拡張（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
 
 ## ログインをローカルで確かめる（段 D の D1-a2-1）
-`local/up.sh` は、PostgreSQL、SPIRE、ログインサーバー（`services/keycloak`）、認可サーバー（`services/auth`）、顧客のアプリ（`services/customer-app`）、入口のリバースプロキシを立てる。入口は `http://gekko13.localhost:18000/` で、固定の利用者（alice など）のパスワードは `demo` である。確かめは、Docker の Playwright のブラウザと仮想の認証器で回す。
+`local/up.sh` は、PostgreSQL、SPIRE、入口のリバースプロキシと、次のサービスを立てる。ログインサーバー（`services/keycloak`）、認可サーバー（`services/auth`）、顧客のアプリ（`services/customer-app`）、営業 AI エージェント、事務サービス、保険会社のシステムである。入口は `http://gekko13.localhost:18000/` で、固定の利用者（alice など）のパスワードは `demo` である。確かめは、Docker の Playwright のブラウザと仮想の認証器で回す。
 
 ```sh
 local/up.sh
@@ -39,7 +39,18 @@ docker run -d --rm --name gekko13-browser --network host --init --add-host gekko
 node scripts/ui-login.ts
 ```
 
-期待する結果: `1 パスワードでログイン`、`2 パスキーを登録`、`3 パスキーでログイン` の 3 行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。ログインサーバーの起動に 1 分ほどかかるので、`local/up.sh` の直後は失敗することがある。1 つのサービスだけを作り直すときは `local/up.sh <サービス>`（keycloak、auth、customer-app、entry）を回す。レルムの JSON を直したときは `local/reset-keycloak.sh` を回す（レルムは、すでにあれば取り込まない）。
+期待する結果: `1 パスワードでログイン`、`2 パスキーを登録`、`3 パスキーでログイン` の 3 行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。ログインサーバーの起動に 1 分ほどかかるので、`local/up.sh` の直後は失敗することがある。1 つのサービスだけを作り直すときは、`local/up.sh <サービス>` を回す。サービスの名前は、`local/up.sh` の冒頭にある。レルムの JSON を直したときは `local/reset-keycloak.sh` を回す（レルムは、すでにあれば取り込まない）。
+
+## 主の流れをローカルで確かめる（段 D の D1-a2-2）
+前の節のブラウザを立てたまま、主の流れの確かめを回す。営業 AI エージェントは台本で動く。
+
+```sh
+node scripts/ui-flow.ts
+```
+
+期待する結果: `1 ログイン` から `7b 照合（受信箱と契約）` までの行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。事務サービス（Python）の試験は `scripts/test-python.sh` で回る（`npm test` も回す）。保険会社のシステム（Java）の試験は、イメージのビルドの中で回る。
+
+ホストが眠ったあとは、手元の SPIRE の agent が立ち直れず、SVID が書かれないことがある（[findings 4-36](findings.md#4-36-手元で主の流れの-27-段がenvoy-なしで通ったサービスのトークンの確かめはtypescriptpythonjava-の-3-つで共通の例-15-件の判定が全部一致した)）。そのときは `local/down.sh` と `local/up.sh` で作り直す。
 
 ## AWS で作る
 作る前に、変更をコミットしておく。イメージのタグは、イメージごとの材料のコミットした中身から作る（`scripts/image-tag.sh`）。材料にコミットしていない変更があると、`aws/deploy.sh` は `材料にコミットしていない変更がある` と出して止まる。材料が変わらないイメージは作り直さず、そのタスクも入れ替わらない。どのコミットから作ったかは、イメージのラベル `org.opencontainers.image.revision` に残る。

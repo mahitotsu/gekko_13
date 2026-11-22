@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ローカルで、ECS on EC2 の 1 台の構成を docker run で模す（段 D の D1-a2-1）。秘密と SVID は local/run/ に置く（git に入れない）。
+# ローカルで、ECS on EC2 の 1 台の構成を docker run で模す（段 D の D1-a2）。秘密と SVID は local/run/ に置く（git に入れない）。
 # - SVID を使うサービスは、ECS のタスクと同じく「app」と「svid-helper（spiffe-helper）」の 2 つのコンテナにする。
 # - 各コンテナには、ECS のエージェントが付けるのと同じ名前のラベルを付ける。SPIRE の登録はこのラベルで選ぶ。
 # - SVID は svid-helper がホストのディレクトリに書き、app は読むだけにする。app は agent のソケットを持たない。
@@ -7,7 +7,7 @@
 #   /login はログインサーバー、それ以外は顧客のアプリ。Chromium は *.localhost をループバックに解決する。
 # 手順: PostgreSQL → SPIRE の server → バンドルと join token → 登録 → agent → サービス → 入口。
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
-#   サービスは keycloak、auth、customer-app、entry）
+#   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、entry）
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$(pwd)
@@ -21,12 +21,14 @@ HELPER=ghcr.io/spiffe/spiffe-helper:0.11.0
 IMAGE=gekko13/node:local
 AUTH_IMAGE=gekko13/auth:local
 KEYCLOAK_IMAGE=gekko13/keycloak:local
+MCP_IMAGE=gekko13/insurer-mcp:local
+BACKEND_IMAGE=gekko13/insurer-backend:local
 # 入口の origin。AWS ではディストリビューションのドメイン名
 ORIGIN=http://gekko13.localhost:18000
 RP_ID=gekko13.localhost
 ISSUER=$ORIGIN/login/realms/insurer
 # SVID を使うサービス
-SERVICES=(auth customer-app)
+SERVICES=(auth customer-app sales-agent insurer-mcp insurer-backend)
 
 mkdir -p run/bundle run/helper
 for s in "${SERVICES[@]}"; do mkdir -p "run/svid/$s"; done
@@ -51,14 +53,19 @@ DEMO_PASSWORD=demo
 build_node() { docker build -q -t "$IMAGE" -f ../Dockerfile "$(../scripts/stage-image.sh)" >/dev/null; }
 build_auth() { docker buildx build -q --load -t "$AUTH_IMAGE" ../services/auth >/dev/null; }
 build_keycloak() { docker buildx build -q --load -t "$KEYCLOAK_IMAGE" ../services/keycloak >/dev/null; }
+build_mcp() { docker build -q -t "$MCP_IMAGE" "$(../scripts/stage-python.sh amd64)" >/dev/null; }
+build_backend() {
+  docker buildx build -q --load --build-context vectors=../packages/token-guard/vectors -t "$BACKEND_IMAGE" ../services/insurer-backend >/dev/null
+}
 run() { docker run -d --restart unless-stopped --network "$NET" --label gekko13=1 "$@" >/dev/null; }
 srv() { docker exec gekko13-spire-server /opt/spire/bin/spire-server "$@"; }
 
 # 各サービスの svid-helper。ホストの利用者で書く。シナリオの実行役が「盗まれた鍵」として読めるようにするため（検証でだけ）。
-# auth と顧客のアプリは、ログインサーバーへのクライアント認証に示す JWT-SVID も書かせる（宛先は issuer）
+# auth と顧客のアプリは、ログインサーバーへのクライアント認証に示す JWT-SVID も書かせる（第 2 引数 jwt。宛先は issuer）
 helper() {
-  local s=$1
-  JWT_AUDIENCE=$ISSUER ../scripts/helper-conf.sh "run/helper/$s.conf"
+  local s=$1 aud=
+  [ "${2:-}" = jwt ] && aud=$ISSUER
+  JWT_AUDIENCE=$aud ../scripts/helper-conf.sh "run/helper/$s.conf"
   run --name "gekko13-$s-helper" --user "$(id -u):$(id -g)" \
     --label "com.amazonaws.ecs.task-definition-family=gekko13-$s" --label "com.amazonaws.ecs.container-name=svid-helper" \
     -v gekko13-agent-sockets:/run/spire/sockets:ro \
@@ -102,6 +109,35 @@ start_customer_app() {
     "$IMAGE"
 }
 
+# 営業 AI エージェント（台本）。受け口は SVID の mTLS（8443）で、顧客のアプリの BFF だけが呼ぶ
+start_sales_agent() {
+  # shellcheck disable=SC2046
+  run --name gekko13-sales-agent --network-alias sales-agent $(app_labels sales-agent) \
+    -e SERVICE=sales-agent -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
+    -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_ORIGIN=http://keycloak:8080 \
+    -v "$HERE/run/svid/sales-agent:/svid:ro" \
+    "$IMAGE"
+}
+
+# 事務サービス（Python）。受け口は SVID の mTLS（9443）で、営業 AI エージェントだけが呼ぶ。svid-helper と同じホストの利用者で読む
+start_insurer_mcp() {
+  # shellcheck disable=SC2046
+  run --name gekko13-insurer-mcp --network-alias insurer-mcp --user "$(id -u):$(id -g)" $(app_labels insurer-mcp) \
+    -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
+    -v "$HERE/run/svid/insurer-mcp:/svid:ro" \
+    "$MCP_IMAGE"
+}
+
+# 保険会社のシステム（Java）。受け口は SVID の mTLS（9443）。直送は、顧客のアプリの 9443 へ送る
+start_insurer_backend() {
+  # shellcheck disable=SC2046
+  run --name gekko13-insurer-backend --network-alias insurer-backend --memory 512m $(app_labels insurer-backend) \
+    -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" -e "RP_ID=$RP_ID" -e "WEBAUTHN_ORIGINS=$ORIGIN" \
+    -e CUSTOMER_APP_URL=https://customer-app:9443 \
+    -v "$HERE/run/svid/insurer-backend:/svid:ro" \
+    "$BACKEND_IMAGE"
+}
+
 # 入口のリバースプロキシ（AWS では Lambda の Web Functions）。同じコードを、送り先を固定して動かす
 start_entry() {
   run --name gekko13-entry \
@@ -117,7 +153,9 @@ if [ $# -gt 0 ]; then
     case $s in
       keycloak) build_keycloak ;;
       auth) build_auth ;;
-      customer-app) build_node ;;
+      customer-app | sales-agent) build_node ;;
+      insurer-mcp) build_mcp ;;
+      insurer-backend) build_backend ;;
       entry) ;;
       *) echo "知らないサービス: $s" >&2; exit 1 ;;
     esac
@@ -131,6 +169,8 @@ fi
 build_node
 build_auth
 build_keycloak
+build_mcp
+build_backend
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 docker volume create gekko13-agent-sockets >/dev/null
 
@@ -165,9 +205,13 @@ run --name gekko13-spire-agent --pid host \
   "ghcr.io/spiffe/spire-agent:$SPIRE" -config /etc/spire/agent.conf -joinToken "$JOIN_TOKEN"
 
 start_keycloak
-helper auth
+helper auth jwt
 start_auth
-helper customer-app
+helper customer-app jwt
 start_customer_app
+for s in sales-agent insurer-mcp insurer-backend; do
+  helper "$s"
+  "start_${s//-/_}"
+done
 start_entry
 echo "立ち上げた。ログインサーバーの起動に 1 分ほどかかる: $ORIGIN/"

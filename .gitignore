@@ -4,3 +4,6 @@ local/run/
 .env
 services/*/target/
 services/*/dist/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
