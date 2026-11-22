@@ -1,0 +1,60 @@
+{{template "head" .}}
+{{with .Report}}
+<p><a href="{{$.Base}}/">← 一覧へ</a></p>
+<section class="card">
+  <h1>監査: {{index .Contract "contractId"}} <span data-testid="status" class="verdict {{if .OK}}ok{{else}}ng{{end}}">{{.Status}}</span></h1>
+  <p class="sub">顧客 {{index .Contract "customer"}}、nonce <code>{{.Nonce}}</code></p>
+  <h2 data-testid="comparison">何と何を比べたか</h2>
+  <div class="scroll"><table data-testid="summary">
+    <thead><tr><th>根拠</th><th>比べたもの</th><th>比べた結果</th><th class="result">判定</th></tr></thead>
+    <tbody>{{range .Groups}}<tr>
+      <td>{{.Title}}</td><td>{{.Compared}}</td><td>{{.Summary}}</td>
+      <td class="result"><span class="verdict {{if eq .Verdict "一致"}}ok{{else if .OK}}note{{else}}ng{{end}}">{{.Verdict}}</span></td>
+    </tr>{{end}}</tbody>
+  </table></div>
+</section>
+{{if not .OK}}<div class="alert ng"><ul data-testid="mismatches">{{range .Checks}}{{if not .OK}}<li><strong>{{.Name}}</strong>: {{.Detail}}</li>{{end}}{{end}}</ul></div>{{end}}
+<p class="alert note">確かめていないこと: AI の説明の文が正しいか。CloudWatch Logs に届いた後の書き換え（AWS のアカウントの管理者を信頼する）。</p>
+
+<section class="card">
+<h2>比べた値</h2>
+{{range .Groups}}<details class="group" {{if not .OK}}open{{end}} data-testid="summary-group">
+  <summary>{{.Title}}（<span class="verdict {{if eq .Verdict "一致"}}ok{{else if .OK}}note{{else}}ng{{end}}">{{.Summary}}</span>）</summary>
+  <div class="body">
+  <p class="who">{{.Note}}</p>
+  <div class="scroll"><table>
+    <thead><tr><th>確かめたこと</th><th>値 1（書いた者）</th><th>値 2（書いた者）</th><th class="result">結果</th></tr></thead>
+    {{range .Checks}}<tbody>
+      <tr class="head"><th colspan="3">{{.Name}}</th><th class="result"><span class="verdict {{if eq .Verdict "一致"}}ok{{else if .OK}}note{{else}}ng{{end}}">{{.Verdict}}</span></th></tr>
+      {{range .Comparisons}}<tr>
+        <td>{{.What}}</td>
+        <td><code>{{.Left}}</code><br><span class="who">{{.LeftBy}}</span></td>
+        <td><code>{{.Right}}</code><br><span class="who">{{.RightBy}}</span></td>
+        <td class="result"><span class="verdict {{if .OK}}ok{{else}}ng{{end}}">{{if .OK}}一致{{else}}食い違い{{end}}</span></td>
+      </tr>{{end}}
+      {{if or (not .OK) (not .Comparisons)}}<tr><td colspan="4" class="who">{{.Detail}}</td></tr>{{end}}
+    </tbody>{{end}}
+  </table></div>
+  </div>
+</details>{{end}}
+</section>
+
+<section class="card"><h2>保険会社のシステムの契約の記録（CloudWatch Logs）</h2><pre data-testid="contract-record">{{pretty .ContractRecord}}</pre></section>
+<section class="card"><h2>保険会社のシステムの自己申告（/audit/records）</h2><pre>{{pretty .SelfReport}}</pre></section>
+<section class="card"><h2>認可サーバーとログインサーバーの記録（C から A へ遡った順）</h2><pre data-testid="chain">{{pretty .Chain}}</pre></section>
+<section class="card"><h2>事務サービスのツールの記録</h2><pre data-testid="tool">{{pretty .Tool}}</pre></section>
+<section class="card">
+  <h2>会話（営業 AI エージェントの自己申告。確かめていない）</h2>
+  <p class="alert note">営業 AI エージェントは、この記録を書き換えうる者です。突き合わせの根拠にはしません。ハッシュで確かめられるのは、示した書類の中身だけで、AI の説明の文が正しいかは確かめられません。</p>
+  {{if not .Thread}}<p class="sub">会話の記録がありません。</p>{{else}}
+  <div class="scroll"><table data-testid="conversation">
+    <thead><tr><th>出来事</th><th>中身</th></tr></thead>
+    <tbody>{{range .Conversation}}<tr><td>{{index . "event"}}</td><td>{{with index . "text"}}{{.}}{{else}}<pre>{{pretty .}}</pre>{{end}}</td></tr>{{end}}</tbody>
+  </table></div>{{end}}
+</section>
+<section class="card">
+  <h2>受け付けなかった記録（書いた者が合わない）</h2>
+  {{if not .Rejected}}<p class="sub">ありません。</p>{{else}}<pre data-testid="rejected">{{pretty .Rejected}}</pre>{{end}}
+</section>
+{{end}}
+{{template "foot" .}}

@@ -44,7 +44,7 @@ Parameters:
       and drops those headers from viewers. Keycloak uses them to rebuild its request URL (DPoP htu). Empty until the distribution exists
   Routes:
     Type: String
-    Default: /login=keycloak,/=customer-app
+    Default: /login=keycloak,/audit=insurer-audit,/=customer-app
     Description: Path prefix to service routing of the relay. Longest prefix wins
 
 Resources:

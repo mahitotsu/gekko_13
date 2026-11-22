@@ -35,6 +35,8 @@ DB_INIT_TAG=$(scripts/image-tag.sh "" services/db-init)
 # 事務サービス（Python）と保険会社のシステム（Java。試験は共通の例も読む）。段 D の D1-a2-2
 MCP_TAG=$(scripts/image-tag.sh "" services/insurer-mcp scripts/stage-python.sh ':!services/insurer-mcp/tests/**')
 BACKEND_TAG=$(scripts/image-tag.sh "" services/insurer-backend packages/token-guard/vectors)
+# 監査サービス（Go）。段 D の D1-a2-3
+AUDIT_TAG=$(scripts/image-tag.sh "" services/insurer-audit)
 LABEL="org.opencontainers.image.revision=$REVISION"
 
 # CloudFormation は ASCII 以外の文字を「?」に置き換える。送る前に止める
@@ -83,6 +85,11 @@ BACKEND_REPO=$(out "$PREFIX-registry" InsurerBackendRepositoryUri)
 docker buildx imagetools inspect "$BACKEND_REPO:$BACKEND_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --label "$LABEL" --build-context vectors=packages/token-guard/vectors \
     -t "$BACKEND_REPO:$BACKEND_TAG" --push services/insurer-backend
+
+# 監査サービス（Go）。ビルドの段はビルドする側の CPU で、arm64 向けに作る（エミュレーションは要らない）
+AUDIT_REPO=$(out "$PREFIX-registry" InsurerAuditRepositoryUri)
+docker buildx imagetools inspect "$AUDIT_REPO:$AUDIT_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$AUDIT_REPO:$AUDIT_TAG" --push services/insurer-audit
 
 # 入口のリバースプロキシ（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
 ENTRY_BUCKET=$(out "$PREFIX-registry" EntryCodeBucketName)
@@ -244,6 +251,7 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
     "McpImage=$(dualstack "$MCP_REPO"):$MCP_TAG" \
     "BackendImage=$(dualstack "$BACKEND_REPO"):$BACKEND_TAG" \
+    "AuditImage=$(dualstack "$AUDIT_REPO"):$AUDIT_TAG" \
     "RpId=$(rp_id)"
 fi
 
@@ -256,7 +264,7 @@ cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities C
   "CodeKey=$ENTRY_KEY" \
   "CodeVersion=$ENTRY_VERSION" \
   "NamespaceName=$(out "$PREFIX-ecs" NamespaceName)" \
-  "Routes=/login=keycloak,/=customer-app" \
+  "Routes=/login=keycloak,/audit=insurer-audit,/=customer-app" \
   "PublicOrigin=$( [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ] && echo "https://$(rp_id)" )"
 
 # 入口のディストリビューション。送り先は、入口のリバースプロキシのエンドポイント 1 つ。インスタンスが入れ替わっても、向け直しは要らない。

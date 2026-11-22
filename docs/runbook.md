@@ -6,7 +6,7 @@
 - AWS は `aws/deploy.sh` で作り、`aws/scale.sh up` でインスタンスを起動し、`aws/scale.sh down` でタスクとインスタンスを 0 にする。
 - 使わない間も、スタックは消さない。インスタンスとタスクを 0 にすれば、残る固定費はホストゾーンとアラームの月 1 ドル未満と、保存の費用だけになる（[使わない間の費用](#使わない間の費用)）。
 - インスタンスはプライベートのサブネットに置き、外からは CloudFront から入口のリバースプロキシ（Lambda の Web Functions）を通してだけ届く。インスタンスが入れ替わっても、向け直しは要らない。
-- 今の AWS のサービスは 6 つ。apps のスタックに keycloak と auth、flow のスタックに顧客のアプリ、営業 AI エージェント、事務サービス、保険会社のシステムがある。
+- 今の AWS のサービスは 7 つ。apps のスタックに keycloak と auth、flow のスタックに顧客のアプリ、営業 AI エージェント、事務サービス、保険会社のシステム、監査サービスがある。
 
 ## 実行前の約束
 - AWS に資源を作る前に、持ち主に確かめる。費用は [AWS の費用の見込み](#aws-の費用の見込み) のとおり。
@@ -27,7 +27,7 @@
 ```sh
 npm test
 ```
-期待する結果: 型の検査（Node と、顧客のアプリの画面）と lint が通り、テストが `83 passed` になる。続けて、事務サービス（Python）の lint と試験が `21 passed` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバーとログインサーバーの拡張（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
+期待する結果: 型の検査（Node と、顧客のアプリの画面）と lint が通り、テストが `76 passed` になる。続けて、事務サービス（Python）の lint と試験が `21 passed` になり、監査サービス（Go）の試験が `ok` になる。続けて、CloudFormation のテンプレートの検査（`scripts/check-templates.sh`）が、何も出さずに通る。認可サーバーとログインサーバーの拡張（Java）の単体のテストは、イメージのビルドの中で回る（次の節）。
 
 ## ログインをローカルで確かめる（段 D の D1-a2-1）
 `local/up.sh` は、PostgreSQL、SPIRE、入口のリバースプロキシと、次のサービスを立てる。ログインサーバー（`services/keycloak`）、認可サーバー（`services/auth`）、顧客のアプリ（`services/customer-app`）、営業 AI エージェント、事務サービス、保険会社のシステムである。入口は `http://gekko13.localhost:18000/` で、固定の利用者（alice など）のパスワードは `demo` である。確かめは、Docker の Playwright のブラウザと仮想の認証器で回す。
@@ -48,7 +48,7 @@ node scripts/ui-login.ts
 node scripts/ui-flow.ts
 ```
 
-期待する結果: `1 ログイン` から `7b 照合（受信箱と契約）` までの行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。事務サービス（Python）の試験は `scripts/test-python.sh` で回る（`npm test` も回す）。保険会社のシステム（Java）の試験は、イメージのビルドの中で回る。
+期待する結果: `1 ログイン` から `8b 監査の画面で、その契約が食い違いなし` までの行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。8 の段は、監査の担当（kansa）が別のブラウザで `/audit` にログインして確かめる。事務サービス（Python）の試験は `scripts/test-python.sh`、監査サービス（Go）の試験は `scripts/test-go.sh` で回る（`npm test` も回す）。保険会社のシステム（Java）の試験は、イメージのビルドの中で回る。
 
 ホストが眠ったあとは、手元の SPIRE の agent が立ち直れず、SVID が書かれないことがある（[findings 4-36](findings.md#4-36-手元で主の流れの-27-段がenvoy-なしで通ったサービスのトークンの確かめはtypescriptpythonjava-の-3-つで共通の例-15-件の判定が全部一致した)）。そのときは `local/down.sh` と `local/up.sh` で作り直す。
 

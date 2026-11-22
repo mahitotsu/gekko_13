@@ -4,10 +4,10 @@
 # - 各コンテナには、ECS のエージェントが付けるのと同じ名前のラベルを付ける。SPIRE の登録はこのラベルで選ぶ。
 # - SVID は svid-helper がホストのディレクトリに書き、app は読むだけにする。app は agent のソケットを持たない。
 # - ブラウザは、入口のリバースプロキシ（http://gekko13.localhost:18000）から、AWS の CloudFront と同じパスで使う。
-#   /login はログインサーバー、それ以外は顧客のアプリ。Chromium は *.localhost をループバックに解決する。
+#   /login はログインサーバー、/audit は監査サービス、それ以外は顧客のアプリ。Chromium は *.localhost をループバックに解決する。
 # 手順: PostgreSQL → SPIRE の server → バンドルと join token → 登録 → agent → サービス → 入口。
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
-#   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、entry）
+#   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry）
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$(pwd)
@@ -23,12 +23,13 @@ AUTH_IMAGE=gekko13/auth:local
 KEYCLOAK_IMAGE=gekko13/keycloak:local
 MCP_IMAGE=gekko13/insurer-mcp:local
 BACKEND_IMAGE=gekko13/insurer-backend:local
+AUDIT_IMAGE=gekko13/insurer-audit:local
 # 入口の origin。AWS ではディストリビューションのドメイン名
 ORIGIN=http://gekko13.localhost:18000
 RP_ID=gekko13.localhost
 ISSUER=$ORIGIN/login/realms/insurer
 # SVID を使うサービス
-SERVICES=(auth customer-app sales-agent insurer-mcp insurer-backend)
+SERVICES=(auth customer-app sales-agent insurer-mcp insurer-backend insurer-audit)
 
 mkdir -p run/bundle run/helper
 for s in "${SERVICES[@]}"; do mkdir -p "run/svid/$s"; done
@@ -54,6 +55,7 @@ build_node() { docker build -q -t "$IMAGE" -f ../Dockerfile "$(../scripts/stage-
 build_auth() { docker buildx build -q --load -t "$AUTH_IMAGE" ../services/auth >/dev/null; }
 build_keycloak() { docker buildx build -q --load -t "$KEYCLOAK_IMAGE" ../services/keycloak >/dev/null; }
 build_mcp() { docker build -q -t "$MCP_IMAGE" "$(../scripts/stage-python.sh amd64)" >/dev/null; }
+build_audit() { docker buildx build -q --load -t "$AUDIT_IMAGE" ../services/insurer-audit >/dev/null; }
 build_backend() {
   docker buildx build -q --load --build-context vectors=../packages/token-guard/vectors -t "$BACKEND_IMAGE" ../services/insurer-backend >/dev/null
 }
@@ -77,7 +79,9 @@ app_labels() { echo --label "com.amazonaws.ecs.task-definition-family=gekko13-$1
 
 # ログインサーバー（Keycloak と gekko_11 の拡張）。保存先は PostgreSQL。レルムの ${…} は、取り込みのときに環境変数で置き換わる
 start_keycloak() {
-  run --name gekko13-keycloak --network-alias keycloak --memory 1g \
+  # ECS と同じ名前のラベルを付ける（監査サービスが、A の発行の記録の書き手を、このラベルで決める）
+  # shellcheck disable=SC2046
+  run --name gekko13-keycloak --network-alias keycloak --memory 1g $(app_labels keycloak) \
     -e "KC_HOSTNAME=$ORIGIN/login" -e KC_HTTP_ENABLED=true -e KC_PROXY_HEADERS=xforwarded \
     -e KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak -e KC_DB_USERNAME=keycloak -e "KC_DB_PASSWORD=$DB_KEYCLOAK" \
     -e "BUNDLE_CA_PEM=$(cat run/bundle-endpoint/tls.crt)" -e KC_TRUSTSTORE_PATHS=/tmp/bundle-ca.pem \
@@ -138,11 +142,24 @@ start_insurer_backend() {
     "$BACKEND_IMAGE"
 }
 
+# 監査サービス（Go）。入口から /audit の下を受ける。記録は、AWS では CloudWatch Logs から読むが、手元では docker のソケットから読む
+# （書いた者は、ECS と同じ名前のラベルで決める）。docker のソケットを渡すのは手元だけで、AWS では渡さない
+start_insurer_audit() {
+  # shellcheck disable=SC2046
+  run --name gekko13-insurer-audit --network-alias insurer-audit $(app_labels insurer-audit) \
+    --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+    -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
+    -e "ISSUER=$ISSUER" -e "PUBLIC_ORIGIN=$ORIGIN/audit" -e LOGIN_ORIGIN=http://keycloak:8080 \
+    -e RECORDS=docker -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -v "$HERE/run/svid/insurer-audit:/svid:ro" \
+    "$AUDIT_IMAGE"
+}
+
 # 入口のリバースプロキシ（AWS では Lambda の Web Functions）。同じコードを、送り先を固定して動かす
 start_entry() {
   run --name gekko13-entry \
-    -e AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000 -e ROUTES=/login=keycloak,/=customer-app -e "PUBLIC_ORIGIN=$ORIGIN" \
-    -e STATIC_TARGETS=keycloak=keycloak:8080,customer-app=customer-app:8080 \
+    -e AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000 -e ROUTES=/login=keycloak,/audit=insurer-audit,/=customer-app -e "PUBLIC_ORIGIN=$ORIGIN" \
+    -e STATIC_TARGETS=keycloak=keycloak:8080,insurer-audit=insurer-audit:8080,customer-app=customer-app:8080 \
     -v "$HERE/../services/entry/src:/app/src:ro" -p 127.0.0.1:18000:3000 \
     node:24-alpine node /app/src/main.ts
 }
@@ -156,6 +173,7 @@ if [ $# -gt 0 ]; then
       customer-app | sales-agent) build_node ;;
       insurer-mcp) build_mcp ;;
       insurer-backend) build_backend ;;
+      insurer-audit) build_audit ;;
       entry) ;;
       *) echo "知らないサービス: $s" >&2; exit 1 ;;
     esac
@@ -171,6 +189,7 @@ build_auth
 build_keycloak
 build_mcp
 build_backend
+build_audit
 docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 docker volume create gekko13-agent-sockets >/dev/null
 
@@ -213,5 +232,7 @@ for s in sales-agent insurer-mcp insurer-backend; do
   helper "$s"
   "start_${s//-/_}"
 done
+helper insurer-audit jwt
+start_insurer_audit
 start_entry
 echo "立ち上げた。ログインサーバーの起動に 1 分ほどかかる: $ORIGIN/"

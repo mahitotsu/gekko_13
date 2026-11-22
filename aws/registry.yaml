@@ -126,6 +126,17 @@ Resources:
       LifecyclePolicy:
         LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
 
+  # 段 D の D1-a2-3: 監査サービス（Go）
+  InsurerAuditRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/insurer-audit"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
   SpireServerRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -158,6 +169,7 @@ Outputs:
   DbInitRepositoryUri: { Value: !GetAtt DbInitRepository.RepositoryUri }
   InsurerMcpRepositoryUri: { Value: !GetAtt InsurerMcpRepository.RepositoryUri }
   InsurerBackendRepositoryUri: { Value: !GetAtt InsurerBackendRepository.RepositoryUri }
+  InsurerAuditRepositoryUri: { Value: !GetAtt InsurerAuditRepository.RepositoryUri }
   SpireServerRepositoryUri: { Value: !GetAtt SpireServerRepository.RepositoryUri }
   SpireAgentRepositoryUri: { Value: !GetAtt SpireAgentRepository.RepositoryUri }
   SpiffeHelperRepositoryUri: { Value: !GetAtt SpiffeHelperRepository.RepositoryUri }

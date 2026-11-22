@@ -1,0 +1,18 @@
+{{template "head" .}}
+<section class="card">
+  <h1>契約の一覧</h1>
+  <p class="sub">保険会社のシステムの記録（自己申告）を、認可サーバーと事務サービスの記録と、契約ごとに突き合わせた結果です。新しい順に、30 件まで出します。</p>
+  {{if not .Contracts}}<p class="alert note" data-testid="no-contracts">契約の記録がありません。</p>{{else}}
+  <div class="scroll"><table>
+    <thead><tr><th>結果</th><th>契約</th><th>顧客</th><th>案</th></tr></thead>
+    <tbody>
+    {{range .Contracts}}<tr data-testid="contract-{{.Nonce}}">
+      <td><span class="verdict {{if .OK}}ok{{else}}ng{{end}}">{{.Status}}</span></td>
+      <td><a href="{{$.Base}}/contracts/{{.Nonce}}">{{index .Contract "contractId"}}</a></td>
+      <td>{{index .Contract "customer"}}</td>
+      <td>{{with index .Contract "plan"}}{{index . "name"}}{{end}}</td>
+    </tr>{{end}}
+    </tbody>
+  </table></div>{{end}}
+</section>
+{{template "foot" .}}

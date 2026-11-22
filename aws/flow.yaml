@@ -1,12 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の主の流れのスタック（段 D の D1-a2）。gekko_11 のサービスのうち、apps のスタックにないもの（Keycloak と auth のほか）を置く。
-# 顧客のアプリ（画面の配信元と BFF。D1-a2-1）、営業 AI エージェント、事務サービス、保険会社のシステム（D1-a2-2）。D1-a2-3 で監査サービスを足す。
+# 顧客のアプリ（画面の配信元と BFF。D1-a2-1）、営業 AI エージェント、事務サービス、保険会社のシステム（D1-a2-2）、監査サービス（D1-a2-3）。
 # サービスどうしは、Service Connect の名前（TCP の中継だけ）で呼び、各アプリが SVID の mTLS を終える。呼んでよい相手は、各アプリが SPIFFE ID で決める。
 # 新しいサービスは、まず 1 タスクで、状態をメモリに持つ。冗長化は段 D の D1-a3 で行う（docs/design-decisions.md）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 main-flow services on the base runtime (gekko13-ecs): the customer app (web UI and BFF), the sales agent,
-  the MCP office service and the insurer backend. The entry relay finds the customer app through the SRV record customer-app.
+  the MCP office service, the insurer backend and the audit service. The entry relay finds the customer app and the audit service
+  through SRV records.
   Services call each other by Service Connect names (TCP relay only) and terminate SVID mTLS in the apps.
   New services start with one task holding state in memory; redundancy comes in a later step.
 
@@ -40,6 +41,9 @@ Parameters:
   BackendImage:
     Type: String
     Description: URI and tag of the gekko13/insurer-backend image (Java) in ECR
+  AuditImage:
+    Type: String
+    Description: URI and tag of the gekko13/insurer-audit image (Go) in ECR
   RpId:
     Type: String
     Description: Passkey RP ID, the default domain of the entry CloudFront distribution. The issuer and the app origin are built from it
@@ -357,3 +361,120 @@ Resources:
         Enabled: true
         Namespace: !Sub "svc.${Prefix}.internal"
         Services: [{ PortName: app, DiscoveryName: insurer-backend, ClientAliases: [{ Port: 9443, DnsName: insurer-backend }] }]
+
+  # 監査サービス（Go。段 D の D1-a2-3）。入口のリバースプロキシが /audit の下を送る（SRV の insurer-audit）。
+  # 監査の記録は、CloudWatch Logs のロググループを、タスクのロールで読む。書いた者は、ログストリームの名前で決める。
+  # 読む権限は、このタスクのロールにだけ与える。ほかのタスクには、タスクのロールを付けない（ログを書くのは、インスタンスの docker）
+  InsurerAuditDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: insurer-audit
+      NamespaceId: !Ref NamespaceId
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{ Type: SRV, TTL: 10 }]
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
+
+  InsurerAuditTaskRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: The audit service reads audit records from the ECS log group; the writer is decided by the log stream name
+        must: Never grant write access to logs here, and never attach this role to other tasks
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+              ArnLike: { aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: read-audit-records
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroupName}:*"
+
+  InsurerAuditTask:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: >-
+          Audit service (Go). Serves /audit for the entry relay on 8080. Auditors log in with OIDC; the client authenticates to Keycloak
+          with a JWT-SVID. Reads audit records from CloudWatch Logs with its task role and the backend self-report over SVID mTLS
+    Properties:
+      Family: !Sub "${Prefix}-insurer-audit"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !Ref ExecutionRoleArn
+      TaskRoleArn: !GetAtt InsurerAuditTaskRole.Arn
+      Volumes:
+        - { Name: helper }
+        - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
+        - { Name: svid }
+      ContainerDefinitions:
+        - Name: helper-config
+          Image: !Ref AppImage
+          Essential: false
+          MemoryReservation: 16
+          Command: ["sh", "scripts/helper-conf.sh", "/helper/helper.conf"]
+          Environment:
+            - { Name: JWT_AUDIENCE, Value: !Sub "https://${RpId}/login/realms/insurer" }
+          MountPoints:
+            - { SourceVolume: helper, ContainerPath: /helper }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: insurer-audit, mode: non-blocking }
+        - Name: svid-helper
+          Image: !Ref SpiffeHelperImage
+          Essential: true
+          MemoryReservation: 32
+          Command: ["-config", "/helper/helper.conf"]
+          DependsOn: [{ ContainerName: helper-config, Condition: SUCCESS }]
+          MountPoints:
+            - { SourceVolume: helper, ContainerPath: /helper, ReadOnly: true }
+            - { SourceVolume: sockets, ContainerPath: /run/spire/sockets, ReadOnly: true }
+            - { SourceVolume: svid, ContainerPath: /svid }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: insurer-audit, mode: non-blocking }
+        - Name: app
+          Image: !Ref AuditImage
+          Essential: true
+          MemoryReservation: 64
+          User: "1000:0"
+          PortMappings: [{ ContainerPort: 8080, HostPort: 0, Protocol: tcp }]
+          # 土台にシェルがないので、ヘルスチェックは置かない（ECS は、コンテナが動いていれば正常とみなす）
+          Environment:
+            - { Name: SVID_DIR, Value: /svid }
+            - { Name: JWT_SVID_FILE, Value: /svid/jwt_svid.token }
+            - { Name: TRUST_DOMAIN, Value: gekko13.internal }
+            - { Name: ISSUER, Value: !Sub "https://${RpId}/login/realms/insurer" }
+            - { Name: PUBLIC_ORIGIN, Value: !Sub "https://${RpId}/audit" }
+            - { Name: LOG_GROUP, Value: !Ref LogGroupName }
+            - { Name: AWS_REGION, Value: !Ref AWS::Region }
+          MountPoints:
+            - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: insurer-audit, mode: non-blocking }
+
+  InsurerAuditService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ClusterName
+      ServiceName: insurer-audit
+      TaskDefinition: !Ref InsurerAuditTask
+      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
+      DesiredCount: 1
+      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      ServiceRegistries: [{ RegistryArn: !GetAtt InsurerAuditDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
+      # 保険会社のシステムを Service Connect の名前で呼ぶ（クライアントだけ）
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub "svc.${Prefix}.internal"

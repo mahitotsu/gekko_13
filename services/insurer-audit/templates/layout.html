@@ -1,0 +1,21 @@
+{{define "head"}}<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>監査: {{.Title}}</title>
+<link rel="stylesheet" href="{{.Base}}/assets/audit.css">
+</head>
+<body>
+<header class="bar"><div class="wrap">
+  <span class="badge-mark">教</span>
+  <span>教材保険会社 <span class="sub">監査</span></span>
+  {{if .User}}<span class="spacer"><span class="who">監査の担当: <span data-testid="whoami">{{.User}}</span></span>
+  <form method="post" action="{{.Base}}/logout"><button type="submit" data-testid="signout">サインアウト</button></form></span>{{end}}
+</div></header>
+<main class="wrap">
+{{end}}
+{{define "foot"}}</main>
+</body>
+</html>
+{{end}}

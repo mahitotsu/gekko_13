@@ -1,0 +1,7 @@
+{{template "head" .}}
+<section class="card">
+  <h1 data-testid="forbidden">この画面は、監査の担当だけが見られます</h1>
+  <p class="sub">今のログインは、監査の担当ではありません。サインアウトしてから、監査の担当でログインしてください。</p>
+  <form method="post" action="{{.Base}}/logout"><button type="submit" data-testid="signout">サインアウト</button></form>
+</section>
+{{template "foot" .}}
