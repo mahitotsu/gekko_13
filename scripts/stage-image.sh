@@ -14,8 +14,7 @@ find "$OUT" -type d -name test -prune -exec rm -rf {} +
 rm -rf "$OUT/services/customer-app/dist"
 DIST="$(pwd)/$OUT/services/customer-app/dist"
 (cd services/customer-app && npx --no-install vite build --outDir "$DIST" --emptyOutDir --logLevel error >&2)
-# AWS でシナリオを回す実行役（ECS のタスク gekko13-probe）、3-e の偽の証明書、spiffe-helper の設定を書くスクリプト（helper-config のコンテナ）
-mkdir -p "$OUT/scripts" && cp scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/helper-conf.sh "$OUT/scripts/"
-scripts/make-fake-certs.sh "$OUT/fixtures/fake"
+# SPIRE の登録のスクリプト（server のタスクの registrar）と、spiffe-helper の設定を書くスクリプト（helper-config のコンテナ）
+mkdir -p "$OUT/scripts" && cp scripts/spire-registrar.sh scripts/helper-conf.sh "$OUT/scripts/"
 (cd "$OUT" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null)
 echo "$(pwd)/$OUT"

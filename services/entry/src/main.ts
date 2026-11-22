@@ -1,8 +1,8 @@
 // 入口のリバースプロキシ（段 D の D0-b）を起動する。Web Functions は、環境変数 AWS_LAMBDA_HTTP_ENDPOINT（host:port）で待ち受けさせる。
-// - ROUTES: 振り分け。例 "/login=keycloak,/=edge-check"
+// - ROUTES: 振り分け。例 "/login=keycloak,/=customer-app"
 // - NAMESPACE: 送り先の SRV を引く名前空間。例 "svc.gekko13.internal"
 // - PUBLIC_ORIGIN: 入口の公開の origin。送り先に X-Forwarded-* で渡す。例 "https://dXXXX.cloudfront.net"
-// - STATIC_TARGETS: ローカルの確かめ用。あれば SRV を引かずに、この送り先へ送る。例 "keycloak=127.0.0.1:8180,edge-check=127.0.0.1:8080"
+// - STATIC_TARGETS: ローカルの確かめ用。あれば SRV を引かずに、この送り先へ送る。例 "keycloak=127.0.0.1:8180,customer-app=127.0.0.1:8080"
 import { createServer } from "node:http";
 import { createProxy, parseRoutes, srvResolver, staticResolver } from "./proxy.ts";
 
@@ -13,7 +13,7 @@ const i = endpoint.lastIndexOf(":");
 const host = endpoint.slice(0, i);
 const port = Number(endpoint.slice(i + 1));
 
-const routes = parseRoutes(process.env.ROUTES ?? "/login=keycloak,/=edge-check");
+const routes = parseRoutes(process.env.ROUTES ?? "/login=keycloak,/=customer-app");
 const resolver = process.env.STATIC_TARGETS
   ? staticResolver(process.env.STATIC_TARGETS)
   : srvResolver(process.env.NAMESPACE ?? "svc.gekko13.internal", Number(process.env.SRV_CACHE_MS ?? 10_000));

@@ -1,12 +1,12 @@
 # 基盤の動かし方と後片付け
 
-**この文書の読み手:** この検証の基盤（ECS on EC2、SPIRE、IPv6 だけの AWS）を自分で動かす開発者。作って、インスタンスを起動し、0 にし、片付けるまでを扱う。アプリとシナリオの動かし方は、段 D の D1 で足す。何を確かめるかは [plan.md](plan.md)、判断の理由は [design-decisions.md](design-decisions.md)、用語は [用語集](glossary.md)。
+**この文書の読み手:** この検証の基盤（ECS on EC2、SPIRE、IPv6 だけの AWS）とアプリを自分で動かす開発者。作って、確かめ、インスタンスを起動し、0 にし、片付けるまでを扱う。何を確かめるかは [plan.md](plan.md)、判断の理由は [design-decisions.md](design-decisions.md)、用語は [用語集](glossary.md)。
 
 ## 要旨
 - AWS は `aws/deploy.sh` で作り、`aws/scale.sh up` でインスタンスを起動し、`aws/scale.sh down` でタスクとインスタンスを 0 にする。
 - 使わない間も、スタックは消さない。インスタンスとタスクを 0 にすれば、残る固定費はホストゾーンとアラームの月 1 ドル未満と、保存の費用だけになる（[使わない間の費用](#使わない間の費用)）。
 - インスタンスはプライベートのサブネットに置き、外からは CloudFront から入口のリバースプロキシ（Lambda の Web Functions）を通してだけ届く。インスタンスが入れ替わっても、向け直しは要らない。
-- 今の AWS の作りは、keycloak、auth、確かめのエンドポイント（edge-check）の 3 つのサービス。第 2 部のアプリは、段 D の D1 で載せる。
+- 今の AWS のサービスは 6 つ。apps のスタックに keycloak と auth、flow のスタックに顧客のアプリ、営業 AI エージェント、事務サービス、保険会社のシステムがある。
 
 ## 実行前の約束
 - AWS に資源を作る前に、持ち主に確かめる。費用は [AWS の費用の見込み](#aws-の費用の見込み) のとおり。
@@ -62,7 +62,20 @@ node scripts/ui-flow.ts
 GEKKO13_AZS=2 GEKKO13_MAX_HOSTS=2 aws/deploy.sh
 ```
 
-期待する結果: 最後に `作った。入口: https://<配信の名前>/ 。…` と出る。作るスタックは 7 つである。順に registry、network、db（Aurora）、ecs（基盤）、apps、entry（入口のリバースプロキシ）、edge（ディストリビューション）。registry は、イメージとリバースプロキシの zip の置き場である。db は、初めて作るときに 10 分ほどかかる。作った直後は、キャパシティプロバイダーがインスタンスを起動し、spire-server、auth、keycloak、edge-check が 2 タスクずつ動く。どれも 2 つの AZ に散らすので、インスタンスは 2 台になる。
+期待する結果: 最後に `作った。入口: https://<配信の名前>/ 。…` と出る。作るスタックは、次の 8 つの順である。
+
+| 順 | スタック | 中身 |
+|---|---|---|
+| 1 | registry | イメージとリバースプロキシの zip の置き場 |
+| 2 | network | VPC と EFS |
+| 3 | db | Aurora |
+| 4 | ecs | 基盤（クラスター、インスタンス、SPIRE） |
+| 5 | apps | keycloak と auth |
+| 6 | flow | 主の流れのサービス |
+| 7 | entry | 入口のリバースプロキシ |
+| 8 | edge | ディストリビューション |
+
+db は、初めて作るときに 10 分ほどかかる。作った直後は、キャパシティプロバイダーがインスタンスを起動する。spire-server、auth、keycloak は 2 タスクずつ、主の流れのサービスは 1 タスクずつ動く。2 タスクのサービスは 2 つの AZ に散らすので、インスタンスは 2 台以上になる。サービスを新しく足したときは、送ったあとに、そのサービスを呼ぶ側のタスクを入れ替える（[findings 4-37](findings.md#4-37-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。
 
 `aws/deploy.sh` は、初めて回すときに、秘密を作って SSM の SecureString に置く。Aurora の管理者とサービスごとのパスワード、auth の署名鍵、SPIRE のルート CA の鍵と証明書である。どれも、すでにあれば作り直さない。SPIRE のルート CA は、鍵と証明書の片方だけがあると止まる（作り直すと、トラストアンカーが替わるため）。ディストリビューションを初めて作ったときは、keycloak が 0 タスクのままになる（ディストリビューションのドメイン名から、自分の URL を作るため）。そのときは、もう一度 `aws/deploy.sh` を回す。
 
@@ -70,7 +83,7 @@ GEKKO13_AZS=2 GEKKO13_MAX_HOSTS=2 aws/deploy.sh
 
 ## インスタンスを起動する・0 にする
 ```sh
-aws/scale.sh up      # 自動の増減を 2〜4 に戻し、spire-server、auth、keycloak、edge-check を 2 にして、安定するまで待つ
+aws/scale.sh up      # 自動の増減を 2〜4 に戻し、spire-server、auth、keycloak を 2、主の流れのサービスを 1 にして、安定するまで待つ
 aws/scale.sh down    # 自動の増減を 0 にし、DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、台が 0 になるまで待つ
 ```
 
@@ -115,38 +128,8 @@ DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/lo
 - ECR のイメージの保存
 - EFS の保存
 
-## 段 D の D0-b を測る
-インスタンスが 0 の状態から、入口を通して使えるまでの時間を測る。測り方の定義（始点、終点、判定）は [log.md の 2026-11-21 の決定](log.md#決めたこと) にある。
-
-```sh
-aws/scale.sh down
-aws/d0-measure.sh
-```
-
-期待する結果: `+N 秒: …` の行が、出来事の順に出る。おおよその順は次のとおり。
-1. インスタンスが ASG に加わる。
-2. 各サービスが RUNNING になる。
-3. Cloud Map のインスタンスが HEALTHY になり、CloudFront を通して Keycloak と 2 つの AZ の edge-check が応える。
-4. auth が起動する（Keycloak より先のこともある）。
-
-最後に表と `判定（300 秒以内か）` が出て、`local/run/d0/<時刻>/result.md` に残る。インスタンスは動いたままなので、次の回の前と、終わったあとに `aws/scale.sh down` を回す。`local/down.sh` は `local/run/` を消すので、結果は先に写す。
-
-## 段 D の D1-a1: インスタンスを 1 台止めて確かめる
-インスタンスを 1 台、予告なしに止め、入口からのリクエストがどれだけ失敗するかを測る（plan.md の 4-3 の D1-a1 の予測）。スポットの中断（2 分前に予告がある）より厳しい条件である。
-
-```sh
-aws/scale.sh up
-aws/failover-check.sh
-```
-
-期待する結果: 止めるインスタンスに載っていたタスクの一覧が出て、`始点: 台を止めた` と出る。8 分見たあと、`/edge-point` と Keycloak の discovery の、呼んだ数、失敗の数、最初と最後の失敗の秒の表が出る。代わりの auth が起動した秒も出る（auth は SVID がないと起動しないので、新しいタスクに SVID が出たことも分かる）。結果は `local/run/failover/<時刻>/result.md` に残る。ASG が代わりのインスタンスを起動するので、終わったら `aws/scale.sh down` を回す。
-
-## 第 1 部と段 C の名残
-次のスクリプトとスタックは、段 D の D0 から AWS で使わない（`aws/park.sh` と `scripts/vpc-origin-sg.sh` は D0-b から）。AWS の作りが変わったので、今は動かない。第 2 部の完成のときに、持ち主の承認を得て消す（[plan.md の 7 節](plan.md#7-制約と第-2-部の完成)）。
-- スクリプト: `aws/run-scenarios.sh`、`aws/create-user.sh`、`aws/edge-point.sh`、`aws/c3-measure.sh`、`aws/park.sh`、`scripts/vpc-origin-sg.sh`、`scripts/aws-login.ts`、`scripts/aws-collect.ts`
-- テンプレート: `aws/cognito.yaml`（スタック `gekko13-cognito` も残っている）
-
-第 1 部のサービスのコード（`services/bff`、`services/transfer`、`services/ledger`、`services/issuer`）と、C-4 の確かめ（`scripts/c4-check.ts`）は、段 D の D1-a2 で認可サーバーを gekko_11 のものに替えたので、動かない。`local/up.sh` も立てない。
+## 過去の測定のスクリプト
+段 D の D0-b と D1-a1 の測定（`aws/d0-measure.sh`、`aws/failover-check.sh`）と、第 1 部と段 C のスクリプトは、2026-11-22 に消した（[log.md](log.md)）。どれも、確かめのエンドポイント（edge-check）か第 1 部のアプリに頼っていた。結果は findings に残っている。読むときは git の履歴から読む。インスタンスを止める確かめは、段 D の D1-a3 で、主の流れを見る形に作り直す。
 
 ## 後片付け
 インスタンスを 0 にするだけなら、`aws/scale.sh down` で足りる。全部を消すときは、スタックを作った順の逆に消す。消す前に、対象を一覧で確かめる。
@@ -161,20 +144,20 @@ aws servicediscovery list-namespaces --region ap-northeast-1 --query 'Namespaces
 確かめたら、次の順に `aws cloudformation delete-stack` で消す。
 1. `gekko13-edge`: OAC と、リバースプロキシのリソースポリシーが消える。ディストリビューションは残る（次の段落）。
 2. `gekko13-entry`: 入口のリバースプロキシ、NetworkConnector とその ENI が消える。
-3. `gekko13-apps`: アプリのサービス、タスク定義、SRV のサービス、タスクのオートスケーリングが消える。オートスケーリングのアラームの固定費は、ここで止まる。
+3. `gekko13-flow` と `gekko13-apps`: アプリのサービス、タスク定義、SRV のサービス、タスクのオートスケーリングが消える。オートスケーリングのアラームの固定費は、ここで止まる。
 4. `gekko13-ecs`: ECS のクラスター、SPIRE、ASG とインスタンス、Cloud Map の名前空間、ロググループが消える。ホストゾーンとアラームの固定費は、ここで止まる。
 5. `gekko13-db`: Aurora のクラスターとインスタンスが消える。最後のスナップショットは残さないので、Keycloak の利用者とパスキー、SPIRE の登録、auth の記録も消える。
-6. `gekko13-cognito`: 第 1 部の利用者と client が消える。
-7. `gekko13-network`: VPC と EFS が消える。EFS が消えると、SPIRE の CA と登録も消え、次に作るときは新しい CA になる。D0 までに CloudFront が VPC に作ったグループ（`CloudFront-VPCOrigins-Service-SG`）が残っていると、VPC を消せない（推定）。
-8. `gekko13-registry`: ECR のイメージは、リポジトリと一緒に消える（`EmptyOnDelete`）。リバースプロキシの zip の置き場（S3）は、中身を消してからでないと消えない。
+6. `gekko13-network`: VPC と EFS が消える。EFS が消えると、SPIRE の CA と登録も消え、次に作るときは新しい CA になる。D0 までに CloudFront が VPC に作ったグループ（`CloudFront-VPCOrigins-Service-SG`）が残っていると、VPC を消せない（推定）。
+7. `gekko13-registry`: ECR のイメージは、リポジトリと一緒に消える（`EmptyOnDelete`）。リバースプロキシの zip の置き場（S3）は、中身を消してからでないと消えない。
 
 `gekko13-edge` の CloudFront のディストリビューションは、スタックを消しても残る。ディストリビューションを消すと、RP ID が使えなくなり、登録したパスキーも使えなくなる。消すときは、先にディストリビューションを無効にしてから、`aws cloudfront delete-distribution` で消す。
 
-SSM のパラメーターは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。消すのは次の 4 組で、合わせて 14 個である。
-- `/gekko13/auth/` の standin-secret と signing-key
+SSM のパラメーターは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。消すのは `/gekko13/` の下の全部で、上の `get-parameters-by-path` で一覧を出してから消す。
+- `/gekko13/auth/` の signing-key（と、第 1 部の standin-secret）
 - `/gekko13/db/` の 4 つのパスワードと ca
-- `/gekko13/spire/` の root-key と root-cert
-- 第 1 部の 4 つ（BFF と transfer の client の秘密、リフレッシュトークン、プローブの動かし方）
+- `/gekko13/spire/` の root-key と root-cert、bundle endpoint の bundle-tls-key と bundle-tls-cert
+- `/gekko13/login/` の demo-password
+- 第 1 部の名残（BFF と transfer の client の秘密、プローブのリフレッシュトークンと動かし方）
 
 SPIRE のルート CA を消すと、次に作るときは新しい根になる。最後に、`list-namespaces` に `svc.gekko13.internal` が残っていないかを確かめる。残っていれば、月額のかかるホストゾーンも残っている（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
 

@@ -35,7 +35,7 @@
 | Cloud Map | AWS の、サービスの名前と居場所を登録する仕組み。この検証では、Service Connect の名前空間と、SPIRE server の DNS の名前（`spire-server.svc.gekko13.internal`）に使う |
 | デュアルスタックの名前 | IPv4 と IPv6 の両方で届く、AWS の API の名前（`*.api.aws`、`*.on.aws`）。既定の名前（`*.amazonaws.com`）は IPv4 だけのものがある |
 | registrar | SPIRE server のタスクの中のコンテナ（`scripts/spire-registrar.sh`）。登録を作り、agent が最初に信じるバンドルを EFS に書く |
-| プローブ（乗っ取られたタスク） | AWS でシナリオを回す役。bff、transfer、ledger の本物のファミリーの別の版のタスクとして動き、自分が得た SVID だけで攻撃する。サービス名は probe-bff、probe-transfer、probe-ledger |
+| プローブ（乗っ取られたタスク） | AWS でシナリオを回す役。本物のサービスと同じファミリーの別の版のタスクとして動き、自分が得た SVID だけで攻撃する。第 1 部の bff、transfer、ledger の分は消した。段 D の D1-b で、gekko_11 の確かめの役として作り直す（plan.md の 4-4） |
 | rogue | シナリオ 1-b の、登録していないファミリー（`gekko13-rogue`）のタスク |
 | 段 A、段 B | 第 1 部の AWS の段の分け方。段 A は 1 つの AZ で各サービス 1 タスク、段 B は 2 つの AZ で各サービス 2 タスク |
 | 段 C、段 D、段 E | 第 2 部の段の分け方。段 C は方式が基盤で成り立つかの確認、段 D は gekko_11 の流れと 27 のシナリオ、段 E は 2 つの AZ と、防御を外した複製（[plan.md](plan.md)） |

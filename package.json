@@ -10,14 +10,12 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "local:up": "local/up.sh",
-    "local:down": "local/down.sh",
-    "scenarios": "node scripts/scenarios.ts"
+    "local:down": "local/down.sh"
   },
   "dependencies": {
     "@ag-ui/core": "1.0.3",
     "@hono/node-server": "2.1.0",
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@simplewebauthn/server": "13.3.3",
     "canonicalize": "5.1.0",
     "hono": "4.13.0",
     "jose": "^6.2.17",

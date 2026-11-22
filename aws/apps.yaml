@@ -2,13 +2,13 @@ AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 のアプリのスタック（段 D の D0 で、基盤の aws/ecs.yaml から分けた）。基盤のクラスターと名前空間の上に、アプリのサービスを載せる。
 # 入口（段 D の D0-b）: CloudFront → 入口のリバースプロキシ（aws/entry.yaml の Web Functions）→ タスク。リバースプロキシは、名前空間の SRV で送り先を見つける。
 # ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で SRV に登録する。正常は、コンテナのヘルスチェックで決める（D0 の ALB と同じ URL）。
-# 振り分けはリバースプロキシがパスでする。/login は Keycloak、それ以外は顧客のアプリ（段 D の D1-a2。aws/flow.yaml）。edge-check は、入口から外した。
+# 振り分けはリバースプロキシがパスでする。/login は Keycloak、それ以外は顧客のアプリ（段 D の D1-a2。aws/flow.yaml）。
 # インスタンスの数と AZ を前提にしない。ホストのポートは固定せず（HostPort 0）、インスタンスはリバースプロキシのグループからだけ動的なポートを受ける（network のスタック）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 apps on the base runtime (gekko13-ecs): the login server (keycloak), the authorization server (auth) and the edge check.
   CloudFront -> entry relay (Lambda Web Function, aws/entry.yaml) -> tasks. ECS registers healthy tasks in SRV records of the
-  namespace by host IP and dynamic port; the relay routes /login to keycloak and everything else to the customer app (gekko13-flow); edge-check is no longer routed.
+  namespace by host IP and dynamic port; the relay routes /login to keycloak and everything else to the customer app (gekko13-flow).
   Nothing assumes a host count or AZ.
 
 Metadata:
@@ -27,7 +27,7 @@ Parameters:
     Type: String
   NamespaceId:
     Type: String
-    Description: ID of the base namespace (gekko13-ecs output NamespaceId). The SRV records of keycloak and edge-check live here
+    Description: ID of the base namespace (gekko13-ecs output NamespaceId). The SRV record of keycloak lives here
   ExecutionRoleArn:
     Type: String
   LogGroupName:
@@ -50,7 +50,7 @@ Parameters:
     Description: SSM String with the certificate of the SPIRE bundle endpoint, trusted by Keycloak
   AppImage:
     Type: String
-    Description: URI and tag of the gekko13/node image in ECR (edge-check, and helper-config that writes the spiffe-helper config)
+    Description: URI and tag of the gekko13/node image in ECR (helper-config that writes the spiffe-helper config)
   RpId:
     Type: String
     Default: ""
@@ -76,10 +76,6 @@ Parameters:
   AuthSigningKeyParameter:
     Type: String
     Default: /gekko13/auth/signing-key
-  EdgeTaskCount:
-    Type: Number
-    Default: 2
-    Description: Desired task count of edge-check. Tasks spread over AZs, one per host
 
 Conditions:
   HasRpId: !Not [!Equals [!Ref RpId, ""]]
@@ -96,16 +92,6 @@ Resources:
           TTL 10 seconds
     Properties:
       Name: keycloak
-      NamespaceId: !Ref NamespaceId
-      DnsConfig:
-        RoutingPolicy: MULTIVALUE
-        DnsRecords: [{ Type: SRV, TTL: 10 }]
-      HealthCheckCustomConfig: { FailureThreshold: 1 }
-
-  EdgeCheckDiscovery:
-    Type: AWS::ServiceDiscovery::Service
-    Properties:
-      Name: edge-check
       NamespaceId: !Ref NamespaceId
       DnsConfig:
         RoutingPolicy: MULTIVALUE
@@ -265,34 +251,6 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: keycloak, mode: non-blocking }
 
-  # 確かめのエンドポイント。応答に、タスクと AZ を返す。D0 では、2 つの AZ のどちらのインスタンスにも届くかを、これで確かめる。
-  EdgeCheckTask:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: !Sub "${Prefix}-edge-check"
-      RequiresCompatibilities: [EC2]
-      NetworkMode: bridge
-      ExecutionRoleArn: !Ref ExecutionRoleArn
-      ContainerDefinitions:
-        - Name: app
-          Image: !Ref AppImage
-          Essential: true
-          MemoryReservation: 64
-          PortMappings:
-            - { ContainerPort: 8080, HostPort: 0, Protocol: tcp }
-          HealthCheck:
-            Command: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/edge-point"]
-            Interval: 10
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 10
-          Environment:
-            - { Name: SERVICE, Value: edge-check }
-            - { Name: RP_ID, Value: !Ref RpId }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: edge-check, mode: non-blocking }
-
   AuthService:
     Type: AWS::ECS::Service
     Properties:
@@ -332,22 +290,6 @@ Resources:
           SecurityGroups: [!Ref HostSecurityGroupId]
       HealthCheckGracePeriodSeconds: 180
       ServiceRegistries: [{ RegistryArn: !GetAtt KeycloakDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
-
-  # AZ に散らし、同じインスタンスに 2 つ置かない。タスク数が 2 なら、インスタンスが 2 台になり、AZ が分かれる
-  EdgeCheckService:
-    Type: AWS::ECS::Service
-    Properties:
-      Cluster: !Ref ClusterName
-      ServiceName: edge-check
-      TaskDefinition: !Ref EdgeCheckTask
-      CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: !Ref EdgeTaskCount
-      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
-      AvailabilityZoneRebalancing: ENABLED
-      PlacementConstraints: [{ Type: distinctInstance }]
-      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }]
-      HealthCheckGracePeriodSeconds: 60
-      ServiceRegistries: [{ RegistryArn: !GetAtt EdgeCheckDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
 
   # タスクのオートスケーリング（段 D の D1-a1）。CPU の使用率（予約に対する割合）を 60 % に保つよう、2〜4 で変える。
   # 1 つの方針で、CloudWatch のアラームが 2 つできる（1 つ月 0.1 ドル。持ち主が承認済み）。
@@ -399,4 +341,3 @@ Resources:
 
 Outputs:
   KeycloakDiscoveryId: { Value: !Ref KeycloakDiscovery }
-  EdgeCheckDiscoveryId: { Value: !Ref EdgeCheckDiscovery }

@@ -97,10 +97,10 @@
   - 最初の 1 回は、案の提示の途中で画面が「network error」になった。ホストが眠ったあとの立ち直り（SPIRE の agent の立て直しと、各サービスの SVID の取り直し）と重なっていた。そのあとの 4 回は起きなかった。
 - 2026-11-22: D1-a2-2 を AWS に送った（コミット `dbfac0e`）。AWS の SSO のセッションが切れていて、1 回目は最初の呼び出しで止まった（資源は変わっていない）。持ち主がログインし直したあとに送り直した。Keycloak のデータベースは、持ち主の承認を得て `aws/reset-keycloak.sh` で作り直し、ログインの画面の設定を取り込み直した。CloudFront を通して、主の流れが 4 回続けて通った。持ち主も、ブラウザと本物のパスキーで、主の流れを通した。plan.md の D1-a2 の予測 3 は予測どおりだった（[findings 4-37](findings.md#4-37-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。
 - 2026-11-22: 案のカードの見た目を直した。持ち主の指摘（案の文が長い行だけ、ボタンが次の行に落ちて見た目が悪い）による。広い画面では、全部の行でボタンを右にそろえ、狭い画面では、全部の行で文の下にそろえた。AWS へは、D1-a2-3 と一緒に出す。
+- 2026-11-22: 使っていないものを消した。持ち主が承認した。消したのは、第 1 部と段 C のコードである。bff、transfer、ledger、issuer、token-check、シナリオと測定のスクリプト、Cognito のテンプレートを消した。確かめのエンドポイント edge-check と、それに頼る測定のスクリプト（`aws/d0-measure.sh`、`aws/failover-check.sh`）も消した。AWS では、スタック `gekko13-cognito` を消し、apps のスタックから edge-check を外し、一度だけ使ったタスク定義 `gekko13-dbfix:1` を消した。過去の測定の結果は findings に残る。インスタンスを止める確かめは、D1-a3 で主の流れを見る形に作り直す。
 
 ## 次の候補（未実施）
 - design-decisions の段 D の「提案」の行を、持ち主に確かめる。
 - D1-a2-3（監査サービスを Go で書き直す）を作る。新しいサービスを足すときは、送ったあとに、そのサービスを呼ぶ側のタスクを入れ替える（findings 4-37）。
-- 第 1 部の部品（bff、transfer、ledger、issuer、token-check、scenarios）を消すかを、一覧を見せて持ち主に確かめる。
+- SSM に残った第 1 部の秘密（`/gekko13/auth/standin-secret`、`/gekko13/bff/client-secret`、`/gekko13/transfer/client-secret`、`/gekko13/probe/` の 2 つ）を消すかを、持ち主に確かめる。
 - 入口のリバースプロキシを作った翌日に、請求に NetworkConnector の項目が出ていないかを見る。
-- 一度だけ使ったタスク定義 `gekko13-dbfix:1` を、登録から外す（費用はかからない）。

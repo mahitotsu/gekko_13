@@ -2,22 +2,20 @@
 # AWS の段の資源を、決まった順番で作る。実行すると費用が出る（EC2 は動いている間、1 時間ごと）。
 # 使い方: aws/deploy.sh
 #   GEKKO13_AZS=2 を付けると、インスタンスを 2 つの AZ に置く。既定は 1。入口のリバースプロキシの ENI は、いつも 2 つの AZ のサブネットに置く。
-#   GEKKO13_MAX_HOSTS でインスタンスの上限を（既定 4。タスクのオートスケーリングで増える分）、GEKKO13_EDGE_TASKS で edge-check のタスク数を（既定 2）変える。
+#   GEKKO13_MAX_HOSTS でインスタンスの上限を（既定 4。タスクのオートスケーリングで増える分）変える。
 #   GEKKO13_INSTANCE_TYPES でインスタンスの種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
 # 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（Keycloak と auth）→ flow（主の流れのサービス）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
-# 段 D の D0 から、Cognito と第 1 部のアプリ（bff、transfer、ledger）は作らない。Cognito のスタックは、第 2 部の完成のときに消す。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 段 C までの使い方（ドメインの接頭辞を渡す）を、黙って受け付けない
-if [ $# -gt 0 ]; then echo "引数は要らない（Cognito は段 D の D0 から作らない）: $*" >&2; exit 2; fi
+if [ $# -gt 0 ]; then echo "引数は要らない: $*" >&2; exit 2; fi
 # サブネットはプライベートで IPv4 の経路がないので、公開 IPv4 は付けない（段 C の C-1b）
 PUBLIC_IPV4=false
 AZS=${GEKKO13_AZS:-1}
 MAX_HOSTS=${GEKKO13_MAX_HOSTS:-4}
-EDGE_TASKS=${GEKKO13_EDGE_TASKS:-2}
 INSTANCE_TYPES=${GEKKO13_INSTANCE_TYPES:-t4g.medium,c6g.large,c7g.large,t4g.large}
 [ "$(tr ',' '\n' <<<"$INSTANCE_TYPES" | grep -c .)" = 4 ] || { echo "GEKKO13_INSTANCE_TYPES は、ちょうど 4 つの種類をカンマで並べる: $INSTANCE_TYPES" >&2; exit 2; }
 CONTAINER_INSIGHTS=${GEKKO13_CONTAINER_INSIGHTS:-disabled}
@@ -29,7 +27,7 @@ HELPER=0.11.0
 # タスクも入れ替わらない。材料にコミットしていない変更があれば、ここで止まる。どのコミットから作ったかは、ラベルに残す
 REVISION=$(git rev-parse HEAD)
 APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile package.json package-lock.json packages services \
-  scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/helper-conf.sh scripts/make-fake-certs.sh scripts/stage-image.sh \
+  scripts/spire-registrar.sh scripts/helper-conf.sh scripts/stage-image.sh \
   ':!services/auth' ':!services/keycloak' ':!services/entry' ':!services/db-init' ':!services/insurer-mcp' ':!services/insurer-backend' ':!**/test/**')
 AUTH_TAG=$(scripts/image-tag.sh "" services/auth)
 KEYCLOAK_TAG=$(scripts/image-tag.sh "" services/keycloak)
@@ -217,16 +215,6 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "DbInitImage=$(dualstack "$DB_INIT_REPO"):$DB_INIT_TAG" \
   "DbHost=$DB_HOST"
 
-# 基盤のスタックから消えたサービス（D0 でアプリのスタックへ移した keycloak、auth、edge-check）は、しばらく DRAINING で残る。
-# その間は同じ名前のサービスを作れない（推定）ので、アプリのスタックを作る前に、DRAINING が終わるのを待つ（上限 10 分）
-for s in keycloak auth edge-check; do
-  for _ in $(seq 60); do
-    st=$(aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services "$s" --query 'services[0].status' --output text 2>/dev/null || echo MISSING)
-    [ "$st" = DRAINING ] || break
-    sleep 10
-  done
-done
-
 cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-overrides \
   "ClusterName=$(out "$PREFIX-ecs" ClusterName)" \
   "CapacityProviderName=$(out "$PREFIX-ecs" CapacityProviderName)" \
@@ -238,7 +226,6 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "AuthImage=$(dualstack "$AUTH_REPO"):$AUTH_TAG" \
   "KeycloakImage=$(dualstack "$KEYCLOAK_REPO"):$KEYCLOAK_TAG" \
   "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
-  "EdgeTaskCount=$EDGE_TASKS" \
   "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
   "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
   "DbHost=$DB_HOST" \

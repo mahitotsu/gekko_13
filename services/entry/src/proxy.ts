@@ -14,7 +14,7 @@ export interface Resolver {
   failed(service: string): void;
 }
 
-/** "/login=keycloak,/=edge-check" の形の指定を読む。長い接頭辞から順に比べる。 */
+/** "/login=keycloak,/=customer-app" の形の指定を読む。長い接頭辞から順に比べる。 */
 export function parseRoutes(spec: string): Route[] {
   const routes = spec
     .split(",")
@@ -36,7 +36,7 @@ export function routeFor(routes: Route[], path: string): string | undefined {
   return undefined;
 }
 
-/** ローカルの確かめ用。"keycloak=127.0.0.1:8180,edge-check=127.0.0.1:8080" の形で、送り先を固定する。 */
+/** ローカルの確かめ用。"keycloak=127.0.0.1:8180,customer-app=127.0.0.1:8080" の形で、送り先を固定する。 */
 export function staticResolver(spec: string): Resolver {
   const map = new Map<string, Target[]>();
   for (const part of spec.split(",").map((s) => s.trim()).filter(Boolean)) {

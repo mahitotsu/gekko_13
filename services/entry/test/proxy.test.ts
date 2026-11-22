@@ -5,12 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createProxy, forwardHeaders, parseRoutes, publicForwardHeaders, routeFor, srvResolver, staticResolver, type Resolver } from "../src/proxy.ts";
 
 describe("振り分け", () => {
-  const routes = parseRoutes("/=edge-check,/login=keycloak");
+  const routes = parseRoutes("/=customer-app,/login=keycloak");
   it("区切りの単位で、長い接頭辞を先に比べる", () => {
     expect(routeFor(routes, "/login")).toBe("keycloak");
     expect(routeFor(routes, "/login/realms/x")).toBe("keycloak");
-    expect(routeFor(routes, "/loginx")).toBe("edge-check");
-    expect(routeFor(routes, "/")).toBe("edge-check");
+    expect(routeFor(routes, "/loginx")).toBe("customer-app");
+    expect(routeFor(routes, "/")).toBe("customer-app");
   });
   it("/ がなければ、合わないパスは送り先なし", () => {
     expect(routeFor(parseRoutes("/login=keycloak"), "/app")).toBeUndefined();
@@ -33,14 +33,14 @@ describe("SRV の解決", () => {
     let calls = 0;
     const r = srvResolver("svc.test", 60_000, async (name) => {
       calls++;
-      expect(name).toBe("edge-check.svc.test");
-      return [{ name: "a.edge-check.svc.test", port: 32768 }];
+      expect(name).toBe("customer-app.svc.test");
+      return [{ name: "a.customer-app.svc.test", port: 32768 }];
     });
-    expect(await r.resolve("edge-check")).toEqual([{ host: "a.edge-check.svc.test", port: 32768 }]);
-    await r.resolve("edge-check");
+    expect(await r.resolve("customer-app")).toEqual([{ host: "a.customer-app.svc.test", port: 32768 }]);
+    await r.resolve("customer-app");
     expect(calls).toBe(1);
-    r.failed("edge-check");
-    await r.resolve("edge-check");
+    r.failed("customer-app");
+    await r.resolve("customer-app");
     expect(calls).toBe(2);
   });
   it("登録がないときは空にする", async () => {
@@ -74,15 +74,15 @@ function upstream(name: string) {
   });
 }
 async function proxyWith(resolver: Resolver) {
-  const handle = createProxy({ routes: parseRoutes("/login=keycloak,/=edge-check"), resolver, timeoutMs: 5_000, maxBodyBytes: 1024, maxAttempts: 3, log: () => {} });
+  const handle = createProxy({ routes: parseRoutes("/login=keycloak,/=customer-app"), resolver, timeoutMs: 5_000, maxBodyBytes: 1024, maxAttempts: 3, log: () => {} });
   return listen(createServer((req, res) => void handle(req, res)));
 }
 
 describe("中継", () => {
   it("パスで送り先を選び、本文、クエリ、Host（fetch が中継の名前を入れる）、複数の Set-Cookie をそのまま通す", async () => {
     const kc = await listen(upstream("keycloak"));
-    const ec = await listen(upstream("edge-check"));
-    const p = await proxyWith(staticResolver(`keycloak=127.0.0.1:${kc},edge-check=127.0.0.1:${ec}`));
+    const ec = await listen(upstream("customer-app"));
+    const p = await proxyWith(staticResolver(`keycloak=127.0.0.1:${kc},customer-app=127.0.0.1:${ec}`));
     const body = "username=alice&password=%E3%81%82";
     const r = await fetch(`http://127.0.0.1:${p}/login/realms/x?a=1&b=%20`, {
       method: "POST",
@@ -94,13 +94,13 @@ describe("中継", () => {
     expect(j).toMatchObject({ name: "keycloak", method: "POST", url: "/login/realms/x?a=1&b=%20", host: `127.0.0.1:${p}`, xff: "198.51.100.7" });
     expect(j.sha256).toBe(createHash("sha256").update(body).digest("hex"));
     expect(r.headers.getSetCookie()).toEqual(["a=1; Path=/", "b=2; Path=/login"]);
-    const g = (await (await fetch(`http://127.0.0.1:${p}/edge-point`)).json()) as Record<string, string>;
-    expect(g.name).toBe("edge-check");
+    const g = (await (await fetch(`http://127.0.0.1:${p}/config.json`)).json()) as Record<string, string>;
+    expect(g.name).toBe("customer-app");
   });
 
   it("リダイレクトをたどらずに返す", async () => {
-    const ec = await listen(upstream("edge-check"));
-    const p = await proxyWith(staticResolver(`edge-check=127.0.0.1:${ec}`));
+    const ec = await listen(upstream("customer-app"));
+    const p = await proxyWith(staticResolver(`customer-app=127.0.0.1:${ec}`));
     const r = await fetch(`http://127.0.0.1:${p}/redirect`, { redirect: "manual" });
     expect(r.status).toBe(302);
     expect(r.headers.get("location")).toBe("https://example.test/next");
@@ -109,13 +109,13 @@ describe("中継", () => {
   it("つながらない送り先を飛ばし、生きている送り先へ POST を送り直す", async () => {
     const dead = await listen(createServer());
     servers.pop()?.close(); // 閉じたポート（つながらない）
-    const ec = await listen(upstream("edge-check"));
+    const ec = await listen(upstream("customer-app"));
     let failed = 0;
     const resolver: Resolver = {
       resolve: async () => [{ host: "127.0.0.1", port: dead }, { host: "127.0.0.1", port: ec }],
       failed: () => void failed++,
     };
-    const handle = createProxy({ routes: parseRoutes("/=edge-check"), resolver, timeoutMs: 5_000, maxBodyBytes: 1024, maxAttempts: 3, log: () => {}, random: () => 0.99 });
+    const handle = createProxy({ routes: parseRoutes("/=customer-app"), resolver, timeoutMs: 5_000, maxBodyBytes: 1024, maxAttempts: 3, log: () => {}, random: () => 0.99 });
     const p = await listen(createServer((req, res) => void handle(req, res)));
     const r = await fetch(`http://127.0.0.1:${p}/x`, { method: "POST", body: "hello" });
     expect(r.status).toBe(200);
