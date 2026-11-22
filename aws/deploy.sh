@@ -30,10 +30,13 @@ HELPER=0.11.0
 REVISION=$(git rev-parse HEAD)
 APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile package.json package-lock.json packages services \
   scripts/scenarios.ts scripts/soak.ts scripts/target.ts scripts/spire-registrar.sh scripts/helper-conf.sh scripts/make-fake-certs.sh scripts/stage-image.sh \
-  ':!services/auth' ':!services/keycloak' ':!services/entry' ':!services/db-init' ':!**/test/**')
+  ':!services/auth' ':!services/keycloak' ':!services/entry' ':!services/db-init' ':!services/insurer-mcp' ':!services/insurer-backend' ':!**/test/**')
 AUTH_TAG=$(scripts/image-tag.sh "" services/auth)
 KEYCLOAK_TAG=$(scripts/image-tag.sh "" services/keycloak)
 DB_INIT_TAG=$(scripts/image-tag.sh "" services/db-init)
+# 事務サービス（Python）と保険会社のシステム（Java。試験は共通の例も読む）。段 D の D1-a2-2
+MCP_TAG=$(scripts/image-tag.sh "" services/insurer-mcp scripts/stage-python.sh ':!services/insurer-mcp/tests/**')
+BACKEND_TAG=$(scripts/image-tag.sh "" services/insurer-backend packages/token-guard/vectors)
 LABEL="org.opencontainers.image.revision=$REVISION"
 
 # CloudFormation は ASCII 以外の文字を「?」に置き換える。送る前に止める
@@ -72,6 +75,16 @@ docker buildx imagetools inspect "$KEYCLOAK_REPO:$KEYCLOAK_TAG" >/dev/null 2>&1 
 DB_INIT_REPO=$(out "$PREFIX-registry" DbInitRepositoryUri)
 docker buildx imagetools inspect "$DB_INIT_REPO:$DB_INIT_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --label "$LABEL" -t "$DB_INIT_REPO:$DB_INIT_TAG" --push services/db-init
+
+# 事務サービス（Python）は、arm64 の wheel だけを取り込んだ文脈から作る（RUN がないので、エミュレーションは要らない）
+MCP_REPO=$(out "$PREFIX-registry" InsurerMcpRepositoryUri)
+docker buildx imagetools inspect "$MCP_REPO:$MCP_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$MCP_REPO:$MCP_TAG" --push "$(scripts/stage-python.sh arm64)"
+# 保険会社のシステム（Java）。ビルドの段はビルドする側の CPU で動く。試験の共通の例を、名前つきの文脈で渡す
+BACKEND_REPO=$(out "$PREFIX-registry" InsurerBackendRepositoryUri)
+docker buildx imagetools inspect "$BACKEND_REPO:$BACKEND_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --label "$LABEL" --build-context vectors=packages/token-guard/vectors \
+    -t "$BACKEND_REPO:$BACKEND_TAG" --push services/insurer-backend
 
 # 入口のリバースプロキシ（Web Functions）の zip。キーは中身の SHA-256 にし、同じ中身なら置き直さない（リビジョンも作り直さない）
 ENTRY_BUCKET=$(out "$PREFIX-registry" EntryCodeBucketName)
@@ -242,6 +255,8 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "LogGroupName=$(out "$PREFIX-ecs" LogGroupName)" \
     "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
     "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
+    "McpImage=$(dualstack "$MCP_REPO"):$MCP_TAG" \
+    "BackendImage=$(dualstack "$BACKEND_REPO"):$BACKEND_TAG" \
     "RpId=$(rp_id)"
 fi
 

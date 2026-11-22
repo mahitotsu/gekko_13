@@ -5,14 +5,14 @@
 # SPIRE server の状態は EFS にあるので、インスタンスが入れ替わっても CA と登録は残る。入口のリバースプロキシは名前空間の SRV で送り先を見つけるので、向け直しは要らない。
 # 使い方:
 #   aws/scale.sh down        DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、インスタンスが 0 になるまで待つ（数分）
-#   aws/scale.sh up          spire-server、auth、keycloak を 2、edge-check を GEKKO13_EDGE_TASKS（既定 2）、customer-app を 1 にして、安定するまで待つ。
+#   aws/scale.sh up          spire-server、auth、keycloak を 2、edge-check を GEKKO13_EDGE_TASKS（既定 2）、主の流れのサービス（customer-app、sales-agent、insurer-mcp、insurer-backend）を 1 にして、安定するまで待つ。
 #                            auth と keycloak のタスクのオートスケーリングを、最小 2、最大 4 に戻す
 #   GEKKO13_NO_WAIT=1 を付けると、up はタスク数を戻すだけで待たない（測るスクリプトが、自分で時刻を取るため）
 set -euo pipefail
 REGION=${AWS_REGION:-ap-northeast-1}
 MODE=${1:?up か down を渡す}
 EDGE_TASKS=${GEKKO13_EDGE_TASKS:-2}
-UP_SERVICES="spire-server auth keycloak edge-check customer-app"
+UP_SERVICES="spire-server auth keycloak edge-check customer-app sales-agent insurer-mcp insurer-backend"
 out() { aws cloudformation describe-stacks --region "$REGION" --stack-name gekko13-ecs --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
 CLUSTER=$(out ClusterName)
 ASG=$(out AutoScalingGroupName)
@@ -72,7 +72,7 @@ case "$MODE" in
     for s in spire-server auth keycloak; do set_count "$s" 2; done
     set_count edge-check "$EDGE_TASKS"
     # 主の流れのサービス（段 D の D1-a2）は、まず 1 タスク（冗長化は D1-a3）
-    set_count customer-app 1
+    for s in customer-app sales-agent insurer-mcp insurer-backend; do set_count "$s" 1; done
     if [ "${GEKKO13_NO_WAIT:-}" = 1 ]; then echo "タスク数を戻した（待たない）"; exit 0; fi
     echo "タスク数を戻した。台が起き、サービスが安定するまで待つ"
     # services-stable は 10 分で切れる。インスタンスが起きるのに時間がかかるので、4 回（40 分）まで繰り返す

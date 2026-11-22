@@ -97,6 +97,10 @@ DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/lo
   node scripts/ui-login.ts "https://$D"
 ```
 
+主の流れ（段 D の D1-a2-2）は、手元と同じ `scripts/ui-flow.ts` に入口を渡して確かめる（固定の利用者のパスワードの渡し方は上と同じ）。
+
+レルムの JSON（`services/keycloak/realm/insurer.json`）を直したときは、`aws/reset-keycloak.sh --yes` で Aurora の Keycloak のデータベースを作り直し、取り込み直させる。利用者が登録したパスキーとセッションは消え、戻せない。回す前に持ち主の承認を得る。
+
 ディストリビューションのドメイン名（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消してもディストリビューションが残る作り（`DeletionPolicy: Retain`）にしてある。
 
 リバースプロキシの記録は、CloudWatch Logs の `/aws/lambda/web/gekko13-entry` にある。送り先が見つからないと `no-target`、つながらないと `upstream-failed` の行が出る。

@@ -6,9 +6,9 @@ OUT=local/run/image
 rm -rf "$OUT" && mkdir -p "$OUT"
 cp package.json package-lock.json "$OUT/"
 cp -r packages services "$OUT/"
-# 認可サーバー（Java）、ログインサーバー（Keycloak）、db-init は、それぞれ別のイメージにする。入口のリバースプロキシは zip で置く（scripts/stage-entry.sh）。
+# 認可サーバー（Java）、ログインサーバー（Keycloak）、db-init、事務サービス（Python）、保険会社のシステム（Java）は、それぞれ別のイメージにする。入口のリバースプロキシは zip で置く（scripts/stage-entry.sh）。
 # ここで除くものは、aws/deploy.sh のタグの材料からも除く（材料と中身をそろえる）
-rm -rf "$OUT/services/auth" "$OUT/services/keycloak" "$OUT/services/entry" "$OUT/services/db-init"
+rm -rf "$OUT/services/auth" "$OUT/services/keycloak" "$OUT/services/entry" "$OUT/services/db-init" "$OUT/services/insurer-mcp" "$OUT/services/insurer-backend"
 find "$OUT" -type d -name test -prune -exec rm -rf {} +
 # 顧客のアプリの画面は、ホストの Vite でまとめて入れる（段 D の D1-a2）。材料は services/customer-app/web で、イメージのタグの材料に入っている
 rm -rf "$OUT/services/customer-app/dist"

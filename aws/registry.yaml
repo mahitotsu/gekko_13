@@ -105,6 +105,27 @@ Resources:
       LifecyclePolicy:
         LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
 
+  # 段 D の D1-a2-2: 事務サービス（Python）と保険会社のシステム（Java）。営業 AI エージェントは Node のイメージ（AppRepository）
+  InsurerMcpRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/insurer-mcp"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
+  InsurerBackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${Prefix}/insurer-backend"
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      EmptyOnDelete: true
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"keep 5","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}'
+
   SpireServerRepository:
     Type: AWS::ECR::Repository
     Properties:
@@ -135,6 +156,8 @@ Outputs:
   AuthRepositoryUri: { Value: !GetAtt AuthRepository.RepositoryUri }
   KeycloakRepositoryUri: { Value: !GetAtt KeycloakRepository.RepositoryUri }
   DbInitRepositoryUri: { Value: !GetAtt DbInitRepository.RepositoryUri }
+  InsurerMcpRepositoryUri: { Value: !GetAtt InsurerMcpRepository.RepositoryUri }
+  InsurerBackendRepositoryUri: { Value: !GetAtt InsurerBackendRepository.RepositoryUri }
   SpireServerRepositoryUri: { Value: !GetAtt SpireServerRepository.RepositoryUri }
   SpireAgentRepositoryUri: { Value: !GetAtt SpireAgentRepository.RepositoryUri }
   SpiffeHelperRepositoryUri: { Value: !GetAtt SpiffeHelperRepository.RepositoryUri }
