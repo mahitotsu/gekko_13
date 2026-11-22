@@ -178,12 +178,20 @@ function Offers({ card, live, controller }: CardProps) {
           {data.offer.offerSet.plans.map((p) => (
             <li
               key={p.id}
-              className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-card px-4 py-3 ${chosen === p.id ? "chosen ring-2 ring-verified" : ""}`}
+              className={`grid grid-cols-1 items-center gap-x-4 gap-y-2 rounded-md sm:grid-cols-[1fr_auto] border bg-card px-4 py-3 ${chosen === p.id ? "chosen ring-2 ring-verified" : ""}`}
               data-testid={live ? `plan-${p.id}` : undefined}
             >
-              <strong className="basis-full sm:basis-auto">{p.name}</strong>
-              <span className="grow text-sm text-muted-foreground">{` 毎月の保険料 ${p.monthly.toLocaleString("ja-JP")} 円 / 毎年の年金 ${p.benefit.toLocaleString("ja-JP")} 円 `}</span>
+              {/* 左に案の名前と金額、右にボタン。文の長さが案ごとに違っても、ボタンの位置をそろえる。狭い画面では、どの行も文の下にボタンを置く。
+                  金額は、数字の途中で折り返さない */}
+              <div className="min-w-0">
+                <strong className="block">{p.name}</strong>
+                <span className="flex flex-wrap gap-x-3 text-sm text-muted-foreground">
+                  <span className="whitespace-nowrap">{`毎月の保険料 ${p.monthly.toLocaleString("ja-JP")} 円`}</span>
+                  <span className="whitespace-nowrap">{`毎年の年金 ${p.benefit.toLocaleString("ja-JP")} 円`}</span>
+                </span>
+              </div>
               <Button
+                className="justify-self-start whitespace-nowrap sm:justify-self-end"
                 variant="primary"
                 disabled={answered}
                 data-testid={live ? `choose-${p.id}` : undefined}
@@ -198,7 +206,7 @@ function Offers({ card, live, controller }: CardProps) {
               </Button>
               {/* 推奨の理由は AI の言葉なので、保険会社の内容と見分けられる枠で出す（gekko_11 の P-17） */}
               {data.reasons?.[p.id] && (
-                <div className="basis-full">
+                <div className="sm:col-span-2">
                   <AgentNote text={data.reasons[p.id]!} />
                 </div>
               )}

@@ -21,6 +21,9 @@ const expect = (step: string, cond: boolean, o: object = {}) => {
 };
 const visible = (page: Page, ...ids: string[]) => page.locator(ids.map((id) => `[data-testid=${id}]:visible`).join(", ")).first();
 
+/** ログインサーバーの画面（同じ origin の /login の下）から、顧客のアプリへ戻るまで待つ。 */
+const backToApp = (page: Page) => page.waitForURL((u) => u.origin === new URL(origin).origin && !u.pathname.startsWith("/login"), { timeout: 60_000 });
+
 const browser = await chromium.connect(process.env.BROWSER_WS ?? "ws://127.0.0.1:3334/");
 const context = await browser.newContext();
 const page = await context.newPage();
@@ -39,12 +42,12 @@ try {
   await page.locator("#username").fill(user);
   await page.locator("#password").fill(password);
   await page.locator("#kc-login, button[type=submit]").first().click();
-  await page.waitForURL(`${origin}/**`);
+  await backToApp(page);
   expect("1 ログイン", (await visible(page, "whoami", "error").textContent()) === user);
   await page.getByTestId("tab-passkeys").click();
   await page.getByTestId("add-passkey").click();
   await page.locator("#registerWebAuthn").click();
-  await page.waitForURL(`${origin}/**`);
+  await backToApp(page);
   await page.getByTestId("tab-apply").click();
   await page.getByTestId("free-send").waitFor();
 
@@ -94,6 +97,8 @@ try {
   ok = false;
   const err = (await page.getByTestId("error").isVisible().catch(() => false)) ? await page.getByTestId("error").textContent() : null;
   log("error", { error: String(e).slice(0, 400), screen: err, url: page.url() });
+  // 止まった画面を残す（local/run/ は git に入れない）
+  await page.screenshot({ path: new URL("../local/run/ui-flow-error.png", import.meta.url).pathname }).catch(() => undefined);
 } finally {
   await browser.close();
 }

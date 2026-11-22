@@ -4,12 +4,15 @@
 // 3. サインアウトし、パスキーだけでログインし直す。ログインサーバーへ送ったのがパスワードでなく、パスキーの署名であることを見る
 // ブラウザは Docker の Playwright の run-server（BROWSER_WS、既定 ws://127.0.0.1:3334/）。手元にブラウザを入れない。
 // 使い方: node scripts/ui-login.ts [origin]。既定の origin は手元の入口。DEMO_PASSWORD と USER_NAME（既定 alice）を環境変数で渡す。
-import { chromium, type Request } from "playwright-core";
+import { chromium, type Page, type Request } from "playwright-core";
 
 const origin = process.argv[2] ?? "http://gekko13.localhost:18000";
 const user = process.env.USER_NAME ?? "alice";
 const password = process.env.DEMO_PASSWORD ?? "demo";
 const log = (step: string, o: object = {}) => console.log(JSON.stringify({ at: new Date().toISOString(), step, ...o }));
+
+/** ログインサーバーの画面（同じ origin の /login の下）から、顧客のアプリへ戻るまで待つ。 */
+const backToApp = (page: Page) => page.waitForURL((u) => u.origin === new URL(origin).origin && !u.pathname.startsWith("/login"), { timeout: 60_000 });
 
 const browser = await chromium.connect(process.env.BROWSER_WS ?? "ws://127.0.0.1:3334/");
 const context = await browser.newContext();
@@ -32,7 +35,7 @@ try {
   await page.locator("#username").fill(user);
   await page.locator("#password").fill(password);
   await page.locator("#kc-login, button[type=submit]").first().click();
-  await page.waitForURL(`${origin}/**`);
+  await backToApp(page);
   await page.getByTestId("whoami").waitFor();
   const s1 = await session();
   expect("1 パスワードでログイン", s1.sub === user && s1.inboxRegistered === true && Array.isArray(s1.passkeys?.passkeys), { session: s1 });
@@ -40,7 +43,7 @@ try {
   await page.getByTestId("tab-passkeys").click();
   await page.getByTestId("add-passkey").click();
   await page.locator("#registerWebAuthn").click();
-  await page.waitForURL(`${origin}/**`);
+  await backToApp(page);
   await page.getByTestId("whoami").waitFor();
   const s2 = await session();
   // 登録の結果（passkeyAction）は、画面が先に 1 度だけ読むので、ここでは一覧の件数で見る
@@ -58,7 +61,7 @@ try {
   page.on("request", watch);
   await page.getByTestId("login").click();
   await page.locator("#authenticateWebAuthnButton").click();
-  await page.waitForURL(`${origin}/**`);
+  await backToApp(page);
   await page.getByTestId("whoami").waitFor();
   const s3 = await session();
   expect("3 パスキーでログイン", s3.sub === user && sent.passkey && !sent.password, { sent, sub: s3.sub });
