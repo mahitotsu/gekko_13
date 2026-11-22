@@ -39,7 +39,7 @@ docker run -d --rm --name gekko13-browser --network host --init --add-host gekko
 node scripts/ui-login.ts
 ```
 
-期待する結果: `1 パスワードでログイン`、`2 パスキーを登録`、`3 パスキーでログイン` の 3 行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。ログインサーバーの起動に 1 分ほどかかるので、`local/up.sh` の直後は失敗することがある。1 つのサービスだけを作り直すときは、`local/up.sh <サービス>` を回す。サービスの名前は、`local/up.sh` の冒頭にある。レルムの JSON を直したときは `local/reset-keycloak.sh` を回す（レルムは、すでにあれば取り込まない）。
+期待する結果: `1 パスワードでログイン`、`2 パスキーを登録`、`3 パスキーでログイン` の 3 行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。ログインサーバーの起動に 1 分ほどかかるので、`local/up.sh` の直後は失敗することがある。1 つのサービスだけを作り直すときは、`local/up.sh <サービス>` を回す。サービスの名前は、`local/up.sh` の冒頭にある。レルムの JSON を直したときは `local/reset-keycloak.sh` を回し、そのあと `docker restart gekko13-auth` で auth を起こし直す（レルムは、すでにあれば取り込まない。auth は、前の管理のトークンを持ち続ける）。
 
 ## 主の流れをローカルで確かめる（段 D の D1-a2-2）
 前の節のブラウザを立てたまま、主の流れの確かめを回す。営業 AI エージェントは台本で動く。
@@ -48,7 +48,7 @@ node scripts/ui-login.ts
 node scripts/ui-flow.ts
 ```
 
-期待する結果: `1 ログイン` から `8b 監査の画面で、その契約が食い違いなし` までの行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。8 の段は、監査の担当（kansa）が別のブラウザで `/audit` にログインして確かめる。事務サービス（Python）の試験は `scripts/test-python.sh`、監査サービス（Go）の試験は `scripts/test-go.sh` で回る（`npm test` も回す）。保険会社のシステム（Java）の試験は、イメージのビルドの中で回る。
+期待する結果: `1 ログイン` から `8c 監査の担当は顧客のアプリにログインできない` までの行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。8 の段は、監査の担当（kansa）が別のブラウザで `/audit` にログインして確かめる。顧客は監査の画面を、監査の担当は顧客のアプリを、ログインサーバーの画面で断られる。事務サービス（Python）の試験は `scripts/test-python.sh`、監査サービス（Go）の試験は `scripts/test-go.sh` で回る（`npm test` も回す）。保険会社のシステム（Java）の試験は、イメージのビルドの中で回る。
 
 ホストが眠ったあとは、手元の SPIRE の agent が立ち直れず、SVID が書かれないことがある（[findings 4-36](findings.md#4-36-手元で主の流れの-27-段がenvoy-なしで通ったサービスのトークンの確かめはtypescriptpythonjava-の-3-つで共通の例-15-件の判定が全部一致した)）。そのときは `local/down.sh` と `local/up.sh` で作り直す。
 
@@ -112,7 +112,7 @@ DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/lo
 
 主の流れ（段 D の D1-a2-2）は、手元と同じ `scripts/ui-flow.ts` に入口を渡して確かめる（固定の利用者のパスワードの渡し方は上と同じ）。
 
-レルムの JSON（`services/keycloak/realm/insurer.json`）を直したときは、`aws/reset-keycloak.sh --yes` で Aurora の Keycloak のデータベースを作り直し、取り込み直させる。利用者が登録したパスキーとセッションは消え、戻せない。回す前に持ち主の承認を得る。
+レルムの JSON（`services/keycloak/realm/insurer.json`）を直したときは、`aws/reset-keycloak.sh --yes` で Aurora の Keycloak のデータベースを作り直し、取り込み直させる。利用者が登録したパスキーとセッションは消え、戻せない。回す前に持ち主の承認を得る。作り直したあとは、auth のタスクを入れ替える（`aws ecs update-service --service auth --force-new-deployment`）。auth は、作り直す前の Keycloak の管理のトークンを持ち続け、連絡先とパスキーの一覧の呼び出しが 401 になる。
 
 ディストリビューションのドメイン名（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消してもディストリビューションが残る作り（`DeletionPolicy: Retain`）にしてある。
 

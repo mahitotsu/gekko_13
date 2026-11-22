@@ -6,7 +6,7 @@
 
 ## 答え
 - **基盤（確かめた）:** ECS on EC2 と SPIRE で、ワークロードの身元と mTLS を、インスタンスの数と AZ に依らず作れた。インスタンスを 0 にすれば、費用は月 1 ドル未満の固定費だけになる（推定）。事実は [findings.md](docs/findings.md) の 1〜3 節。
-- **第 2 部（途中。段 D の D1-a2）:** gekko_11 の 7 つのサービスを、TypeScript、Java、Python、Go で ECS に載せた。主の流れ（ログインから照合まで）は、CloudFront を通して AWS で通った（[findings 4-37](docs/findings.md#4-37-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。監査の画面は手元で通り、AWS ではこれから確かめる。そのあと、gekko_11 の 27 のシナリオで手口が止まるかを見る。進め方と合格の基準は [plan.md](docs/plan.md)。
+- **第 2 部（途中。段 D の D1-a2 まで）:** gekko_11 の 7 つのサービスを、TypeScript、Java、Python、Go で ECS に載せた。主の流れ（ログインから照合まで）は、CloudFront を通して AWS で通った（[findings 4-37](docs/findings.md#4-37-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。監査の画面でも、その契約が「食い違いなし」と出た（[findings 4-38](docs/findings.md#4-38-aws-でも監査の画面で主の流れの契約が食い違いなしと出た書いた者はログストリームの名前で決められた最初の作りでは一覧の画面が入口の待ちの上限を超えた)）。次は、gekko_11 の 27 のシナリオで手口が止まるかを見る。進め方と合格の基準は [plan.md](docs/plan.md)。
 - **第 1 部の文書:** 第 2 部で使い続ける事実と判断は、第 2 部の文書へ移した。第 1 部の文書は消した。読むときは、git の履歴（コミット `0a9b494` の `docs/phase1/`）から読む。
 
 ## 読む順番
