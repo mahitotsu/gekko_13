@@ -1,0 +1,36 @@
+/* 監査の担当のログインの画面の色。顧客の画面（青）と分けるため、紫を主の色にし、上の帯を暗くする。
+   値は、監査の画面（services/insurer-audit/assets/audit.css）と同じにする。どちらかを変えたら、両方を同じ変更で直す */
+:root {
+  --ins-primary: oklch(0.45 0.16 300);
+  --ins-primary-hover: oklch(0.4 0.16 300);
+  --ins-primary-foreground: oklch(0.99 0 0);
+  --ins-bar: oklch(0.27 0.06 300);
+  --ins-bar-foreground: oklch(0.97 0.01 300);
+  --ins-bar-muted: oklch(0.82 0.04 300);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ins-primary: oklch(0.72 0.14 300);
+    --ins-primary-hover: oklch(0.78 0.12 300);
+    --ins-primary-foreground: oklch(0.17 0.02 300);
+    --ins-bar: oklch(0.25 0.06 300);
+    --ins-bar-foreground: oklch(0.95 0.01 300);
+    --ins-bar-muted: oklch(0.8 0.04 300);
+  }
+}
+.pf-v5-c-login__header,
+#keycloak-bg #kc-header {
+  background: var(--ins-bar);
+  border-bottom-color: var(--ins-bar);
+}
+#keycloak-bg #kc-header-wrapper,
+#keycloak-bg #kc-header-wrapper span {
+  color: var(--ins-bar-foreground);
+}
+#keycloak-bg #kc-header-wrapper .ins-sub {
+  color: var(--ins-bar-muted);
+}
+#keycloak-bg #kc-header-wrapper .ins-badge {
+  background: var(--ins-bar-foreground);
+  color: var(--ins-bar);
+}

@@ -1,5 +1,7 @@
-/* 監査の画面の見た目。顧客のアプリ（services/customer-app/web/styles.css）とログインの画面と、同じ色の値と形にそろえる。
-   色の値（トークン）は、アプリと同じ値を写す。アプリの値を変えたら、ここも同じ変更で直す。インラインのスタイルは使わない。 */
+/* 監査の画面の見た目。形は、顧客のアプリ（services/customer-app/web/styles.css）にそろえる。
+   色は、顧客の画面（青）と取り違えないよう、主の色を紫にし、上の帯を暗くする。監査の担当のログインの画面
+   （services/keycloak/theme/insurer-audit/login/resources/css/audit.css）と同じ値にする。どちらかを変えたら、両方を同じ変更で直す。
+   インラインのスタイルは使わない。 */
 :root {
   color-scheme: light dark;
   --background: oklch(0.985 0.002 250);
@@ -8,8 +10,11 @@
   --muted: oklch(0.96 0.005 250);
   --muted-foreground: oklch(0.5 0.02 260);
   --border: oklch(0.91 0.008 250);
-  --primary: oklch(0.45 0.15 255);
+  --primary: oklch(0.45 0.16 300);
   --primary-foreground: oklch(0.99 0 0);
+  --bar: oklch(0.27 0.06 300);
+  --bar-foreground: oklch(0.97 0.01 300);
+  --bar-muted: oklch(0.82 0.04 300);
   --verified: oklch(0.52 0.13 155);
   --verified-soft: oklch(0.97 0.03 155);
   --danger: oklch(0.55 0.2 27);
@@ -25,8 +30,11 @@
     --muted: oklch(0.26 0.012 260);
     --muted-foreground: oklch(0.72 0.015 260);
     --border: oklch(0.32 0.012 260);
-    --primary: oklch(0.7 0.13 255);
-    --primary-foreground: oklch(0.17 0.02 260);
+    --primary: oklch(0.72 0.14 300);
+    --primary-foreground: oklch(0.17 0.02 300);
+    --bar: oklch(0.25 0.06 300);
+    --bar-foreground: oklch(0.95 0.01 300);
+    --bar-muted: oklch(0.8 0.04 300);
     --verified: oklch(0.75 0.14 155);
     --verified-soft: oklch(0.25 0.04 155);
     --danger: oklch(0.7 0.17 25);
@@ -43,7 +51,10 @@ code { overflow-wrap: anywhere; font-size: .85em; }
 .wrap { max-width: 64rem; margin: 0 auto; padding: 0 1rem; }
 
 /* 上の帯（アプリと同じ形） */
-header.bar { background: var(--card); border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }
+header.bar { background: var(--bar); color: var(--bar-foreground); border-bottom: 1px solid var(--bar); margin-bottom: 1.5rem; }
+header.bar .sub, header.bar .who { color: var(--bar-muted); }
+header.bar .badge-mark { background: var(--bar-foreground); color: var(--bar); }
+header.bar button { border-color: var(--bar-muted); color: var(--bar-foreground); }
 header.bar .wrap { display: flex; align-items: center; gap: .75rem; padding-top: .75rem; padding-bottom: .75rem; flex-wrap: wrap; }
 .badge-mark { display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: .5rem;
   background: var(--primary); color: var(--primary-foreground); font-size: .875rem; }

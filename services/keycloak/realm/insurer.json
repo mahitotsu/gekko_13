@@ -379,7 +379,8 @@
         "use.refresh.tokens": "false",
         "post.logout.redirect.uris": "${AUDIT_ORIGIN}/",
         "jwt.credential.issuer": "spire",
-        "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/insurer-audit"
+        "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/insurer-audit",
+        "login_theme": "insurer-audit"
       }
     },
     {

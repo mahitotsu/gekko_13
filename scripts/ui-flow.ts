@@ -105,6 +105,9 @@ try {
   // 人が開く道と同じく、末尾のスラッシュのない /audit から入り、一覧から契約を開く
   const auditor = await (await browser.newContext()).newPage();
   await auditor.goto(`${origin}/audit`);
+  // 監査の担当のログインの画面は、顧客のログインの画面と見出しが違う（取り違えないため。テーマ insurer-audit）
+  const auditLoginTitle = (await auditor.locator("#kc-header-wrapper").textContent()) ?? "";
+  expect("8b 監査の担当のログインの画面", auditLoginTitle.includes("監査の担当のログイン"), { title: auditLoginTitle });
   await auditor.locator("#username").fill(process.env.AUDITOR ?? "kansa");
   await auditor.locator("#password").fill(password);
   await auditor.locator("#kc-login, button[type=submit]").first().click();

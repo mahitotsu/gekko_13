@@ -26,6 +26,8 @@ COPY --from=build --chown=1000:0 /opt/keycloak/ /opt/keycloak/
 COPY --chown=1000:0 realm/insurer.json /opt/keycloak/data/import/
 # 画面は標準のものを引き継ぎ、passkey の登録で名前を尋ねないようにする（gekko_11 の D-42）
 COPY --chown=1000:0 theme/insurer /opt/keycloak/themes/insurer
+# 監査の担当のログインの画面。顧客の画面を引き継ぎ、色と見出しだけを替える（クライアント insurer-audit だけに使う）
+COPY --chown=1000:0 theme/insurer-audit /opt/keycloak/themes/insurer-audit
 # Aurora の証明書を確かめる CA（DB_CA_PEM）と、SPIRE の bundle endpoint の証明書（BUNDLE_CA_PEM）を、ECS が SSM から渡す。
 # あれば、ファイルに書いてから起動する。JDBC の宛先（KC_DB_URL）が sslrootcert=/tmp/db-ca.pem を指し、
 # KC_TRUSTSTORE_PATHS が /tmp/bundle-ca.pem を指す。手元では、ファイルをボリュームで渡す
