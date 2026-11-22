@@ -153,11 +153,10 @@ aws servicediscovery list-namespaces --region ap-northeast-1 --query 'Namespaces
 `gekko13-edge` の CloudFront のディストリビューションは、スタックを消しても残る。ディストリビューションを消すと、RP ID が使えなくなり、登録したパスキーも使えなくなる。消すときは、先にディストリビューションを無効にしてから、`aws cloudfront delete-distribution` で消す。
 
 SSM のパラメーターは、スタックの外で作ったので、`aws ssm delete-parameters` で消す。消すのは `/gekko13/` の下の全部で、上の `get-parameters-by-path` で一覧を出してから消す。
-- `/gekko13/auth/` の signing-key（と、第 1 部の standin-secret）
+- `/gekko13/auth/` の signing-key
 - `/gekko13/db/` の 4 つのパスワードと ca
 - `/gekko13/spire/` の root-key と root-cert、bundle endpoint の bundle-tls-key と bundle-tls-cert
 - `/gekko13/login/` の demo-password
-- 第 1 部の名残（BFF と transfer の client の秘密、プローブのリフレッシュトークンと動かし方）
 
 SPIRE のルート CA を消すと、次に作るときは新しい根になる。最後に、`list-namespaces` に `svc.gekko13.internal` が残っていないかを確かめる。残っていれば、月額のかかるホストゾーンも残っている（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
 

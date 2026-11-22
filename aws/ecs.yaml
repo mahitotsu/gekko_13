@@ -63,10 +63,6 @@ Parameters:
   SvidTtlSeconds:
     Type: Number
     Default: 300
-  AuthStandinParameter:
-    Type: String
-    Default: /gekko13/auth/standin-secret
-    Description: SSM SecureString holding the client secret of the user stand-in client of the authorization server. Created by the deploy script
   DbInitImage:
     Type: String
     Description: URI and tag of the gekko13/db-init image in ECR (services/db-init)
@@ -196,7 +192,6 @@ Resources:
               - Effect: Allow
                 Action: ssm:GetParameters
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthStandinParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbMasterPasswordParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbSpirePasswordParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbKeycloakPasswordParameter}"

@@ -100,9 +100,9 @@
 - 2026-11-22: 使っていないものを消した。持ち主が承認した。消したのは、第 1 部と段 C のコードである。bff、transfer、ledger、issuer、token-check、シナリオと測定のスクリプト、Cognito のテンプレートを消した。確かめのエンドポイント edge-check と、それに頼る測定のスクリプト（`aws/d0-measure.sh`、`aws/failover-check.sh`）も消した。AWS では、スタック `gekko13-cognito` を消し、apps のスタックから edge-check を外し、一度だけ使ったタスク定義 `gekko13-dbfix:1` を消した。過去の測定の結果は findings に残る。インスタンスを止める確かめは、D1-a3 で主の流れを見る形に作り直す。
 - 2026-11-22: D1-a2-3（監査サービスを Go で書き直す）を手元で通した。主の流れのあと、監査の担当（kansa）が監査の画面にログインし、その契約が「食い違いなし」で、会話の記録が出た。顧客（hanako）は、監査の画面を断られた。試験は、gekko_11 の突き合わせの 8 件と、ログインと役割の 5 件を Go に写して通した。
   - 手元の Keycloak のコンテナには、ECS と同じ名前のラベルを付けていなかった。そのため、最初は A の発行の記録の書き手が分からず、「トークンの連鎖が途中で切れている」と出た。ラベルを付けて直した（AWS では、ログストリームの名前で決まるので起きない）。
+- 2026-11-22: SSM に残っていた第 1 部の秘密 5 つ（`/gekko13/auth/standin-secret`、`/gekko13/bff/client-secret`、`/gekko13/transfer/client-secret`、`/gekko13/probe/` の 2 つ）を消した。持ち主が承認した。`aws/deploy.sh` と ECS の実行ロールからも、standin-secret の参照を外した。
 
 ## 次の候補（未実施）
 - design-decisions の段 D の「提案」の行を、持ち主に確かめる。
 - D1-a2-3 を AWS に送る。送ったあとに、監査サービスのタスクを入れ替える（findings 4-37）。
-- SSM に残った第 1 部の秘密（`/gekko13/auth/standin-secret`、`/gekko13/bff/client-secret`、`/gekko13/transfer/client-secret`、`/gekko13/probe/` の 2 つ）を消すかを、持ち主に確かめる。
 - 入口のリバースプロキシを作った翌日に、請求に NetworkConnector の項目が出ていないかを見る。

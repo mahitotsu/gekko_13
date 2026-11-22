@@ -103,7 +103,6 @@ fi
 cfn --stack-name "$PREFIX-network" --template-file aws/network.yaml
 
 
-# 認可サーバーの、利用者の代わりの窓口（user-standin）の秘密。なければ乱数で作る。値は画面にもファイルにも残さない
 # 秘密を作って SSM の SecureString に置く。すでにあれば作らない（作り直すと、使っている側とずれる）。値は画面にもファイルにも残さない。
 # 第 2 引数は、値を作るコマンド（標準出力に値を出す）
 SECRET_DIR=$(umask 077 && mktemp -d -p /dev/shm gekko13-secret.XXXXXX)
@@ -118,7 +117,6 @@ put_secret() {
 }
 hex16() { openssl rand -hex 16 | tr -d '\n'; }
 hex24() { openssl rand -hex 24 | tr -d '\n'; }
-put_secret "/$PREFIX/auth/standin-secret" hex16
 # 共有の Aurora（段 D の D1-a1）の管理者と、サービスごとのパスワード
 put_secret "/$PREFIX/db/master-password" hex24
 for r in spire keycloak auth; do put_secret "/$PREFIX/db/$r-password" hex24; done
