@@ -4,7 +4,9 @@
   "displayName": "教材保険会社",
   "displayNameHtml": "<span class=\"ins-badge\">教</span><span>教材保険会社</span><span class=\"ins-sub\">ログイン</span>",
   "internationalizationEnabled": true,
-  "supportedLocales": ["ja"],
+  "supportedLocales": [
+    "ja"
+  ],
   "defaultLocale": "ja",
   "enabled": true,
   "sslRequired": "none",
@@ -357,6 +359,9 @@
         "post.logout.redirect.uris": "${APP_ORIGIN}/",
         "jwt.credential.issuer": "spire",
         "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/customer-app"
+      },
+      "authenticationFlowBindingOverrides": {
+        "browser": "7ca1f0bf-c024-5981-8d62-33c88fe3c9ac"
       }
     },
     {
@@ -381,6 +386,9 @@
         "jwt.credential.issuer": "spire",
         "jwt.credential.sub": "spiffe://${TRUST_DOMAIN}/svc/insurer-audit",
         "login_theme": "insurer-audit"
+      },
+      "authenticationFlowBindingOverrides": {
+        "browser": "f0d64762-47c7-57fd-8e43-f06ab9fef5f2"
       }
     },
     {
@@ -419,6 +427,226 @@
           }
         }
       ]
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "id": "7ca1f0bf-c024-5981-8d62-33c88fe3c9ac",
+      "alias": "customer browser",
+      "description": "Browser login that only lets users with the CUSTOMER role through",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": true,
+          "flowAlias": "customer login"
+        },
+        {
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticatorFlow": true,
+          "flowAlias": "customer role"
+        }
+      ]
+    },
+    {
+      "alias": "customer login",
+      "description": "Same as the built-in browser flow, without 2FA",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "auth-cookie"
+        },
+        {
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "identity-provider-redirector"
+        },
+        {
+          "requirement": "ALTERNATIVE",
+          "priority": 30,
+          "userSetupAllowed": false,
+          "authenticatorFlow": true,
+          "flowAlias": "customer forms"
+        }
+      ]
+    },
+    {
+      "alias": "customer forms",
+      "description": "Username, password and passkey form",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "auth-username-password-form"
+        }
+      ]
+    },
+    {
+      "alias": "customer role",
+      "description": "Deny users without the CUSTOMER role",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "customer-not-customer"
+        },
+        {
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "deny-access-authenticator",
+          "authenticatorConfig": "customer-deny"
+        }
+      ]
+    },
+    {
+      "id": "f0d64762-47c7-57fd-8e43-f06ab9fef5f2",
+      "alias": "auditor browser",
+      "description": "Browser login that only lets users with the AUDITOR role through",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": true,
+          "flowAlias": "auditor login"
+        },
+        {
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticatorFlow": true,
+          "flowAlias": "auditor role"
+        }
+      ]
+    },
+    {
+      "alias": "auditor login",
+      "description": "Same as the built-in browser flow, without 2FA",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "auth-cookie"
+        },
+        {
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "identity-provider-redirector"
+        },
+        {
+          "requirement": "ALTERNATIVE",
+          "priority": 30,
+          "userSetupAllowed": false,
+          "authenticatorFlow": true,
+          "flowAlias": "auditor forms"
+        }
+      ]
+    },
+    {
+      "alias": "auditor forms",
+      "description": "Username, password and passkey form",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "auth-username-password-form"
+        }
+      ]
+    },
+    {
+      "alias": "auditor role",
+      "description": "Deny users without the AUDITOR role",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "auditor-not-auditor"
+        },
+        {
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": false,
+          "authenticatorFlow": false,
+          "authenticator": "deny-access-authenticator",
+          "authenticatorConfig": "auditor-deny"
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "customer-not-customer",
+      "config": {
+        "condUserRole": "CUSTOMER",
+        "negate": "true"
+      }
+    },
+    {
+      "alias": "customer-deny",
+      "config": {
+        "denyErrorMessage": "顧客のアプリには、顧客の利用者だけがログインできます。"
+      }
+    },
+    {
+      "alias": "auditor-not-auditor",
+      "config": {
+        "condUserRole": "AUDITOR",
+        "negate": "true"
+      }
+    },
+    {
+      "alias": "auditor-deny",
+      "config": {
+        "denyErrorMessage": "監査の画面には、監査の担当だけがログインできます。"
+      }
     }
   ]
 }

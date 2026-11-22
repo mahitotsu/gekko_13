@@ -1,6 +1,6 @@
 // 段 D の D1-a2 の確かめ: ブラウザの顧客を演じ、主の流れの 2〜7 段を、入口から手口なしで通し、監査の画面で突き合わせを見る。
 // ログイン → パスキーの登録 → 相談と案の提示 → 案を選ぶ → 意向確認書面と申込書に署名 → 提出 → 直送 → 照合 → 監査。
-// 監査の担当（kansa）は、別のブラウザのコンテキストでログインする。顧客は、監査の画面を見られない。
+// 監査の担当（kansa）は、別のブラウザのコンテキストでログインする。顧客は監査の画面を、監査の担当は顧客のアプリを使えない。
 // gekko_11 の test/ui/flow.test.ts の最初の試験と、test/ui/browser.ts の手順を写した（台本の営業 AI エージェント。案は固定）。
 // ブラウザは Docker の Playwright の run-server（BROWSER_WS、既定 ws://127.0.0.1:3334/）。仮想の認証器でパスキーを作る。
 // 使い方: node scripts/ui-flow.ts [origin]。既定の origin は手元の入口。DEMO_PASSWORD と USER_NAME（既定 hanako）を環境変数で渡す。
@@ -97,10 +97,12 @@ try {
   await row.waitFor({ timeout: 15_000 });
   expect("7b 照合（受信箱と契約）", (await row.getAttribute("data-status")) === "match", { status: await row.getAttribute("data-status") });
 
-  // 8. 監査（段 D の D1-a2-3）。顧客は、ログインサーバーにログインしていても、監査の画面を見られない
+  // 8. 監査（段 D の D1-a2-3）。顧客は、ログインサーバーにログインしていても、監査の画面を見られない。
+  // ログインサーバーが、監査のクライアントの認証の流れで、役割 AUDITOR のない利用者を止める（監査サービスも重ねて確かめる）
   await page.goto(`${origin}/audit/`);
-  await page.getByTestId("forbidden").waitFor({ timeout: 30_000 });
-  expect("8a 顧客は監査の画面を見られない", await page.getByTestId("forbidden").isVisible());
+  const auditDenied = page.getByText("監査の画面には、監査の担当だけがログインできます。");
+  await auditDenied.waitFor({ timeout: 30_000 });
+  expect("8a 顧客は監査の画面を見られない", await auditDenied.isVisible());
   // 監査の担当が、別のブラウザで監査の画面にログインし、その契約の突き合わせを見る。記録は、届くまで少し待つことがある
   // 人が開く道と同じく、末尾のスラッシュのない /audit から入り、一覧から契約を開く
   const auditor = await (await browser.newContext()).newPage();
@@ -130,6 +132,12 @@ try {
     await auditor.waitForTimeout(3000);
   }
   expect("8b 監査の画面で、その契約が食い違いなし", status === "食い違いなし" && conversationRows > 0, { status, conversationRows });
+  // 監査の担当は、顧客のアプリにログインできない（ログインサーバーが、顧客のクライアントの認証の流れで、役割 CUSTOMER のない利用者を止める）
+  await auditor.goto(origin);
+  await auditor.getByTestId("login").click();
+  const customerDenied = auditor.getByText("顧客のアプリには、顧客の利用者だけがログインできます。");
+  await customerDenied.waitFor({ timeout: 30_000 });
+  expect("8c 監査の担当は顧客のアプリにログインできない", await customerDenied.isVisible());
 } catch (e) {
   ok = false;
   const err = (await page.getByTestId("error").isVisible().catch(() => false)) ? await page.getByTestId("error").textContent() : null;
