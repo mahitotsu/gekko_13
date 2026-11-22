@@ -56,7 +56,7 @@ func main() {
 	}
 	addr := ":" + env("APP_PORT", "8080")
 	slog.Info("listening", "addr", addr, "records", env("RECORDS", "cloudwatch"))
-	server := &http.Server{Addr: addr, Handler: Handler("/audit", auth, Reconciler{Source: records}), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: addr, Handler: Handler("/audit", auth, records.Snapshot), ReadHeaderTimeout: 10 * time.Second}
 	if err := server.ListenAndServe(); err != nil {
 		slog.Error("止まった", "error", err)
 		os.Exit(1)

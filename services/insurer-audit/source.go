@@ -45,26 +45,79 @@ func parseAudit(line string) map[string]any {
 }
 
 // Records は、監査の記録（Logs か docker）と、保険会社のシステムの自己申告を合わせた出どころ。
+// logs は、文字列を含むログの行のうち、監査の記録だけを返す。
 type Records struct {
 	logs       func(needle string) ([]Entry, error)
 	selfURL    string
 	selfClient *http.Client
 }
 
-func (r Records) Search(needle string) ([]Entry, error) { return r.logs(needle) }
+// Snapshot は、1 つの要求の間だけ使う出どころを返す。監査の記録は、最初に 1 回だけまとめて読み、その中で探す。
+// CloudWatch Logs を探すたびに呼ぶと、一覧の画面（契約ごとに何度も探す）が、入口のリバースプロキシの待ちの上限を超えた
+// （gekko_11 の Loki は速かったので、探すたびに読んでいた）。
+func (r Records) Snapshot() Source { return &snapshot{records: r} }
 
-func (r Records) Contracts() ([]Entry, error) {
-	found, err := r.logs("contract")
+type snapshot struct {
+	records Records
+	loaded  bool
+	entries []Entry
+	texts   []string
+	self    []map[string]any
+	selfOK  bool
+}
+
+func (s *snapshot) load() error {
+	if s.loaded {
+		return nil
+	}
+	found, err := s.records.logs(`"audit"`)
 	if err != nil {
+		return err
+	}
+	s.entries, s.texts = found, make([]string, len(found))
+	for i, e := range found {
+		raw, _ := json.Marshal(e.Record)
+		s.texts[i] = string(raw)
+	}
+	s.loaded = true
+	return nil
+}
+
+func (s *snapshot) Search(needle string) ([]Entry, error) {
+	if err := s.load(); err != nil {
 		return nil, err
 	}
 	var out []Entry
-	for _, e := range found {
+	for i, e := range s.entries {
+		if strings.Contains(s.texts[i], needle) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (s *snapshot) Contracts() ([]Entry, error) {
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for _, e := range s.entries {
 		if e.Kind() == "contract" {
 			out = append(out, e)
 		}
 	}
 	return out, nil
+}
+
+func (s *snapshot) SelfReported() ([]map[string]any, error) {
+	if !s.selfOK {
+		self, err := s.records.SelfReported()
+		if err != nil {
+			return nil, err
+		}
+		s.self, s.selfOK = self, true
+	}
+	return s.self, nil
 }
 
 func (r Records) SelfReported() ([]map[string]any, error) {
@@ -94,7 +147,7 @@ func CloudWatchLogs(ctx context.Context, group string) (func(string) ([]Entry, e
 	client := cloudwatchlogs.NewFromConfig(cfg)
 	return func(needle string) ([]Entry, error) {
 		var out []Entry
-		pattern := fmt.Sprintf("%q", needle)
+		pattern := needle
 		p := cloudwatchlogs.NewFilterLogEventsPaginator(client, &cloudwatchlogs.FilterLogEventsInput{
 			LogGroupName:  aws.String(group),
 			FilterPattern: aws.String(pattern),

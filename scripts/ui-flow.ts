@@ -47,6 +47,8 @@ try {
   expect("1 ログイン", (await visible(page, "whoami", "error").textContent()) === user);
   await page.getByTestId("tab-passkeys").click();
   await page.getByTestId("add-passkey").click();
+  // 登録の画面のスクリプトが読み込み終わる前に押すと、何も起きない（CloudFront 越しでは読み込みが遅い）。読み込みを待ってから押す
+  await page.waitForLoadState("networkidle");
   await page.locator("#registerWebAuthn").click();
   await backToApp(page);
   await page.getByTestId("tab-apply").click();
@@ -100,8 +102,9 @@ try {
   await page.getByTestId("forbidden").waitFor({ timeout: 30_000 });
   expect("8a 顧客は監査の画面を見られない", await page.getByTestId("forbidden").isVisible());
   // 監査の担当が、別のブラウザで監査の画面にログインし、その契約の突き合わせを見る。記録は、届くまで少し待つことがある
+  // 人が開く道と同じく、末尾のスラッシュのない /audit から入り、一覧から契約を開く
   const auditor = await (await browser.newContext()).newPage();
-  await auditor.goto(`${origin}/audit/`);
+  await auditor.goto(`${origin}/audit`);
   await auditor.locator("#username").fill(process.env.AUDITOR ?? "kansa");
   await auditor.locator("#password").fill(password);
   await auditor.locator("#kc-login, button[type=submit]").first().click();
@@ -109,7 +112,13 @@ try {
   let status = "";
   let conversationRows = 0;
   for (let i = 0; i < 20; i++) {
-    await auditor.goto(`${origin}/audit/contracts/${nonce}`);
+    await auditor.goto(`${origin}/audit/`);
+    const row = auditor.locator(`[data-testid=contract-${nonce}] a`);
+    if (!(await row.isVisible())) {
+      await auditor.waitForTimeout(3000);
+      continue;
+    }
+    await row.click();
     if (await auditor.getByTestId("status").isVisible()) {
       status = (await auditor.getByTestId("status").textContent()) ?? "";
       conversationRows = await auditor.locator("[data-testid=conversation] tbody tr").count();

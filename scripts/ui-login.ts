@@ -42,6 +42,8 @@ try {
 
   await page.getByTestId("tab-passkeys").click();
   await page.getByTestId("add-passkey").click();
+  // 登録の画面のスクリプトが読み込み終わる前に押すと、何も起きない（CloudFront 越しでは読み込みが遅い）。読み込みを待ってから押す
+  await page.waitForLoadState("networkidle");
   await page.locator("#registerWebAuthn").click();
   await backToApp(page);
   await page.getByTestId("whoami").waitFor();
@@ -60,6 +62,7 @@ try {
   };
   page.on("request", watch);
   await page.getByTestId("login").click();
+  await page.waitForLoadState("networkidle");
   await page.locator("#authenticateWebAuthnButton").click();
   await backToApp(page);
   await page.getByTestId("whoami").waitFor();

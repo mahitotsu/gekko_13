@@ -40,7 +40,8 @@ type page struct {
 }
 
 // Handler は、/audit の下の受け口を組み立てる。
-func Handler(base string, auth *Auth, rc Reconciler) http.Handler {
+// source は、要求ごとに出どころを作る（1 つの要求の間だけ、読んだ記録を使い回す）。
+func Handler(base string, auth *Auth, source func() Source) http.Handler {
 	mux := http.NewServeMux()
 	render := func(w http.ResponseWriter, status int, name string, p page) {
 		p.Base = base
@@ -85,7 +86,7 @@ func Handler(base string, auth *Auth, rc Reconciler) http.Handler {
 	})
 	mux.HandleFunc("POST /logout", auth.Logout)
 	mux.HandleFunc("GET /{$}", guard(func(w http.ResponseWriter, r *http.Request, s *session) {
-		list, err := rc.List(listLimit)
+		list, err := Reconciler{Source: source()}.List(listLimit)
 		if err != nil {
 			fail(w, err)
 			return
@@ -93,7 +94,7 @@ func Handler(base string, auth *Auth, rc Reconciler) http.Handler {
 		render(w, http.StatusOK, "contracts.html", page{Title: "契約の一覧", User: s.sub, Contracts: list})
 	}))
 	mux.HandleFunc("GET /contracts/{nonce}", guard(func(w http.ResponseWriter, r *http.Request, s *session) {
-		report, err := rc.Reconcile(r.PathValue("nonce"))
+		report, err := Reconciler{Source: source()}.Reconcile(r.PathValue("nonce"))
 		if err != nil {
 			fail(w, err)
 			return
@@ -105,7 +106,7 @@ func Handler(base string, auth *Auth, rc Reconciler) http.Handler {
 		render(w, http.StatusOK, "contract.html", page{Title: "契約の突き合わせ", User: s.sub, Report: report})
 	}))
 	mux.HandleFunc("GET /api/contracts", guard(func(w http.ResponseWriter, r *http.Request, _ *session) {
-		list, err := rc.List(listLimit)
+		list, err := Reconciler{Source: source()}.List(listLimit)
 		if err != nil {
 			fail(w, err)
 			return
@@ -113,7 +114,7 @@ func Handler(base string, auth *Auth, rc Reconciler) http.Handler {
 		writeJSON(w, http.StatusOK, list)
 	}))
 	mux.HandleFunc("GET /api/contracts/{nonce}", guard(func(w http.ResponseWriter, r *http.Request, _ *session) {
-		report, err := rc.Reconcile(r.PathValue("nonce"))
+		report, err := Reconciler{Source: source()}.Reconcile(r.PathValue("nonce"))
 		if err != nil {
 			fail(w, err)
 			return
@@ -127,8 +128,16 @@ func Handler(base string, auth *Auth, rc Reconciler) http.Handler {
 			Groups []Group `json:"groups"`
 		}{report, report.Groups()})
 	}))
-	// 入口のリバースプロキシは、/audit を付けたまま送る
-	return http.StripPrefix(base, mux)
+	// 入口のリバースプロキシは、/audit を付けたまま送る。/audit（末尾のスラッシュなし）は /audit/ へ送る。
+	// StripPrefix のあとのパスが空になり、ServeMux が「/」へ送り直すと、顧客のアプリへ行ってしまうため
+	stripped := http.StripPrefix(base, mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == base {
+			http.Redirect(w, r, base+"/", http.StatusFound)
+			return
+		}
+		stripped.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
