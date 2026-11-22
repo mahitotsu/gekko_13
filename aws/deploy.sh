@@ -239,7 +239,7 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
 # 主の流れのサービス（段 D の D1-a2）。ディストリビューションのドメイン名（RpId）から issuer と origin を作るので、
 # ディストリビューションがまだなければ作らない（初めてのときは、もう一度この手順を回す）
 if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
-  cfn --stack-name "$PREFIX-flow" --template-file "$(strip flow)" --parameter-overrides \
+  cfn --stack-name "$PREFIX-flow" --template-file "$(strip flow)" --capabilities CAPABILITY_IAM --parameter-overrides \
     "ClusterName=$(out "$PREFIX-ecs" ClusterName)" \
     "CapacityProviderName=$(out "$PREFIX-ecs" CapacityProviderName)" \
     "NamespaceId=$(out "$PREFIX-ecs" NamespaceId)" \
