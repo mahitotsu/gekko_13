@@ -21,11 +21,10 @@
 | docker の attestor | 呼び出し元のプロセスから docker のコンテナを探し、コンテナのラベルなどで見分ける attestor |
 | spiffe-helper | SPIRE の agent から SVID を受け取り、ファイルに書くサイドカー。入れ替えのたびに書き直す |
 | 登録（エントリー） | SPIRE の server に置く、「この条件のワークロードに、この SPIFFE ID を配る」という対応 |
-| セレクター | 登録の条件。例えば `docker:label:com.amazonaws.ecs.task-definition-family:gekko13-ledger` |
+| セレクター | 登録の条件。例えば `docker:label:com.amazonaws.ecs.task-definition-family:gekko13-auth` |
 | token exchange | RFC 8693 の、受け取ったトークンを別のトークンに交換する手続き。この検証では委任（actor を付ける）で使う |
 | `act.client_id` | 交換したトークンで、交換させた呼び出し元（actor）の client を示すクレーム |
-| BFF | Backend for Frontend。利用者の画面のエンドポイントで、最初の交換をする |
-| transfer、ledger | 振込を受け付けるサービスと、記帳する最も奥のサービス |
+| BFF | Backend for Frontend。顧客のアプリの、画面の後ろのサーバー。ログインしてトークン A を持ち、画面の代わりに営業 AI エージェントや認可サーバーを呼ぶ |
 | bridge モード | ECS のネットワークモードの 1 つ。コンテナは docker のブリッジにつながり、同じタスクでもネットワークを共有しない |
 | awsvpc モード | ECS のネットワークモードの 1 つ。タスクごとに ENI（ネットワークの口）を持つ。この検証では、SPIRE server だけが使う |
 | DAEMON | ECS のサービスの配置の 1 つ。どのインスタンスにも 1 つずつタスクを置く。この検証では、SPIRE の agent に使う |
@@ -35,7 +34,7 @@
 | Cloud Map | AWS の、サービスの名前と居場所を登録する仕組み。この検証では、Service Connect の名前空間と、SPIRE server の DNS の名前（`spire-server.svc.gekko13.internal`）に使う |
 | デュアルスタックの名前 | IPv4 と IPv6 の両方で届く、AWS の API の名前（`*.api.aws`、`*.on.aws`）。既定の名前（`*.amazonaws.com`）は IPv4 だけのものがある |
 | registrar | SPIRE server のタスクの中のコンテナ（`scripts/spire-registrar.sh`）。登録を作り、agent が最初に信じるバンドルを EFS に書く |
-| プローブ（乗っ取られたタスク） | AWS でシナリオを回す役。本物のサービスと同じファミリーの別の版のタスクとして動き、自分が得た SVID だけで攻撃する。第 1 部の bff、transfer、ledger の分は消した。段 D の D1-b で、gekko_11 の確かめの役として作り直す（plan.md の 4-4） |
+| プローブ（乗っ取られたタスク） | AWS でシナリオを回す役。本物のサービスと同じファミリーの別の版のタスクとして動き、自分が得た SVID だけで攻撃する。段 D の D1-b で、gekko_11 の確かめの役として作り直す（plan.md の 4-4） |
 | rogue | シナリオ 1-b の、登録していないファミリー（`gekko13-rogue`）のタスク |
 | 段 A、段 B | 第 1 部の AWS の段の分け方。段 A は 1 つの AZ で各サービス 1 タスク、段 B は 2 つの AZ で各サービス 2 タスク |
 | 段 C、段 D、段 E | 第 2 部の段の分け方。段 C は方式が基盤で成り立つかの確認、段 D は gekko_11 の流れと 27 のシナリオ、段 E は 2 つの AZ と、防御を外した複製（[plan.md](plan.md)） |
@@ -70,3 +69,6 @@
 | UpstreamAuthority | SPIRE server が、自分の CA を、上流の CA の下に作らせる設定。`disk` は、ルート CA の証明書と鍵をファイルから読む |
 | token-guard | gekko_11 の部品。エンドポイントでトークンと呼び手を確かめ、出口でトークンを替える。gekko_11 ではサイドカーで、段 D では各アプリが読むライブラリにする |
 | 直送 | 保険会社のシステムが、契約の内容を、AI を通さずに、本人が登録した宛先へ直接送ること。本人は、手元の写しと見比べる（gekko_11） |
+| 主の流れ | gekko_11 の申込みの流れの 7 段（ログイン、案の提示、選択、署名、提出、直送、照合）を、手口なしで最後まで通すこと。確かめは `scripts/ui-flow.ts` |
+| 突き合わせ | 監査サービスが、保険会社のシステムの自己申告を、認可サーバーと事務サービスの記録と比べること。結果は「食い違いなし」か「食い違いあり」 |
+| 役割 CUSTOMER、AUDITOR | ログインサーバーのレルムの役割。顧客のアプリには CUSTOMER、監査の画面には AUDITOR の利用者だけがログインできる |
