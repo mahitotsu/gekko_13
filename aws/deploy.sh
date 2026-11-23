@@ -285,4 +285,15 @@ cfn --stack-name "$PREFIX-edge" --template-file aws/edge.yaml --parameter-overri
   "EntryEndpointArn=$(out "$PREFIX-entry" EndpointArn)" \
   "EntryDomainName=$(out "$PREFIX-entry" EndpointDomainName)"
 
+# 観察のダッシュボード（段 D の D1-a3。判断 57）。無料枠（3 つまで、1 つにメトリクス 50 まで）に収める
+if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
+  cfn --stack-name "$PREFIX-dashboard" --template-file aws/dashboard.yaml --parameter-overrides \
+    "ClusterName=$(out "$PREFIX-ecs" ClusterName)" \
+    "AutoScalingGroupName=$(out "$PREFIX-ecs" AutoScalingGroupName)" \
+    "CapacityProviderName=$(out "$PREFIX-ecs" CapacityProviderName)" \
+    "DbClusterId=$(out "$PREFIX-db" DbClusterId)" \
+    "DistributionId=$(out "$PREFIX-edge" DistributionId)" \
+    "AppLogGroup=$(out "$PREFIX-ecs" LogGroupName)"
+fi
+
 echo "作った。入口: https://$(rp_id)/ 。使い終わったら aws/scale.sh down で、タスクと台を 0 にする"

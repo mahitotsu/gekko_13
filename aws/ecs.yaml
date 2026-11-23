@@ -427,6 +427,8 @@ Resources:
       AutoScalingGroupName: !Sub "${Prefix}-ecs"
       MinSize: "0"
       MaxSize: !Ref MaxInstances
+      # インスタンスの数を、ダッシュボード（aws/dashboard.yaml）で見るため。ASG のグループメトリクスは、1 分ごとでも追加の料金がかからない（推定）
+      MetricsCollection: [{ Granularity: 1Minute, Metrics: [GroupInServiceInstances, GroupDesiredCapacity] }]
       VPCZoneIdentifier: !Ref SubnetIds
       CapacityRebalance: true
       MixedInstancesPolicy:
