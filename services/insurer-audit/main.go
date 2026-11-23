@@ -34,13 +34,19 @@ func main() {
 		slog.Error("SVID を読めない", "error", err)
 		os.Exit(1)
 	}
+	// セッションは、共有のデータベースに置く（段 D の D1-a3。state.go）。DB_URL がなければ、起動しない
+	store, err := newPgState(ctx, os.Getenv("DB_URL"), env("DB_USER", "audit"), os.Getenv("DB_PASSWORD"), os.Getenv("DB_CA_PEM"))
+	if err != nil {
+		slog.Error("共有のデータベースを使えない", "error", err)
+		os.Exit(1)
+	}
 	issuer := os.Getenv("ISSUER")
 	auth := NewAuth(ctx, AuthConfig{
 		Issuer:       issuer,
 		LoginOrigin:  env("LOGIN_ORIGIN", mustURL(issuer).Scheme+"://"+mustURL(issuer).Host),
 		PublicOrigin: os.Getenv("PUBLIC_ORIGIN"),
 		JWTSVIDFile:  env("JWT_SVID_FILE", "/svid/jwt_svid.token"),
-	})
+	}, store)
 	records := Records{
 		selfURL:    env("BACKEND_URL", "https://insurer-backend:9443") + "/audit/records",
 		selfClient: svids.Client(spiffeid.RequireFromPath(td, "/svc/insurer-backend"), 10*time.Second),

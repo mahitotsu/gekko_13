@@ -59,6 +59,16 @@ Parameters:
   OfferSigningKeyParameter:
     Type: String
     Default: /gekko13/backend/offer-key
+  DbCustomerAppPasswordParameter:
+    Type: String
+    Default: /gekko13/db/customer-app-password
+  DbAuditPasswordParameter:
+    Type: String
+    Default: /gekko13/db/audit-password
+  StateKeyParameter:
+    Type: String
+    Default: /gekko13/customer-app/state-key
+    Description: SSM SecureString with the AES-256 key that seals the customer app sessions in Aurora (64 hex characters)
 
 Resources:
   # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
@@ -145,6 +155,13 @@ Resources:
             - { Name: RP_ID, Value: !Ref RpId }
             - { Name: AUTH_ORIGIN, Value: https://auth:8443 }
             - { Name: AGENT_ORIGIN, Value: https://sales-agent:8443 }
+            # セッション、ログインの途中の情報、受信箱は、共有の Aurora に置く（段 D の D1-a3）。セッションは STATE_KEY で暗号化する（判断 54）
+            - { Name: DB_URL, Value: !Sub "postgres://${DbHost}:5432/customer_app" }
+            - { Name: DB_USER, Value: customer_app }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCustomerAppPasswordParameter}" }
+            - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
+            - { Name: STATE_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${StateKeyParameter}" }
           MountPoints:
             - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
           LogConfiguration:
@@ -478,6 +495,12 @@ Resources:
             - { Name: PUBLIC_ORIGIN, Value: !Sub "https://${RpId}/audit" }
             - { Name: LOG_GROUP, Value: !Ref LogGroupName }
             - { Name: AWS_REGION, Value: !Ref AWS::Region }
+            # 監査の担当のセッションは、共有の Aurora に置く（段 D の D1-a3）
+            - { Name: DB_URL, Value: !Sub "postgres://${DbHost}:5432/audit" }
+            - { Name: DB_USER, Value: audit }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbAuditPasswordParameter}" }
+            - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
           MountPoints:
             - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
           LogConfiguration:

@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Hono } from "hono";
 import { json, mtlsFetch, readBody, type SvidSource } from "../../../packages/spiffe-tls/src/index.ts";
 import { addBff } from "./bff.ts";
+import { state } from "./state.ts";
 
 export interface Notice {
   customer: string;
@@ -38,9 +39,6 @@ const file = (path: string) => {
 const OFFER_KEYS_URL = process.env.OFFER_KEYS_URL ?? "https://insurer-backend:9443/offers-jwks.json";
 let offerKeys: { at: number; body: unknown } | undefined;
 
-/** 受信箱の番号ごとの通知。番号は、顧客が passkey と一緒に登録した連絡先で、番号を持つ端末だけが読める（1 タスクのメモリ。冗長化は段 D の D1-a3） */
-const inboxes = new Map<string, Notice[]>();
-
 /**
  * 保険会社のシステムが、契約内容を直接送る受け口（SVID の mTLS で受ける。main.ts）。送り手は、相手の SPIFFE ID で保険会社のシステムに限る。
  */
@@ -51,7 +49,8 @@ export async function handleNotice(req: IncomingMessage, res: ServerResponse, pe
   const inbox = m[1];
   if (!INBOX.test(inbox)) return json(res, 400, { error: "受信箱の番号の形が違う" });
   const notice = JSON.parse(await readBody(req)) as Notice;
-  inboxes.set(inbox, [...(inboxes.get(inbox) ?? []), notice]);
+  // 受信箱は、共有のデータベースに置く。直送と画面の読み取りは、別のタスクに当たる（段 D の D1-a3。判断 53）
+  await state().addNotice(inbox, JSON.stringify(notice));
   res.writeHead(204).end();
 }
 
@@ -96,8 +95,8 @@ export function createApp(svids?: SvidSource) {
     }
     return c.json(offerKeys.body as object);
   });
-  // 顧客の端末の中の受信箱に当たる。画面は、自分の番号で読む
-  app.get("/api/inbox/:inbox", (c) => c.json(inboxes.get(c.req.param("inbox")) ?? []));
+  // 顧客の端末の中の受信箱に当たる。画面は、自分の番号で読む。番号は、顧客が passkey と一緒に登録した連絡先で、番号を持つ端末だけが読める
+  app.get("/api/inbox/:inbox", async (c) => c.json((await state().notices(c.req.param("inbox"))).map((n) => JSON.parse(n) as Notice)));
 
   return app;
 }

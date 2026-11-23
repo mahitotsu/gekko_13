@@ -1,5 +1,6 @@
 // 顧客のアプリの BFF（gekko_11 の D-41、RFC 10017 の 6.1 節）。OAuth の機密クライアントとして、ログインサーバーで A と P を受け取り、
-// 画面の代わりに営業 AI エージェントと認可サーバーを呼ぶ。トークンと DPoP の鍵は、このサーバーのメモリにだけ置き、画面には出さない。
+// 画面の代わりに営業 AI エージェントと認可サーバーを呼ぶ。トークンと DPoP の鍵は、画面には出さない。
+// セッションは、2 つのタスクで共有するため、暗号化して共有のデータベースに置く（段 D の D1-a3。判断 54。state.ts）。
 // 画面とは、HttpOnly の Cookie のセッションでつなぐ。顧客の承認（passkey の署名）は、今までどおり画面の端末で行う。
 import type { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -12,6 +13,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { compactVerify, createRemoteJWKSet, customFetch, SignJWT } from "jose";
 import * as oidc from "openid-client";
 import { needsRefresh, verifyIdToken } from "../web/checks.ts";
+import { state } from "./state.ts";
 
 const env = (name: string, fallback?: string) => process.env[name] ?? fallback ?? "";
 
@@ -53,12 +55,12 @@ const COOKIE = { path: "/", secure: true, httpOnly: true, sameSite: "Strict" } a
 const MAX_AGE_MS = 60 * 60_000;
 const IDLE_MS = 30 * 60_000;
 
-interface Session {
+/** 共有のデータベースに置くセッション（state.ts が暗号化する）。DPoP の鍵は JWK で持つ（判断 54）。 */
+interface StoredSession {
   sub: string;
   idToken: string;
-  /** DPoP の鍵。取り出せない鍵として作り、このサーバーのメモリにだけ置く。 */
-  keys: webcrypto.CryptoKeyPair;
-  dpop: oidc.DPoPHandle;
+  /** DPoP の鍵の組（JWK）。タスクが止まっても、もう片方のタスクが同じ鍵で proof を作る。 */
+  dpopKey: { privateJwk: webcrypto.JsonWebKey; publicJwk: webcrypto.JsonWebKey };
   access: string;
   refresh?: string;
   /** 受信箱の番号を、認可サーバーに登録できたか（gekko_11 の D-26）。P は登録と passkey の一覧の読み取りにだけ使い、持ち続けない（gekko_11 の D-42、D-43）。 */
@@ -69,7 +71,13 @@ interface Session {
   passkeys?: Passkeys;
   created: number;
   used: number;
-  renewing?: Promise<void>;
+}
+
+/** 動いている間のセッション。保存した形に、鍵（CryptoKey）と DPoP のハンドルを足す。 */
+interface Session extends StoredSession {
+  sid: string;
+  keys: webcrypto.CryptoKeyPair;
+  dpop: oidc.DPoPHandle;
 }
 
 interface LoginState {
@@ -107,8 +115,35 @@ export interface PasskeyAction {
 /** ログインサーバーの中の資格情報の ID（UUID）。ほかの形は、ログインサーバーに渡さない。 */
 const CREDENTIAL_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-const sessions = new Map<string, Session>();
-const logins = new Map<string, LoginState>();
+/** セッションの期限。作ってからの上限と、無操作の上限の、早い方。 */
+const expiryOf = (s: Pick<StoredSession, "created" | "used">) => Math.min(s.created + MAX_AGE_MS, s.used + IDLE_MS);
+const LOGIN_MS = 10 * 60_000;
+/** 使った時刻は、1 分より細かくは書き戻さない（要求のたびにデータベースへ書かない）。 */
+const TOUCH_MS = 60_000;
+
+const stored = (s: Session): StoredSession => {
+  const { sid: _sid, keys: _keys, dpop: _dpop, ...rest } = s;
+  return rest;
+};
+
+/** 保存した形から、鍵を取り込み、DPoP のハンドルを作り直す。 */
+async function revive(sid: string, s: StoredSession): Promise<Session> {
+  const ec = { name: "ECDSA", namedCurve: "P-256" };
+  const keys = {
+    privateKey: await crypto.subtle.importKey("jwk", s.dpopKey.privateJwk, ec, false, ["sign"]),
+    publicKey: await crypto.subtle.importKey("jwk", s.dpopKey.publicJwk, ec, true, ["verify"]),
+  } as webcrypto.CryptoKeyPair;
+  return { ...s, sid, keys, dpop: oidc.getDPoPHandle(client(), keys) };
+}
+
+async function save(s: Session) {
+  await state().put("session", s.sid, JSON.stringify(stored(s)), expiryOf(s));
+}
+
+async function loadSession(sid: string): Promise<Session | undefined> {
+  const raw = await state().get("session", sid);
+  return raw ? revive(sid, JSON.parse(raw) as StoredSession) : undefined;
+}
 
 /** A を更新できない。画面は、ログインし直しへ案内する。 */
 class LoginExpired extends Error {}
@@ -194,35 +229,37 @@ async function proof(session: Session, htm: string, htu: string, token: string) 
 
 const random = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
 
-/** 古いセッションとログインの途中を捨てる。 */
-function sweep() {
-  const now = Date.now();
-  for (const [k, s] of sessions) if (now - s.created > MAX_AGE_MS || now - s.used > IDLE_MS) sessions.delete(k);
-  for (const [k, l] of logins) if (now - l.at > 10 * 60_000) logins.delete(k);
-}
-
-function current(c: Context): Session | undefined {
-  sweep();
+/** Cookie のセッションを読む。期限を過ぎたものは、置き場所が返さない（state.ts）。 */
+async function current(c: Context): Promise<Session | undefined> {
   const sid = getCookie(c, SESSION);
-  const session = sid ? sessions.get(sid) : undefined;
-  if (session) session.used = Date.now();
+  const session = sid ? await loadSession(sid) : undefined;
+  if (session && Date.now() - session.used > TOUCH_MS) {
+    session.used = Date.now();
+    await save(session);
+  }
   return session;
 }
 
 /**
  * A を更新する（gekko_11 の P-18）。使い回すと、ログインサーバーがログインごと止めるので、セッションごとに 1 つしか走らせない。
+ * 2 つのタスクで共有するので、セッションの行をロックして更新する。ロックを待つ間に、ほかの要求が更新を済ませていれば、それを使う（判断 54）。
  * 更新にもクライアント認証が要るので、更新のトークンを盗んでも、顧客のアプリの身元がなければ使えない（gekko_11 の G31）。
  */
-function renew(session: Session): Promise<void> {
-  session.renewing ??= (async () => {
-    if (!session.refresh) throw new LoginExpired("更新のトークンがない");
-    const tokens = await oidc.refreshTokenGrant(client(), session.refresh, undefined, { DPoP: session.dpop }).catch((e: Error) => {
+async function renew(session: Session): Promise<void> {
+  const seen = session.access;
+  const latest = await state().locked("session", session.sid, async (raw) => {
+    if (!raw) throw new LoginExpired("セッションがない");
+    const now = JSON.parse(raw) as StoredSession;
+    if (now.access !== seen) return { result: now };
+    if (!now.refresh) throw new LoginExpired("更新のトークンがない");
+    const tokens = await oidc.refreshTokenGrant(client(), now.refresh, undefined, { DPoP: session.dpop }).catch((e: Error) => {
       throw new LoginExpired(`更新できない: ${e.message}`);
     });
-    session.access = tokens.access_token;
-    session.refresh = tokens.refresh_token ?? session.refresh;
-  })().finally(() => (session.renewing = undefined));
-  return session.renewing;
+    const next = { ...now, access: tokens.access_token, refresh: tokens.refresh_token ?? now.refresh };
+    return { value: JSON.stringify(next), expiresAt: expiryOf(next), result: next };
+  });
+  session.access = latest.access;
+  session.refresh = latest.refresh;
 }
 
 /** CSRF の対策（RFC 10017 の 6.1.3.3 節）。SameSite=Strict に加え、事前確認が要るヘッダーと、自分の origin を求める。 */
@@ -236,7 +273,7 @@ async function startLogin(c: Context, kind: LoginState["kind"], extra: Pick<Logi
   const config = client();
   const login: LoginState = { kind, verifier: oidc.randomPKCECodeVerifier(), state: random(), nonce: random(), ...extra, at: Date.now() };
   const id = random();
-  logins.set(id, login);
+  await state().put("login", id, JSON.stringify(login), login.at + LOGIN_MS);
   setCookie(c, LOGIN, id, { ...COOKIE, maxAge: 600 });
   const url = oidc.buildAuthorizationUrl(config, {
     redirect_uri: `${cfg().appOrigin}/callback`,
@@ -301,15 +338,17 @@ export function addBff(app: Hono) {
     const url = new URL(c.req.url, cfg().appOrigin);
     if (!url.searchParams.has("code") && !url.searchParams.has("error")) return next();
     const id = getCookie(c, LOGIN);
-    const login = id ? logins.get(id) : undefined;
-    if (id) logins.delete(id);
+    // ログインの途中の情報は 1 回だけ使う。2 つのタスクに同時に届いても、渡すのは片方だけ（state.ts の take）
+    const raw = id ? await state().take("login", id) : undefined;
+    const login = raw ? (JSON.parse(raw) as LoginState) : undefined;
     deleteCookie(c, LOGIN, COOKIE);
     const fail = (message: string) => c.redirect(`/?login_error=${encodeURIComponent(message)}`, 302);
     if (!login) return fail("ログインの情報がない");
     if (url.searchParams.has("error")) return fail(`ログインできない: ${url.searchParams.get("error")}`);
     try {
-      const existing = login.sid ? sessions.get(login.sid) : undefined;
-      const keys = existing?.keys ?? ((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])) as webcrypto.CryptoKeyPair);
+      const existing = login.sid ? await loadSession(login.sid) : undefined;
+      // DPoP の鍵は、共有のデータベースに暗号化して置くので、取り出せる形で作る（判断 54）
+      const keys = existing?.keys ?? ((await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as webcrypto.CryptoKeyPair);
       const config = client();
       const dpop = existing?.dpop ?? oidc.getDPoPHandle(config, keys);
       const callback = new URL(`${cfg().appOrigin}/callback${url.search}`);
@@ -322,6 +361,7 @@ export function addBff(app: Hono) {
         if (login.inbox) existing.inboxRegistered = await registerInbox(existing, tokens.access_token, login.inbox);
         // 本人の passkey の一覧も、同じ P で読む。画面は、端末に一覧を伝え、空なら作成を促す（gekko_11 の D-43）
         existing.passkeys = await readPasskeys(existing, tokens.access_token);
+        await save(existing);
         return c.redirect("/", 302);
       }
       const sid = random();
@@ -329,7 +369,8 @@ export function addBff(app: Hono) {
       // passkey の作成か削除を頼んだときは、ログインサーバーが結果（success、cancelled、error）を戻り先に付ける。取り消しや失敗でも、ログインは済んでいる
       const status = passkeyResult(url.searchParams.get("kc_action_status"));
       const passkeyAction: PasskeyAction | undefined = login.register ? { action: "create", status } : login.remove ? { action: "delete", status } : undefined;
-      sessions.set(sid, { sub, idToken: tokens.id_token, keys, dpop, access: tokens.access_token, refresh: tokens.refresh_token, inboxRegistered: false, passkeyAction, created: now, used: now });
+      const dpopKey = { privateJwk: await crypto.subtle.exportKey("jwk", keys.privateKey), publicJwk: await crypto.subtle.exportKey("jwk", keys.publicKey) };
+      await save({ sid, sub, idToken: tokens.id_token, dpopKey, keys, dpop, access: tokens.access_token, refresh: tokens.refresh_token, inboxRegistered: false, passkeyAction, created: now, used: now });
       setCookie(c, SESSION, sid, COOKIE);
       // 続けて、受信箱の登録に使う P を受け取る
       return startLogin(c, "passkeys", { sid, inbox: login.inbox });
@@ -339,12 +380,15 @@ export function addBff(app: Hono) {
   });
 
   /** 画面に渡すのは、利用者の名前と、受信箱を登録できたかと、passkey の登録の結果と一覧だけ。トークンは渡さない。 */
-  app.get("/bff/session", (c) => {
-    const session = current(c);
+  app.get("/bff/session", async (c) => {
+    const session = await current(c);
     if (!session) return c.json({ error: "ログインしていない" }, 401);
     // passkey の作成か削除の結果は、ログインの後に 1 度だけ渡す
     const passkeyAction = session.passkeyAction;
-    session.passkeyAction = undefined;
+    if (passkeyAction) {
+      session.passkeyAction = undefined;
+      await save(session);
+    }
     return c.json({ sub: session.sub, inboxRegistered: session.inboxRegistered, ...(passkeyAction ? { passkeyAction } : {}), ...(session.passkeys ? { passkeys: session.passkeys } : {}) });
   });
 
@@ -354,9 +398,9 @@ export function addBff(app: Hono) {
    */
   app.post("/bff/logout", async (c) => {
     if (!sameOrigin(c)) return c.json({ error: "要求の出どころを確かめられない" }, 403);
-    const session = current(c);
+    const session = await current(c);
     const sid = getCookie(c, SESSION);
-    if (sid) sessions.delete(sid);
+    if (sid) await state().delete("session", sid);
     deleteCookie(c, SESSION, COOKIE);
     return c.json({ url: await logoutUrl(session?.idToken, loginJwks()) });
   });
@@ -367,7 +411,7 @@ export function addBff(app: Hono) {
    */
   app.post("/bff/agui", async (c) => {
     if (!sameOrigin(c)) return c.json({ error: "要求の出どころを確かめられない" }, 403);
-    const session = current(c);
+    const session = await current(c);
     if (!session) return c.json({ error: "ログインしていない" }, 401);
     const body = await c.req.text();
     const { agentOrigin, agentId } = cfg();

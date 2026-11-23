@@ -65,8 +65,8 @@ func Handler(base string, auth *Auth, source func() Source) http.Handler {
 				auth.Start(w, r)
 				return
 			}
-			if !s.auditor {
-				render(w, http.StatusForbidden, "forbidden.html", page{Title: "見られません", User: s.sub})
+			if !s.Auditor {
+				render(w, http.StatusForbidden, "forbidden.html", page{Title: "見られません", User: s.Sub})
 				return
 			}
 			next(w, r, s)
@@ -91,7 +91,7 @@ func Handler(base string, auth *Auth, source func() Source) http.Handler {
 			fail(w, err)
 			return
 		}
-		render(w, http.StatusOK, "contracts.html", page{Title: "契約の一覧", User: s.sub, Contracts: list})
+		render(w, http.StatusOK, "contracts.html", page{Title: "契約の一覧", User: s.Sub, Contracts: list})
 	}))
 	mux.HandleFunc("GET /contracts/{nonce}", guard(func(w http.ResponseWriter, r *http.Request, s *session) {
 		report, err := Reconciler{Source: source()}.Reconcile(r.PathValue("nonce"))
@@ -103,7 +103,7 @@ func Handler(base string, auth *Auth, source func() Source) http.Handler {
 			http.Error(w, "その nonce の契約がない", http.StatusNotFound)
 			return
 		}
-		render(w, http.StatusOK, "contract.html", page{Title: "契約の突き合わせ", User: s.sub, Report: report})
+		render(w, http.StatusOK, "contract.html", page{Title: "契約の突き合わせ", User: s.Sub, Report: report})
 	}))
 	mux.HandleFunc("GET /api/contracts", guard(func(w http.ResponseWriter, r *http.Request, _ *session) {
 		list, err := Reconciler{Source: source()}.List(listLimit)

@@ -3,19 +3,20 @@ package main
 // 監査の担当のログイン（gekko_11 の SecurityConfig。gekko_11 の D-31）。OpenID Connect の認可コードと PKCE を使い、
 // クライアント認証は JWT-SVID（gekko_11 の D-38）。ID トークンは go-oidc で、公開の名前の issuer として確かめる。
 // 画面と記録は、ID トークンの roles に AUDITOR がある者にだけ見せる。全ての顧客の契約と会話が出るからである。
-// セッションはメモリに置く（1 タスク。冗長化は段 D の D1-a3）。Cookie は /audit の下だけに置き、顧客のアプリのセッションと分ける。
+// セッションは、2 つのタスクで共有するため、共有のデータベースに置く（段 D の D1-a3。state.go）。Cookie は /audit の下だけに置き、
+// 顧客のアプリのセッションと分ける。
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -43,29 +44,31 @@ type AuthConfig struct {
 }
 
 type session struct {
-	sub     string
-	idToken string
-	auditor bool
-	created time.Time
+	Sub     string    `json:"sub"`
+	IDToken string    `json:"idToken"`
+	Auditor bool      `json:"auditor"`
+	Created time.Time `json:"created"`
 }
 
 type pending struct {
-	state, nonce, verifier string
-	at                     time.Time
+	State    string `json:"state"`
+	Nonce    string `json:"nonce"`
+	Verifier string `json:"verifier"`
 }
+
+const loginMaxAge = 10 * time.Minute
 
 // Auth は、ログインとセッションを扱う。
 type Auth struct {
 	cfg      AuthConfig
 	oauth    oauth2.Config
 	verifier *oidc.IDTokenVerifier
-	mu       sync.Mutex
-	sessions map[string]session
-	logins   map[string]pending
+	store    stateStore
 }
 
 // NewAuth は、ログインサーバーの受け口を 1 つずつ決める。公開の名前と、取りに行く先が違うことがあるので、発見の文書は使わない。
-func NewAuth(ctx context.Context, cfg AuthConfig) *Auth {
+// store は、セッションとログインの途中の情報の置き場所（state.go）。
+func NewAuth(ctx context.Context, cfg AuthConfig, store stateStore) *Auth {
 	path := mustURL(cfg.Issuer).Path
 	internal := strings.TrimRight(cfg.LoginOrigin, "/") + path
 	keys := oidc.NewRemoteKeySet(ctx, internal+"/protocol/openid-connect/certs")
@@ -82,8 +85,7 @@ func NewAuth(ctx context.Context, cfg AuthConfig) *Auth {
 			},
 		},
 		verifier: oidc.NewVerifier(cfg.Issuer, keys, &oidc.Config{ClientID: clientID}),
-		sessions: map[string]session{},
-		logins:   map[string]pending{},
+		store:    store,
 	}
 }
 
@@ -111,11 +113,12 @@ func (a *Auth) Current(r *http.Request) *session {
 	if err != nil {
 		return nil
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	s, ok := a.sessions[c.Value]
-	if !ok || time.Since(s.created) > sessionMaxAge {
-		delete(a.sessions, c.Value)
+	raw, ok, err := a.store.Get(r.Context(), "session", c.Value)
+	if err != nil || !ok {
+		return nil
+	}
+	var s session
+	if json.Unmarshal(raw, &s) != nil || time.Since(s.Created) > sessionMaxAge {
 		return nil
 	}
 	return &s
@@ -123,18 +126,15 @@ func (a *Auth) Current(r *http.Request) *session {
 
 // Start は、ログインサーバーのログインへ送る（認可コードと PKCE）。
 func (a *Auth) Start(w http.ResponseWriter, r *http.Request) {
-	p := pending{state: random(), nonce: random(), verifier: oauth2.GenerateVerifier(), at: time.Now()}
+	p := pending{State: random(), Nonce: random(), Verifier: oauth2.GenerateVerifier()}
 	id := random()
-	a.mu.Lock()
-	for k, v := range a.logins {
-		if time.Since(v.at) > 10*time.Minute {
-			delete(a.logins, k)
-		}
+	raw, _ := json.Marshal(p)
+	if err := a.store.Put(r.Context(), "login", id, raw, time.Now().Add(loginMaxAge)); err != nil {
+		http.Error(w, "ログインを始められない", http.StatusServiceUnavailable)
+		return
 	}
-	a.logins[id] = p
-	a.mu.Unlock()
-	http.SetCookie(w, a.cookie(loginCookie, id, 600))
-	http.Redirect(w, r, a.oauth.AuthCodeURL(p.state, oidc.Nonce(p.nonce), oauth2.S256ChallengeOption(p.verifier)), http.StatusFound)
+	http.SetCookie(w, a.cookie(loginCookie, id, int(loginMaxAge.Seconds())))
+	http.Redirect(w, r, a.oauth.AuthCodeURL(p.State, oidc.Nonce(p.Nonce), oauth2.S256ChallengeOption(p.Verifier)), http.StatusFound)
 }
 
 // Callback は、戻り先。認可コードを、JWT-SVID のクライアント認証と PKCE で替え、ID トークンを確かめる。
@@ -143,12 +143,11 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("ログインの途中の情報がない")
 	}
-	a.mu.Lock()
-	p, ok := a.logins[c.Value]
-	delete(a.logins, c.Value)
-	a.mu.Unlock()
+	// ログインの途中の情報は 1 回だけ使う。2 つのタスクに同時に届いても、渡すのは片方だけ
+	raw, ok, err := a.store.Take(r.Context(), "login", c.Value)
 	http.SetCookie(w, a.cookie(loginCookie, "", -1))
-	if !ok || r.URL.Query().Get("state") != p.state {
+	var p pending
+	if err != nil || !ok || json.Unmarshal(raw, &p) != nil || r.URL.Query().Get("state") != p.State {
 		return fmt.Errorf("ログインの途中の情報が合わない")
 	}
 	if e := r.URL.Query().Get("error"); e != "" {
@@ -158,18 +157,18 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("JWT-SVID を読めない: %w", err)
 	}
-	token, err := a.oauth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(p.verifier),
+	token, err := a.oauth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(p.Verifier),
 		oauth2.SetAuthURLParam("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"),
 		oauth2.SetAuthURLParam("client_assertion", strings.TrimSpace(string(assertion))))
 	if err != nil {
 		return fmt.Errorf("認可コードを替えられない: %w", err)
 	}
-	raw, _ := token.Extra("id_token").(string)
-	idToken, err := a.verifier.Verify(r.Context(), raw)
+	rawID, _ := token.Extra("id_token").(string)
+	idToken, err := a.verifier.Verify(r.Context(), rawID)
 	if err != nil {
 		return fmt.Errorf("ID トークンを確かめられない: %w", err)
 	}
-	if idToken.Nonce != p.nonce {
+	if idToken.Nonce != p.Nonce {
 		return fmt.Errorf("ID トークンの nonce が違う")
 	}
 	var claims struct {
@@ -177,9 +176,11 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) error {
 	}
 	_ = idToken.Claims(&claims)
 	sid := random()
-	a.mu.Lock()
-	a.sessions[sid] = session{sub: idToken.Subject, idToken: raw, auditor: slices.Contains(claims.Roles, "AUDITOR"), created: time.Now()}
-	a.mu.Unlock()
+	now := time.Now()
+	body, _ := json.Marshal(session{Sub: idToken.Subject, IDToken: rawID, Auditor: slices.Contains(claims.Roles, "AUDITOR"), Created: now})
+	if err := a.store.Put(r.Context(), "session", sid, body, now.Add(sessionMaxAge)); err != nil {
+		return fmt.Errorf("セッションを置けない: %w", err)
+	}
 	http.SetCookie(w, a.cookie(sessionCookie, sid, int(sessionMaxAge.Seconds())))
 	http.Redirect(w, r, a.cfg.PublicOrigin+"/", http.StatusFound)
 	return nil
@@ -189,11 +190,11 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) error {
 // 残ると、次に開いたときに、前の人のまま通ってしまう。
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	hint := ""
+	if s := a.Current(r); s != nil {
+		hint = s.IDToken
+	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		a.mu.Lock()
-		hint = a.sessions[c.Value].idToken
-		delete(a.sessions, c.Value)
-		a.mu.Unlock()
+		_ = a.store.Delete(r.Context(), "session", c.Value)
 	}
 	http.SetCookie(w, a.cookie(sessionCookie, "", -1))
 	q := url.Values{"client_id": {clientID}, "post_logout_redirect_uri": {a.cfg.PublicOrigin + "/"}}

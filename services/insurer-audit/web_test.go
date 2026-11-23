@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,12 +19,13 @@ func testAuth() *Auth {
 		LoginOrigin:  "http://keycloak.test",
 		PublicOrigin: "https://app.test/audit",
 		JWTSVIDFile:  "/nonexistent",
-	})
+	}, newMemState())
 }
 
 func withSession(a *Auth, sub string, auditor bool) *http.Cookie {
 	id := random()
-	a.sessions[id] = session{sub: sub, idToken: "id-token-of-" + sub, auditor: auditor, created: time.Now()}
+	raw, _ := json.Marshal(session{Sub: sub, IDToken: "id-token-of-" + sub, Auditor: auditor, Created: time.Now()})
+	_ = a.store.Put(context.Background(), "session", id, raw, time.Now().Add(time.Hour))
 	return &http.Cookie{Name: sessionCookie, Value: id}
 }
 

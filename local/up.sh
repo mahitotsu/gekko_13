@@ -40,6 +40,8 @@ touch run/db.env
 for k in DB_ADMIN DB_SPIRE DB_KEYCLOAK DB_AUTH DB_BACKEND DB_CUSTOMER_APP DB_SALES_AGENT DB_AUDIT; do
   grep -q "^$k=" run/db.env || printf '%s=%s\n' "$k" "$(openssl rand -hex 16)" >> run/db.env
 done
+# 顧客のアプリのセッションの暗号鍵（AES-256。判断 54）
+grep -q "^STATE_KEY=" run/db.env || printf 'STATE_KEY=%s\n' "$(openssl rand -hex 32)" >> run/db.env
 # shellcheck disable=SC1091
 . run/db.env
 # 保険会社のシステムの提示の鍵（段 D の D1-a3）。AWS と同じく、秘密鍵と公開鍵の PEM を並べ、複数のコンテナが同じ鍵を使う
@@ -115,6 +117,7 @@ start_customer_app() {
     -e SERVICE=customer-app -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
     -e "ISSUER=$ISSUER" -e "APP_ORIGIN=$ORIGIN" -e "RP_ID=$RP_ID" -e LOGIN_ORIGIN=http://keycloak:8080 \
     -e AUTH_ORIGIN=https://auth:8443 -e AGENT_ORIGIN=https://sales-agent:8443 \
+    -e DB_URL=postgres://postgres:5432/customer_app -e DB_USER=customer_app -e "DB_PASSWORD=$DB_CUSTOMER_APP" -e "STATE_KEY=$STATE_KEY" \
     -v "$HERE/run/svid/customer-app:/svid:ro" \
     "$IMAGE"
 }
@@ -158,6 +161,7 @@ start_insurer_audit() {
     --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
     -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
     -e "ISSUER=$ISSUER" -e "PUBLIC_ORIGIN=$ORIGIN/audit" -e LOGIN_ORIGIN=http://keycloak:8080 \
+    -e DB_URL=postgres://postgres:5432/audit -e DB_USER=audit -e "DB_PASSWORD=$DB_AUDIT" \
     -e RECORDS=docker -v /var/run/docker.sock:/var/run/docker.sock:ro \
     -v "$HERE/run/svid/insurer-audit:/svid:ro" \
     "$AUDIT_IMAGE"
