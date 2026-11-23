@@ -8,6 +8,7 @@
 # 手順: PostgreSQL → SPIRE の server → バンドルと join token → 登録 → agent → サービス → 入口。
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
 #   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry）
+#   主の流れの 5 つのサービスは、AWS と同じく 2 つずつ立てる。GEKKO13_LOCAL_REPLICAS で数を変える（段 D の D1-a3）。
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$(pwd)
@@ -70,6 +71,24 @@ build_backend() {
   docker buildx build -q --load --build-context vectors=../packages/token-guard/vectors -t "$BACKEND_IMAGE" ../services/insurer-backend >/dev/null
 }
 run() { docker run -d --restart unless-stopped --network "$NET" --label gekko13=1 "$@" >/dev/null; }
+# 主の流れのサービスの数（段 D の D1-a3。AWS と同じく既定は 2）。2 つ目は gekko13-<サービス>-2 で、同じネットワークの別名で立てる。
+# docker の DNS は、別名の宛先を両方返すので、呼ぶ側は、どちらかに当たる。SVID の helper は 1 つで、両方が同じ SVID を読む
+REPLICAS=${GEKKO13_LOCAL_REPLICAS:-2}
+REPLICATED=" customer-app sales-agent insurer-mcp insurer-backend insurer-audit "
+R=
+# start_<サービス> を、主の流れのサービスなら REPLICAS の数だけ回す
+start() {
+  local s=$1 i
+  if [[ $REPLICATED == *" $s "* ]]; then
+    for ((i = 1; i <= REPLICAS; i++)); do
+      R=$([ "$i" = 1 ] || echo "-$i")
+      "start_${s//-/_}"
+    done
+    R=
+  else
+    "start_${s//-/_}"
+  fi
+}
 srv() { docker exec gekko13-spire-server /opt/spire/bin/spire-server "$@"; }
 
 # 各サービスの svid-helper。ホストの利用者で書く。シナリオの実行役が「盗まれた鍵」として読めるようにするため（検証でだけ）。
@@ -115,7 +134,7 @@ start_auth() {
 # 顧客のアプリ（画面の配信元と BFF）。8080 は入口から、9443 は保険会社のシステムからの直送（mTLS）
 start_customer_app() {
   # shellcheck disable=SC2046
-  run --name gekko13-customer-app --network-alias customer-app $(app_labels customer-app) \
+  run --name "gekko13-customer-app$R" --network-alias customer-app $(app_labels customer-app) \
     -e SERVICE=customer-app -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
     -e "ISSUER=$ISSUER" -e "APP_ORIGIN=$ORIGIN" -e "RP_ID=$RP_ID" -e LOGIN_ORIGIN=http://keycloak:8080 \
     -e AUTH_ORIGIN=https://auth:8443 -e AGENT_ORIGIN=https://sales-agent:8443 \
@@ -127,7 +146,7 @@ start_customer_app() {
 # 営業 AI エージェント（台本）。受け口は SVID の mTLS（8443）で、顧客のアプリの BFF だけが呼ぶ
 start_sales_agent() {
   # shellcheck disable=SC2046
-  run --name gekko13-sales-agent --network-alias sales-agent $(app_labels sales-agent) \
+  run --name "gekko13-sales-agent$R" --network-alias sales-agent $(app_labels sales-agent) \
     -e SERVICE=sales-agent -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_ORIGIN=http://keycloak:8080 \
     -e DB_URL=postgres://postgres:5432/sales_agent -e DB_USER=sales_agent -e "DB_PASSWORD=$DB_SALES_AGENT" -e "STATE_KEY=$AGENT_STATE_KEY" \
@@ -138,7 +157,7 @@ start_sales_agent() {
 # 事務サービス（Python）。受け口は SVID の mTLS（9443）で、営業 AI エージェントだけが呼ぶ。svid-helper と同じホストの利用者で読む
 start_insurer_mcp() {
   # shellcheck disable=SC2046
-  run --name gekko13-insurer-mcp --network-alias insurer-mcp --user "$(id -u):$(id -g)" $(app_labels insurer-mcp) \
+  run --name "gekko13-insurer-mcp$R" --network-alias insurer-mcp --user "$(id -u):$(id -g)" $(app_labels insurer-mcp) \
     -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -v "$HERE/run/svid/insurer-mcp:/svid:ro" \
     "$MCP_IMAGE"
@@ -147,7 +166,7 @@ start_insurer_mcp() {
 # 保険会社のシステム（Java）。受け口は SVID の mTLS（9443）。直送は、顧客のアプリの 9443 へ送る
 start_insurer_backend() {
   # shellcheck disable=SC2046
-  run --name gekko13-insurer-backend --network-alias insurer-backend --memory 512m $(app_labels insurer-backend) \
+  run --name "gekko13-insurer-backend$R" --network-alias insurer-backend --memory 512m $(app_labels insurer-backend) \
     -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" -e "RP_ID=$RP_ID" -e "WEBAUTHN_ORIGINS=$ORIGIN" \
     -e CUSTOMER_APP_URL=https://customer-app:9443 \
     -e DB_URL=jdbc:postgresql://postgres:5432/backend -e DB_USER=backend -e "DB_PASSWORD=$DB_BACKEND" \
@@ -160,7 +179,7 @@ start_insurer_backend() {
 # （書いた者は、ECS と同じ名前のラベルで決める）。docker のソケットを渡すのは手元だけで、AWS では渡さない
 start_insurer_audit() {
   # shellcheck disable=SC2046
-  run --name gekko13-insurer-audit --network-alias insurer-audit $(app_labels insurer-audit) \
+  run --name "gekko13-insurer-audit$R" --network-alias insurer-audit $(app_labels insurer-audit) \
     --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
     -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
     -e "ISSUER=$ISSUER" -e "PUBLIC_ORIGIN=$ORIGIN/audit" -e LOGIN_ORIGIN=http://keycloak:8080 \
@@ -193,7 +212,8 @@ if [ $# -gt 0 ]; then
       *) echo "知らないサービス: $s" >&2; exit 1 ;;
     esac
     docker rm -f "gekko13-$s" >/dev/null 2>&1 || true
-    "start_${s//-/_}"
+    for i in 2 3 4; do docker rm -f "gekko13-$s-$i" >/dev/null 2>&1 || true; done
+    start "$s"
   done
   echo "入れ替えた: $*"
   exit 0
@@ -244,12 +264,12 @@ start_keycloak
 helper auth jwt
 start_auth
 helper customer-app jwt
-start_customer_app
+start customer-app
 for s in sales-agent insurer-mcp insurer-backend; do
   helper "$s"
-  "start_${s//-/_}"
+  start "$s"
 done
 helper insurer-audit jwt
-start_insurer_audit
+start insurer-audit
 start_entry
 echo "立ち上げた。ログインサーバーの起動に 1 分ほどかかる: $ORIGIN/"

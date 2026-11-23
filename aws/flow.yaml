@@ -2,14 +2,14 @@ AWSTemplateFormatVersion: "2010-09-09"
 # gekko13 の主の流れのスタック（段 D の D1-a2）。gekko_11 のサービスのうち、apps のスタックにないもの（Keycloak と auth のほか）を置く。
 # 顧客のアプリ（画面の配信元と BFF。D1-a2-1）、営業 AI エージェント、事務サービス、保険会社のシステム（D1-a2-2）、監査サービス（D1-a2-3）。
 # サービスどうしは、Service Connect の名前（TCP の中継だけ）で呼び、各アプリが SVID の mTLS を終える。呼んでよい相手は、各アプリが SPIFFE ID で決める。
-# 新しいサービスは、まず 1 タスクで、状態をメモリに持つ。冗長化は段 D の D1-a3 で行う（docs/design-decisions.md）。
+# どのサービスも 2 タスクで、状態は共有の Aurora に置く（段 D の D1-a3。docs/design-decisions.md の判断 53〜56）。
 # CloudFormation は ASCII 以外の文字を「?」に置き換えるので、Description と Metadata は英語で書く（docs/findings.md）。
 Description: >-
   gekko13 main-flow services on the base runtime (gekko13-ecs): the customer app (web UI and BFF), the sales agent,
   the MCP office service, the insurer backend and the audit service. The entry relay finds the customer app and the audit service
   through SRV records.
   Services call each other by Service Connect names (TCP relay only) and terminate SVID mTLS in the apps.
-  New services start with one task holding state in memory; redundancy comes in a later step.
+  Each service runs two tasks and keeps its state in the shared Aurora cluster, so any task can serve the next request.
 
 Metadata:
   AWSToolsMetrics:
@@ -184,8 +184,13 @@ Resources:
       ServiceName: customer-app
       TaskDefinition: !Ref CustomerAppTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DesiredCount: 2
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
+      # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }, { Type: spread, Field: instanceId }]
       HealthCheckGracePeriodSeconds: 60
       ServiceRegistries: [{ RegistryArn: !GetAtt CustomerAppDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
       # 直送の受け口（9443）は、保険会社のシステムが customer-app-notice:9443 で呼ぶ。SRV の customer-app とは別の名前にする
@@ -375,8 +380,13 @@ Resources:
       ServiceName: sales-agent
       TaskDefinition: !Ref SalesAgentTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DesiredCount: 2
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
+      # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }, { Type: spread, Field: instanceId }]
       HealthCheckGracePeriodSeconds: 120
       ServiceConnectConfiguration:
         Enabled: true
@@ -390,8 +400,13 @@ Resources:
       ServiceName: insurer-mcp
       TaskDefinition: !Ref InsurerMcpTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DesiredCount: 2
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
+      # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }, { Type: spread, Field: instanceId }]
       HealthCheckGracePeriodSeconds: 120
       ServiceConnectConfiguration:
         Enabled: true
@@ -405,8 +420,13 @@ Resources:
       ServiceName: insurer-backend
       TaskDefinition: !Ref InsurerBackendTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DesiredCount: 2
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
+      # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }, { Type: spread, Field: instanceId }]
       HealthCheckGracePeriodSeconds: 120
       ServiceConnectConfiguration:
         Enabled: true
@@ -528,8 +548,13 @@ Resources:
       ServiceName: insurer-audit
       TaskDefinition: !Ref InsurerAuditTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: 1
-      DeploymentConfiguration: { MinimumHealthyPercent: 0, MaximumPercent: 200 }
+      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
+      DesiredCount: 2
+      DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
+      AvailabilityZoneRebalancing: ENABLED
+      # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
+      PlacementStrategies: [{ Type: spread, Field: "attribute:ecs.availability-zone" }, { Type: spread, Field: instanceId }]
       ServiceRegistries: [{ RegistryArn: !GetAtt InsurerAuditDiscovery.Arn, ContainerName: app, ContainerPort: 8080 }]
       # 保険会社のシステムを Service Connect の名前で呼ぶ（クライアントだけ）
       ServiceConnectConfiguration:

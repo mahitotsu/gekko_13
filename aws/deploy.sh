@@ -5,6 +5,8 @@
 #   GEKKO13_MAX_HOSTS でインスタンスの上限を（既定 4。タスクのオートスケーリングで増える分）変える。
 #   GEKKO13_INSTANCE_TYPES でインスタンスの種類を（スポットの候補。ちょうど 4 つ。既定は ecs.yaml の InstanceTypes）、
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
+#   GEKKO13_AUTOSCALING=true で、Keycloak と auth のタスクのオートスケーリング（2〜4）を作る。既定は作らず、どのサービスも 2 タスク
+#   （段 D の D1-a3。判断 56。性能を確かめるときに使う。アラームの固定費がかかる）。
 # 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（Keycloak と auth）→ flow（主の流れのサービス）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -243,6 +245,7 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "SubnetIds=$(out "$PREFIX-network" SubnetIds)" \
   "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
   "DbHost=$DB_HOST" \
+  "EnableAutoScaling=${GEKKO13_AUTOSCALING:-false}" \
   "RpId=$(rp_id)"
 
 # 主の流れのサービス（段 D の D1-a2）。ディストリビューションのドメイン名（RpId）から issuer と origin を作るので、

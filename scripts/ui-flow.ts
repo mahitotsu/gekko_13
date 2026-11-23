@@ -4,6 +4,8 @@
 // gekko_11 の test/ui/flow.test.ts の最初の試験と、test/ui/browser.ts の手順を写した（台本の営業 AI エージェント。案は固定）。
 // ブラウザは Docker の Playwright の run-server（BROWSER_WS、既定 ws://127.0.0.1:3334/）。仮想の認証器でパスキーを作る。
 // 使い方: node scripts/ui-flow.ts [origin]。既定の origin は手元の入口。DEMO_PASSWORD と USER_NAME（既定 hanako）を環境変数で渡す。
+// PAUSE_FILE を渡すと、案の提示のあと、そのファイルができるまで待つ（段 D の D1-a3。途中でタスクを止める確かめ）。
+import { existsSync } from "node:fs";
 import { chromium, type Page } from "playwright-core";
 
 const origin = process.argv[2] ?? "http://gekko13.localhost:18000";
@@ -69,6 +71,15 @@ try {
   const plans = await page.locator("[data-testid^=plan-]:visible").count();
   expect("2 案の提示（保険会社の署名を画面が確かめた）", !error && !warning && plans > 0, { plans, error, warning });
   const nonce = (await page.getByTestId("offers").getAttribute("data-nonce")) ?? "";
+
+  // 流れの途中でタスクを止める確かめ（段 D の D1-a3）。PAUSE_FILE を渡すと、案の提示のあと、そのファイルができるまで待つ。
+  // 待っている間に、会話を受けたタスクを止め、続きが、ログインし直さずに、もう片方のタスクで通るかを見る
+  const pauseFile = process.env.PAUSE_FILE;
+  if (pauseFile) {
+    log("待つ（案の提示のあと）", { pauseFile });
+    while (!existsSync(pauseFile)) await page.waitForTimeout(500);
+    log("続ける");
+  }
 
   // 3. 案を選び、意向確認書面と申込書を読んで、どちらも選んだ案なら署名する
   await page.getByTestId(`choose-${CHOSEN.id}`).click();

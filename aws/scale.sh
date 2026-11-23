@@ -5,8 +5,9 @@
 # SPIRE server の状態は EFS にあるので、インスタンスが入れ替わっても CA と登録は残る。入口のリバースプロキシは名前空間の SRV で送り先を見つけるので、向け直しは要らない。
 # 使い方:
 #   aws/scale.sh down        DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、インスタンスが 0 になるまで待つ（数分）
-#   aws/scale.sh up          spire-server、auth、keycloak を 2、主の流れのサービス（customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit）を 1 にして、安定するまで待つ。
-#                            auth と keycloak のタスクのオートスケーリングを、最小 2、最大 4 に戻す
+#   aws/scale.sh up          全部のサービス（spire-server、auth、keycloak と、主の流れの customer-app、sales-agent、insurer-mcp、
+#                            insurer-backend、insurer-audit）を 2 にして、安定するまで待つ（段 D の D1-a3。判断 56）。
+#                            タスクのオートスケーリングがあれば（apps のスタックの EnableAutoScaling）、最小 2、最大 4 に戻す
 #   GEKKO13_NO_WAIT=1 を付けると、up はタスク数を戻すだけで待たない（測るスクリプトが、自分で時刻を取るため）
 set -euo pipefail
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -16,10 +17,16 @@ out() { aws cloudformation describe-stacks --region "$REGION" --stack-name gekko
 CLUSTER=$(out ClusterName)
 ASG=$(out AutoScalingGroupName)
 set_count() { aws ecs update-service --region "$REGION" --cluster "$CLUSTER" --service "$1" --desired-count "$2" >/dev/null; }
-# タスクのオートスケーリング（段 D の D1-a1。apps のスタック）の幅を変える。止めるときは 0 にしないと、オートスケーリングが最小の 2 に戻してしまう
+# タスクのオートスケーリング（段 D の D1-a1。apps のスタック）の幅を変える。止めるときは 0 にしないと、オートスケーリングが最小の 2 に戻してしまう。
+# 既定ではオートスケーリングを作らない（判断 56）。ターゲットがあるサービスだけを変える（ないサービスを登録すると、新しく作ってしまう）
 AUTOSCALED="keycloak auth"
+has_target() {
+  [ "$(aws application-autoscaling describe-scalable-targets --region "$REGION" --service-namespace ecs \
+    --resource-ids "service/$CLUSTER/$1" --query 'length(ScalableTargets)' --output text)" != 0 ]
+}
 set_range() {
   for s in $AUTOSCALED; do
+    has_target "$s" || continue
     aws application-autoscaling register-scalable-target --region "$REGION" --service-namespace ecs \
       --scalable-dimension ecs:service:DesiredCount --resource-id "service/$CLUSTER/$s" --min-capacity "$1" --max-capacity "$2" >/dev/null
   done
@@ -68,9 +75,8 @@ case "$MODE" in
   up)
     # 幅を先に戻す。0 のままタスク数を 2 にすると、オートスケーリングが 0 に戻してしまう
     set_range 2 4
-    for s in spire-server auth keycloak; do set_count "$s" 2; done
-    # 主の流れのサービス（段 D の D1-a2）は、まず 1 タスク（冗長化は D1-a3）
-    for s in customer-app sales-agent insurer-mcp insurer-backend insurer-audit; do set_count "$s" 1; done
+    # どのサービスも 2 タスク。状態は共有の Aurora にある（段 D の D1-a3。判断 56）
+    for s in $UP_SERVICES; do set_count "$s" 2; done
     if [ "${GEKKO13_NO_WAIT:-}" = 1 ]; then echo "タスク数を戻した（待たない）"; exit 0; fi
     echo "タスク数を戻した。台が起き、サービスが安定するまで待つ"
     # services-stable は 10 分で切れる。インスタンスが起きるのに時間がかかるので、4 回（40 分）まで繰り返す
