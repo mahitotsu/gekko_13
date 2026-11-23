@@ -32,6 +32,10 @@ mcp = FastMCP("insurer-mcp")
 VERIFIED: contextvars.ContextVar[tuple[str, dict[str, Any]] | None] = contextvars.ContextVar("verified", default=None)
 #: 呼ぶ側の SSLContext（main.py が SVID から作る）
 client_ssl: ssl.SSLContext | None = None
+#: 1 回の呼び出しの間、同じ SVID を使う SSLContext を作る関数（main.py が入れる。段 D の D1-a3）
+pinned_ssl: Any = None
+#: いまの呼び出しで使う SSLContext。_backend が、交換と保険会社のシステムの呼び出しで同じものを使うよう入れる
+CALL_SSL: contextvars.ContextVar[ssl.SSLContext | None] = contextvars.ContextVar("call_ssl", default=None)
 
 
 def spiffe(service: str) -> str:
@@ -40,9 +44,10 @@ def spiffe(service: str) -> str:
 
 async def _call(method: str, url: str, expected: str, headers: dict[str, str], body: bytes = b"") -> tuple[int, bytes]:
     """SVID の mTLS で呼ぶ。テストで差し替えられるよう、1 か所にまとめる。"""
-    if client_ssl is None:
+    ctx = CALL_SSL.get() or client_ssl
+    if ctx is None:
         raise RuntimeError("SVID を読んでいない")
-    return await mtls_request(client_ssl, method, url, expected, headers, body)
+    return await mtls_request(ctx, method, url, expected, headers, body)
 
 
 async def exchange(subject_token: str) -> str:
@@ -89,6 +94,10 @@ async def _backend(method: str, path: str, json_body: Any = None) -> Any:
     verified = VERIFIED.get()
     if not verified:
         return {"status": 401, "error": "確かめたトークンがない"}
+    # 交換と保険会社のシステムの呼び出しで、同じ SVID の証明書を使う。C は交換のときの証明書に結ばれるので、途中で SVID が入れ替わると、
+    # 保険会社のシステムが not_bound で断る（2026-11-23 の AWS。段 D の D1-a3）
+    if pinned_ssl is not None:
+        CALL_SSL.set(pinned_ssl())
     try:
         c = await exchange(verified[0])
     except PermissionError as e:

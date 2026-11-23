@@ -82,6 +82,7 @@ def main() -> None:
     svids.wait()
     server_ctx = svids.server_context()
     app.client_ssl = svids.client_context()
+    app.pinned_ssl = svids.pinned_client_context
     svids.watch()
     keys = Keys()
     guard = Guard(service="insurer-mcp", issuer=os.environ.get("ISSUER", app.AUTH),

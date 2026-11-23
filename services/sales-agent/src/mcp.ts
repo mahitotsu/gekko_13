@@ -31,8 +31,12 @@ export interface ToolResult {
 /** ctx は、受け口で確かめたトークン A。 */
 export async function callMcp(ctx: string, name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
   if (!svids) throw new Error("SVID を読んでいない");
+  // 1 回の呼び出しの間は、最初に読んだ SVID を使い続ける。交換で受け取る B は、そのときの証明書に結ばれるので、
+  // 途中で SVID が入れ替わると、事務サービスへのつなぎの証明書と食い違い、not_bound で断られる（2026-11-23 の AWS。段 D の D1-a3）。
+  // 古い証明書は、入れ替わったあとも期限まで有効である
+  const pinned = { current: svids.current } as SvidSource;
   const b = await exchangeForNext({
-    authFetch: mtlsFetch(svids, `spiffe://${trustDomain()}/svc/auth`),
+    authFetch: mtlsFetch(pinned, `spiffe://${trustDomain()}/svc/auth`),
     authOrigin: AUTH_ORIGIN,
     service: "sales-agent",
     next: "insurer-mcp",
@@ -41,7 +45,7 @@ export async function callMcp(ctx: string, name: string, args: Record<string, un
   const client = new Client({ name: "sales-agent", version: "1.0.0" });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(MCP_URL), {
-      fetch: mtlsFetch(svids, `spiffe://${trustDomain()}/svc/insurer-mcp`),
+      fetch: mtlsFetch(pinned, `spiffe://${trustDomain()}/svc/insurer-mcp`),
       requestInit: { headers: { authorization: `Bearer ${b}` } },
     }),
   );

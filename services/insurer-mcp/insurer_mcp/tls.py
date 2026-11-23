@@ -97,6 +97,16 @@ class SvidSource:
         self._contexts.append(ctx)
         return ctx
 
+    def pinned_client_context(self) -> ssl.SSLContext:
+        """呼ぶ側の SSLContext を、いまの SVID で作る。入れ替わっても読み直さない（1 回の呼び出しの間、同じ証明書を使い続けるため）。
+        交換で受け取るトークンは、そのときの証明書に結ばれるので、交換と次の呼び出しで証明書が食い違うと断られる（段 D の D1-a3）。"""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        self._load(ctx)
+        return ctx
+
     def watch(self, interval: float = 2) -> None:
         """ファイルが替わったら、作った全部の SSLContext に読み直させる。"""
 
