@@ -78,13 +78,21 @@ final class SpiffeTls {
 		return (chain == null || chain.length == 0) ? Optional.empty() : Optional.of(chain[0]);
 	}
 
-	/** 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。 */
 	/**
 	 * サービスどうしの呼び出しの待ち（つなぐときと読むとき）。止まったタスクに当たると、Service Connect が別のタスクへつなぎ直す
 	 * （つなぎの失敗を 2 回までリトライする。ECS の資料）。その間にアプリが見切らないよう、長めにとる（段 D の D1-a3。推定の値）。
 	 */
 	static final Duration INTERNAL_TIMEOUT = Duration.ofSeconds(15);
 
+	/** 応答が届く前につなぎが切れたときに、送り直す回数の上限（最初の 1 回を含む）。 */
+	static final int ATTEMPTS = 3;
+
+	/**
+	 * 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。応答が届く前につなぎが切れたら（IOException）、最大 3 回まで送り直す
+	 * （段 D の D1-a3。止まったタスクへのつなぎを、Service Connect は救いきれなかった。2026-11-23 の AWS）。相手の SPIFFE ID が違うときは、
+	 * 送り直さない。送るのは、passkey の公開鍵と連絡先の読み取り（GET）と、顧客のアプリへの直送（2 度届くと、受信箱に同じ通知が 2 つ並ぶが、
+	 * 照合は契約の内容で行うので、結果は変わらない）。
+	 */
 	static RestClient client(SslBundles bundles, String expectedId, Duration timeout) {
 		SslBundle bundle = bundles.getBundle("svid");
 		try {
@@ -97,7 +105,25 @@ final class SpiffeTls {
 			HttpClient http = HttpClient.newBuilder().sslContext(ctx).connectTimeout(timeout).build();
 			JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(http);
 			factory.setReadTimeout(timeout);
-			return RestClient.builder().requestFactory(factory).build();
+			return RestClient.builder().requestFactory(factory).requestInterceptor((request, body, execution) -> {
+				for (int i = 1;; i++) {
+					try {
+						return execution.execute(request, body);
+					}
+					catch (java.io.IOException ex) {
+						if (i >= ATTEMPTS || ex instanceof javax.net.ssl.SSLPeerUnverifiedException) {
+							throw ex;
+						}
+						try {
+							Thread.sleep(200);
+						}
+						catch (InterruptedException ie) {
+							Thread.currentThread().interrupt();
+							throw ex;
+						}
+					}
+				}
+			}).build();
 		}
 		catch (Exception ex) {
 			throw new IllegalStateException("mTLS の呼び出しを作れない: " + ex.getMessage(), ex);

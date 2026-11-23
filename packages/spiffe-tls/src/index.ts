@@ -194,47 +194,67 @@ export function mtlsCall(
   });
 }
 
+/** 応答が届く前に、つなぎが切れたときの誤り。送り直してよい（段 D の D1-a3）。 */
+const RETRYABLE = new Set(["ECONNRESET", "EPIPE", "ECONNREFUSED", "ECONNABORTED"]);
+export const isRetryable = (e: unknown) => {
+  const err = e as NodeJS.ErrnoException;
+  return RETRYABLE.has(err.code ?? "") || /socket disconnected before secure TLS|socket hang up/.test(err.message ?? "");
+};
+
 /**
  * mtlsCall と同じく、相手の SPIFFE ID を確かめて、そのときの SVID で mTLS をかけて呼ぶ。応答の本文は流したまま返す（AG-UI の SSE を中継するため）。
  * fetch の形で返すので、openid-client や jose の customFetch にも渡せる。
+ * 応答が届く前につなぎが切れたら、最大 3 回まで送り直す（段 D の D1-a3）。止まったタスクへのつなぎを、Service Connect は救いきれなかった
+ * （2026-11-23 の AWS）。送り直しは、つなぐたびに Service Connect が送り先を選び直す。POST も送り直すが、受ける側は 2 度届いても困らない
+ * （営業 AI エージェントの回は、同じ答えの 2 度目を 409 で拒む。申込みは nonce が 1 回しか通さない。交換は、トークンがもう 1 つ出るだけ）。
+ * 相手の SPIFFE ID が違う、時間切れ、取りやめ、応答が始まったあとの失敗は、送り直さない。
  */
-export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000): typeof fetch {
+export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 3): typeof fetch {
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const headers = Object.fromEntries(new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined)));
     const body = init.body === undefined || init.body === null ? undefined : init.body instanceof URLSearchParams ? init.body.toString() : String(init.body);
-    const svid = source.current;
-    return new Promise<Response>((resolve, reject) => {
-      const req = httpsRequest(
-        url,
-        {
-          method: init.method ?? "GET",
-          headers,
-          cert: svid.cert,
-          key: svid.key,
-          ca: svid.bundle,
-          agent: false,
-          minVersion: "TLSv1.3",
-          checkServerIdentity: (_host, cert) => {
-            const id = spiffeIdOf(cert.subjectaltname);
-            return id === expectedServerId ? undefined : new Error(`相手の SPIFFE ID が違う: ${id ?? "(なし)"}`);
+    const once = () =>
+      new Promise<Response>((resolve, reject) => {
+        const svid = source.current;
+        const req = httpsRequest(
+          url,
+          {
+            method: init.method ?? "GET",
+            headers,
+            cert: svid.cert,
+            key: svid.key,
+            ca: svid.bundle,
+            agent: false,
+            minVersion: "TLSv1.3",
+            checkServerIdentity: (_host, cert) => {
+              const id = spiffeIdOf(cert.subjectaltname);
+              return id === expectedServerId ? undefined : new Error(`相手の SPIFFE ID が違う: ${id ?? "(なし)"}`);
+            },
+            timeout: timeoutMs,
           },
-          timeout: timeoutMs,
-        },
-        (res) => {
-          const out = new Headers();
-          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : v);
-          const status = res.statusCode ?? 502;
-          // 応答が始まったら、待ちの上限を外す（SSE は長く続く）
-          req.setTimeout(0);
-          resolve(new Response(status === 204 || status === 304 ? null : (Readable.toWeb(res) as ReadableStream), { status, headers: out }));
-        },
-      );
-      req.on("timeout", () => req.destroy(new Error("timeout")));
-      req.on("error", reject);
-      init.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")));
-      req.end(body);
-    });
+          (res) => {
+            const out = new Headers();
+            for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(", ") : v);
+            const status = res.statusCode ?? 502;
+            // 応答が始まったら、待ちの上限を外す（SSE は長く続く）
+            req.setTimeout(0);
+            resolve(new Response(status === 204 || status === 304 ? null : (Readable.toWeb(res) as ReadableStream), { status, headers: out }));
+          },
+        );
+        req.on("timeout", () => req.destroy(new Error("timeout")));
+        req.on("error", reject);
+        init.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")));
+        req.end(body);
+      });
+    for (let i = 1; ; i++) {
+      try {
+        return await once();
+      } catch (e) {
+        if (i >= attempts || init.signal?.aborted || !isRetryable(e)) throw e;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
   }) as typeof fetch;
 }
 

@@ -438,7 +438,9 @@ export function addBff(app: Hono) {
       return new Response(res.body, { status: res.status, headers: { "content-type": res.headers.get("content-type") ?? "application/json", "cache-control": "no-cache" } });
     } catch (e) {
       if (e instanceof LoginExpired) return c.json({ error: "ログインの有効期間が切れた" }, 401);
-      throw e;
+      // 営業 AI エージェントに、送り直しても届かなかった（止まったタスクに当たり続けたなど）。画面は、同じ答えをもう一度送れる（段 D の D1-a3）
+      console.log(JSON.stringify({ at: new Date().toISOString(), svc: "customer-app", ev: "agent_unavailable", error: (e as Error).message }));
+      return c.json({ error: "営業 AI エージェントに一時的につながらない。少し待って、もう一度送ってください" }, 503);
     }
   });
 

@@ -92,5 +92,22 @@ func (s *FileSVID) GetX509BundleForTrustDomain(td spiffeid.TrustDomain) (*x509bu
 func (s *FileSVID) Client(expected spiffeid.ID, timeout time.Duration) *http.Client {
 	cfg := tlsconfig.MTLSClientConfig(s, s, tlsconfig.AuthorizeID(expected))
 	cfg.MinVersion = tls.VersionTLS13
-	return &http.Client{Timeout: timeout, Transport: &http.Transport{TLSClientConfig: cfg, DisableKeepAlives: true}}
+	return &http.Client{Timeout: timeout, Transport: retryGet{&http.Transport{TLSClientConfig: cfg, DisableKeepAlives: true}}}
+}
+
+// retryGet は、本文のない GET を、応答が届く前に失敗したら、最大 3 回まで送り直す（段 D の D1-a3。止まったタスクへのつなぎを、
+// Service Connect は救いきれなかった。2026-11-23 の AWS）。監査サービスの呼び出しは、保険会社のシステムの記録の読み取りだけである。
+type retryGet struct{ next http.RoundTripper }
+
+func (r retryGet) RoundTrip(req *http.Request) (*http.Response, error) {
+	var res *http.Response
+	var err error
+	for i := 1; i <= 3; i++ {
+		res, err = r.next.RoundTrip(req)
+		if err == nil || req.Method != http.MethodGet || req.Body != nil || req.Context().Err() != nil {
+			return res, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return res, err
 }
