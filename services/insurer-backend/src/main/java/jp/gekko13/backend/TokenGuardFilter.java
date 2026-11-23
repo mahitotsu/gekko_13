@@ -53,7 +53,7 @@ class TokenGuardFilter extends OncePerRequestFilter {
 
 	private static final List<String> OPEN = List.of("/offers-jwks.json", "/audit/");
 
-	private static final Duration TIMEOUT = Duration.ofSeconds(5);
+	private static final Duration TIMEOUT = SpiffeTls.INTERNAL_TIMEOUT;
 
 	private final BackendProperties props;
 

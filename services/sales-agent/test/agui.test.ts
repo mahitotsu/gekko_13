@@ -28,7 +28,7 @@ const run = (threadId: string, messages: object[], sub = "alice") =>
 const events = async (res: Response) =>
   (await res.text())
     .split("\n\n")
-    .filter(Boolean)
+    .filter((line) => line.startsWith("data: "))
     .map((line) => JSON.parse(line.replace(/^data: /, "")) as Record<string, any>);
 
 describe("AG-UI の受け口", () => {
@@ -51,9 +51,19 @@ describe("AG-UI の受け口", () => {
     expect(again.find((e) => e.type === "TEXT_MESSAGE_CONTENT")?.delta).toBe("答え: b");
   });
 
+  it("ヘッダーと RUN_STARTED を先に返し、回の間に SSE のコメントを流しても、AG-UI のイベントとして読める", async () => {
+    useState(memoryState());
+    const res = await run("th-d", [{ id: "u1", role: "user", content: "相談したい" }]);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const first = await events(res);
+    expect(first[0]?.type).toBe("RUN_STARTED");
+    expect(first.at(-1)?.type).toBe("RUN_FINISHED");
+  });
+
   it("ほかの顧客の会話は、続けさせない", async () => {
     useState(memoryState());
-    await run("th-c", [{ id: "u1", role: "user", content: "相談したい" }]);
+    // ヘッダーは回を進める前に返るので、本文を読み切って、1 つ目の回が会話を書き戻すのを待つ
+    await events(await run("th-c", [{ id: "u1", role: "user", content: "相談したい" }]));
     expect((await run("th-c", [{ id: "u2", role: "user", content: "横から" }], "mallory")).status).toBe(403);
   });
 });

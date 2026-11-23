@@ -29,6 +29,22 @@ const handlers = () => {
 };
 
 describe("AG-UI の接続（@ag-ui/client。gekko_11 の D-29）", () => {
+  it("回の間に流れる SSE のコメント（keep-alive）を読み飛ばす（段 D の D1-a3）", async () => {
+    const [first, ...rest] = toolRun.map((e) => `data: ${JSON.stringify(e)}\n\n`);
+    const body = [first, ": keep-alive\n\n", ": keep-alive\n\n", ...rest].join("");
+    const agent = createAgent(
+      "http://agent.test/agui",
+      async () => ({}),
+      (async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch,
+    );
+    const { seen, h } = handlers();
+    agent.say("希望");
+    await agent.run(h);
+    expect(seen.texts).toEqual(["説明"]);
+    expect(seen.tools.map((x) => x[1])).toEqual(["ask_customer"]);
+    expect(seen.errors).toEqual([]);
+  });
+
   it("文と道具の呼び出しを渡し、要求ごとに、そのときの proof を付ける", async () => {
     const sent: { headers: Record<string, string>; body: any }[] = [];
     let n = 0;

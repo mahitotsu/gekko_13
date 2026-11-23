@@ -28,7 +28,7 @@ interface PasskeyDirectory {
 
 		@Override
 		public List<Map<String, String>> keysOf(String user) {
-			RestClient auth = SpiffeTls.client(this.bundles, this.props.spiffeId("auth"), java.time.Duration.ofSeconds(5));
+			RestClient auth = SpiffeTls.client(this.bundles, this.props.spiffeId("auth"), SpiffeTls.INTERNAL_TIMEOUT);
 			return auth.get().uri(this.props.authUrl() + "/internal/passkeys/{user}", user).retrieve().body(new ParameterizedTypeReference<>() {
 			});
 		}

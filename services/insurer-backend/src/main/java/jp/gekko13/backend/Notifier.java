@@ -1,6 +1,5 @@
 package jp.gekko13.backend;
 
-import java.time.Duration;
 import java.util.Map;
 
 import org.springframework.boot.ssl.SslBundles;
@@ -42,7 +41,7 @@ class Notifier {
 			if (!to.startsWith("/")) {
 				throw new IllegalArgumentException("顧客のアプリの受け口でない宛先");
 			}
-			RestClient client = SpiffeTls.client(this.bundles, this.props.spiffeId("customer-app"), Duration.ofMillis(1500));
+			RestClient client = SpiffeTls.client(this.bundles, this.props.spiffeId("customer-app"), SpiffeTls.INTERNAL_TIMEOUT);
 			delivered = client.post().uri(this.props.customerAppUrl() + to).body(notice).retrieve().toBodilessEntity()
 				.getStatusCode().is2xxSuccessful();
 		}

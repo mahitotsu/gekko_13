@@ -79,6 +79,12 @@ final class SpiffeTls {
 	}
 
 	/** 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。 */
+	/**
+	 * サービスどうしの呼び出しの待ち（つなぐときと読むとき）。止まったタスクに当たると、Service Connect が別のタスクへつなぎ直す
+	 * （つなぎの失敗を 2 回までリトライする。ECS の資料）。その間にアプリが見切らないよう、長めにとる（段 D の D1-a3。推定の値）。
+	 */
+	static final Duration INTERNAL_TIMEOUT = Duration.ofSeconds(15);
+
 	static RestClient client(SslBundles bundles, String expectedId, Duration timeout) {
 		SslBundle bundle = bundles.getBundle("svid");
 		try {

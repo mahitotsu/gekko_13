@@ -121,9 +121,10 @@ class Refused(Exception):
 
 
 async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
-                       headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 10) -> tuple[int, bytes]:
+                       headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 15) -> tuple[int, bytes]:
     """SVID の mTLS で 1 回呼ぶ（HTTP/1.1、Connection: close）。握手のあと、相手の SPIFFE ID を確かめてから、要求を送る。
-    トークンを、確かめていない相手に送らないため。接続は使い回さない（入れ替わる前の証明書で示し続けないため）。"""
+    トークンを、確かめていない相手に送らないため。接続は使い回さない（入れ替わる前の証明書で示し続けないため）。
+    待ちは 15 秒。止まったタスクに当たると、Service Connect が別のタスクへつなぎ直すので、その間に見切らない（段 D の D1-a3。推定の値）。"""
     import asyncio
     from urllib.parse import urlsplit
 

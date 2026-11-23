@@ -25,6 +25,10 @@ func env(name, fallback string) string {
 	return fallback
 }
 
+// サービスどうしの呼び出しの待ち。止まったタスクに当たると、Service Connect が別のタスクへつなぎ直すので、その間に見切らない
+// （段 D の D1-a3。推定の値）
+const internalTimeout = 15 * time.Second
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("svc", "insurer-audit"))
 	ctx := context.Background()
@@ -49,7 +53,7 @@ func main() {
 	}, store)
 	records := Records{
 		selfURL:    env("BACKEND_URL", "https://insurer-backend:9443") + "/audit/records",
-		selfClient: svids.Client(spiffeid.RequireFromPath(td, "/svc/insurer-backend"), 10*time.Second),
+		selfClient: svids.Client(spiffeid.RequireFromPath(td, "/svc/insurer-backend"), internalTimeout),
 	}
 	if env("RECORDS", "cloudwatch") == "docker" {
 		records.logs = DockerLogs(env("DOCKER_SOCKET", "/var/run/docker.sock"))

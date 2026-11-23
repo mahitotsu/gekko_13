@@ -32,7 +32,7 @@ interface ContactDirectory {
 		@Override
 		public List<String> inboxesOf(String user) {
 			// 認可サーバーを、SVID の mTLS で、相手の SPIFFE ID を確かめて呼ぶ（段 D の D1-a2 の予測 3）
-			RestClient auth = SpiffeTls.client(this.bundles, this.props.spiffeId("auth"), java.time.Duration.ofSeconds(5));
+			RestClient auth = SpiffeTls.client(this.bundles, this.props.spiffeId("auth"), SpiffeTls.INTERNAL_TIMEOUT);
 			Map<String, List<String>> body = auth.get().uri(this.props.authUrl() + "/internal/contacts/{user}", user).retrieve().body(
 					new ParameterizedTypeReference<>() {
 					});
