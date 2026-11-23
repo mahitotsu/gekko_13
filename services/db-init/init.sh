@@ -6,6 +6,7 @@
 # 2. Aurora が止まっていれば、つなぎに行くと再開するので、つながるまで待つ（上限 3 分）。
 # 3. 管理者で db-init.sql を流し、サービスごとのデータベースとロールを作る。何度流しても同じ結果になる。
 # 環境変数: DB_HOST、DB_ADMIN_USER、DB_ADMIN_PASSWORD、DB_SPIRE_PASSWORD、DB_KEYCLOAK_PASSWORD、DB_AUTH_PASSWORD、
+#   DB_BACKEND_PASSWORD、DB_CUSTOMER_APP_PASSWORD、DB_SALES_AGENT_PASSWORD、DB_AUDIT_PASSWORD（段 D の D1-a3）、
 #   DB_CA_PEM、SPIRE_ROOT_CERT、SPIRE_ROOT_KEY、SPIRE_BUNDLE_TLS_CERT、SPIRE_BUNDLE_TLS_KEY。
 #   書き出す先: /dbca/ca.pem、/spire-ca/root.crt、/spire-ca/root.key、/spire-ca/bundle-tls.crt、/spire-ca/bundle-tls.key
 set -eu
@@ -29,5 +30,7 @@ until psql "$CONN" -Atqc 'select 1' >/dev/null 2>&1; do
 done
 psql "$CONN" -q -v ON_ERROR_STOP=1 \
   -v "spire_password=${DB_SPIRE_PASSWORD:?}" -v "keycloak_password=${DB_KEYCLOAK_PASSWORD:?}" -v "auth_password=${DB_AUTH_PASSWORD:?}" \
+  -v "backend_password=${DB_BACKEND_PASSWORD:?}" -v "customer_app_password=${DB_CUSTOMER_APP_PASSWORD:?}" \
+  -v "sales_agent_password=${DB_SALES_AGENT_PASSWORD:?}" -v "audit_password=${DB_AUDIT_PASSWORD:?}" \
   -f /db-init.sql >/dev/null
 echo "db-init: done"

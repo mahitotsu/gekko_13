@@ -119,9 +119,13 @@ hex16() { openssl rand -hex 16 | tr -d '\n'; }
 hex24() { openssl rand -hex 24 | tr -d '\n'; }
 # 共有の Aurora（段 D の D1-a1）の管理者と、サービスごとのパスワード
 put_secret "/$PREFIX/db/master-password" hex24
-for r in spire keycloak auth; do put_secret "/$PREFIX/db/$r-password" hex24; done
+for r in spire keycloak auth backend customer-app sales-agent audit; do put_secret "/$PREFIX/db/$r-password" hex24; done
 # auth のトークンの発行の鍵（RSA、PKCS#8 の PEM）。複数のタスクが同じ鍵で出し、確かめる
 put_secret "/$PREFIX/auth/signing-key" openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+# 保険会社のシステムの提示の鍵（P-256。段 D の D1-a3、判断 53）。秘密鍵（PKCS#8）と公開鍵（X.509）の PEM を並べて置く
+# （JDK だけでは、EC の秘密鍵から公開鍵を導けないため）。複数のタスクが同じ鍵で署名し、確かめる
+ec_pair() { local k; k=$(openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256); printf '%s\n' "$k"; printf '%s\n' "$k" | openssl pkey -pubout; }
+put_secret "/$PREFIX/backend/offer-key" ec_pair
 # SPIRE のルート CA（ECDSA P-256、5 年）。全部の server が、この下で中間 CA を作る。鍵と証明書は、一緒に一度だけ作る。
 # 片方だけあるときは止める（作り直すと、トラストアンカーが替わり、全部のインスタンスの agent が server を信じなくなる）
 ROOT_KEY="/$PREFIX/spire/root-key"
@@ -250,6 +254,7 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "McpImage=$(dualstack "$MCP_REPO"):$MCP_TAG" \
     "BackendImage=$(dualstack "$BACKEND_REPO"):$BACKEND_TAG" \
     "AuditImage=$(dualstack "$AUDIT_REPO"):$AUDIT_TAG" \
+    "DbHost=$DB_HOST" \
     "RpId=$(rp_id)"
 fi
 

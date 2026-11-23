@@ -66,10 +66,10 @@ class ApplicationTest {
 	void signedApplicationWithinTermsBecomesADerivedContract() throws Exception {
 		MvcResult result = submit(claims("alice", true), prepare("alice", "fixed-120", Map.of()));
 		assertThat(result.getResponse().getStatus()).as(body(result)).isEqualTo(200);
-		Store.ContractRecord record = this.store.contracts.get(this.store.contracts.size() - 1);
+		Store.ContractRecord record = last(this.store.contracts());
 		assertThat(record.by()).containsExactly("insurer-mcp", "sales-agent");
 		assertThat(record.contract().get("contractId")).asString().startsWith("C-");
-		assertThat(this.store.outbox.get(this.store.outbox.size() - 1).to()).isEqualTo("/notices/inbox-of-alice-0123456789ab");
+		assertThat(last(this.store.outbox()).to()).isEqualTo("/notices/inbox-of-alice-0123456789ab");
 	}
 
 	@Test
@@ -159,21 +159,33 @@ class ApplicationTest {
 	}
 
 	@Test
+	void nonceIsConsumedOnlyForItsCustomerWithinItsTerm() {
+		long now = java.time.Instant.now().getEpochSecond();
+		this.store.issueNonce("n-store-1", "alice", now + 60);
+		assertThat(this.store.consumeNonce("n-store-1", "bob", now)).isFalse();
+		assertThat(this.store.consumeNonce("n-store-1", "alice", now)).isTrue();
+		assertThat(this.store.consumeNonce("n-store-1", "alice", now)).isFalse();
+		this.store.issueNonce("n-store-2", "alice", now - 1);
+		assertThat(this.store.consumeNonce("n-store-2", "alice", now)).isFalse();
+		assertThat(this.store.consumeNonce("n-store-unknown", "alice", now)).isFalse();
+	}
+
+	@Test
 	void recordAndContactIgnoreWhatTheAgentAdds() throws Exception {
 		Map<String, Object> extras = Map.of("contractEntry", Map.of("plan", CATALOG.get(3)), "contact",
 				"http://attacker.invalid/notices");
 		assertThat(submit(claims("alice", true), prepare("alice", "fixed-60", extras)).getResponse().getStatus())
 			.isEqualTo(200);
-		assertThat(this.store.contracts.get(this.store.contracts.size() - 1).contract().get("plan").toString())
+		assertThat(last(this.store.contracts()).contract().get("plan").toString())
 			.contains("fixed-60");
-		assertThat(this.store.outbox.get(this.store.outbox.size() - 1).to()).isEqualTo("/notices/inbox-of-alice-0123456789ab");
+		assertThat(last(this.store.outbox()).to()).isEqualTo("/notices/inbox-of-alice-0123456789ab");
 
 		TestBackendConfig.OFF.put(Defenses.DERIVE_RECORD, "off");
 		TestBackendConfig.OFF.put(Defenses.REGISTERED_CONTACT, "off");
 		submit(claims("alice", true), prepare("alice", "fixed-60", extras));
-		assertThat(this.store.contracts.get(this.store.contracts.size() - 1).contract().get("plan").toString())
+		assertThat(last(this.store.contracts()).contract().get("plan").toString())
 			.contains("life-240");
-		assertThat(this.store.outbox.get(this.store.outbox.size() - 1).to()).isEqualTo("http://attacker.invalid/notices");
+		assertThat(last(this.store.outbox()).to()).isEqualTo("http://attacker.invalid/notices");
 	}
 
 	/** TLS の層が確かめた相手の証明書（Tomcat が要求の属性に置くもの）を渡す。 */
@@ -327,6 +339,10 @@ class ApplicationTest {
 	@SuppressWarnings("unchecked")
 	private Map<String, Object> read(MvcResult result) throws Exception {
 		return this.json.readValue(result.getResponse().getContentAsString(), Map.class);
+	}
+
+	private static <T> T last(List<T> items) {
+		return items.get(items.size() - 1);
 	}
 
 	private static String body(MvcResult result) throws Exception {

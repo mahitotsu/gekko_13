@@ -31,7 +31,7 @@ class AuditController {
 		if (!this.props.spiffeId("auditor").equals(peer) && !this.props.spiffeId("insurer-audit").equals(peer)) {
 			return ResponseEntity.status(403).body(Map.of("error", "監査の役ではない"));
 		}
-		return ResponseEntity.ok(Map.of("contracts", this.store.contracts, "outbox", this.store.outbox));
+		return ResponseEntity.ok(Map.of("contracts", this.store.contracts(), "outbox", this.store.outbox()));
 	}
 
 }

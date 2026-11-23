@@ -2,6 +2,19 @@
 # spiffe-helper が SVID_DIR に書き、入れ替わったら読み直す（reload-on-update）。受け口は 9443 だけ。
 server:
   port: ${APP_PORT:9443}
+# nonce、契約、送り出しは、共有のデータベースに置く（段 D の D1-a3）。AWS では Aurora の証明書を確かめる（DB_URL の sslmode=verify-full）。
+# 表は起動のときに、なければ作る（schema.sql。2 つのタスクが同時に作らないよう、アドバイザリーロックを取る）
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER:backend}
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 5
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
 gekko:
   trust-domain: ${TRUST_DOMAIN:gekko13.internal}
   issuer: ${ISSUER:https://auth:8443}

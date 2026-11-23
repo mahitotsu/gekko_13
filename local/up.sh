@@ -35,11 +35,17 @@ mkdir -p run/bundle run/helper
 for s in "${SERVICES[@]}"; do mkdir -p "run/svid/$s"; done
 
 # 共有の保存先（段 D の D1-a1）の、管理者とサービスごとのパスワード。AWS では Aurora、ここでは PostgreSQL のコンテナ
-if [ ! -f run/db.env ]; then
-  printf 'DB_ADMIN=%s\nDB_SPIRE=%s\nDB_KEYCLOAK=%s\nDB_AUTH=%s\n' "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" > run/db.env
-fi
+# 足りない値だけを足す（D1-a3 で、主の流れのサービスの分を足した。前からある run/db.env も使い続けられる）
+touch run/db.env
+for k in DB_ADMIN DB_SPIRE DB_KEYCLOAK DB_AUTH DB_BACKEND DB_CUSTOMER_APP DB_SALES_AGENT DB_AUDIT; do
+  grep -q "^$k=" run/db.env || printf '%s=%s\n' "$k" "$(openssl rand -hex 16)" >> run/db.env
+done
 # shellcheck disable=SC1091
 . run/db.env
+# 保険会社のシステムの提示の鍵（段 D の D1-a3）。AWS と同じく、秘密鍵と公開鍵の PEM を並べ、複数のコンテナが同じ鍵を使う
+if [ ! -f run/offer-key.pem ]; then
+  (umask 077 && k=$(openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256) && { printf '%s\n' "$k"; printf '%s\n' "$k" | openssl pkey -pubout; } > run/offer-key.pem)
+fi
 # SPIRE の bundle endpoint の TLS の証明書（gekko_11 の D-38）。SVID とは関係のない、使い捨ての自己署名の証明書。
 # ログインサーバーは、この証明書を信じて、JWT-SVID を確かめる公開鍵を取る
 if [ ! -f run/bundle-endpoint/tls.crt ]; then
@@ -138,6 +144,8 @@ start_insurer_backend() {
   run --name gekko13-insurer-backend --network-alias insurer-backend --memory 512m $(app_labels insurer-backend) \
     -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" -e "RP_ID=$RP_ID" -e "WEBAUTHN_ORIGINS=$ORIGIN" \
     -e CUSTOMER_APP_URL=https://customer-app:9443 \
+    -e DB_URL=jdbc:postgresql://postgres:5432/backend -e DB_USER=backend -e "DB_PASSWORD=$DB_BACKEND" \
+    -e "OFFER_SIGNING_KEY=$(cat run/offer-key.pem)" \
     -v "$HERE/run/svid/insurer-backend:/svid:ro" \
     "$BACKEND_IMAGE"
 }
@@ -198,7 +206,9 @@ run --name gekko13-postgres --network-alias postgres -e "POSTGRES_PASSWORD=$DB_A
 until docker exec gekko13-postgres pg_isready -q -h 127.0.0.1; do sleep 1; done
 sleep 2
 docker exec -i -e "PGPASSWORD=$DB_ADMIN" gekko13-postgres psql -q -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 \
-  -v "spire_password=$DB_SPIRE" -v "keycloak_password=$DB_KEYCLOAK" -v "auth_password=$DB_AUTH" -f - < ../services/db-init/db-init.sql >/dev/null
+  -v "spire_password=$DB_SPIRE" -v "keycloak_password=$DB_KEYCLOAK" -v "auth_password=$DB_AUTH" \
+  -v "backend_password=$DB_BACKEND" -v "customer_app_password=$DB_CUSTOMER_APP" \
+  -v "sales_agent_password=$DB_SALES_AGENT" -v "audit_password=$DB_AUDIT" -f - < ../services/db-init/db-init.sql >/dev/null
 
 run --name gekko13-spire-server --network-alias spire-server \
   -v "$HERE/spire/server.conf:/etc/spire/server.conf:ro" \

@@ -1,0 +1,10 @@
+# 試験では、PostgreSQL の代わりに、メモリの H2（PostgreSQL の互換の形）を使う。表の定義は schema-test.sql（アドバイザリーロックを除いた同じもの）
+spring:
+  datasource:
+    url: jdbc:h2:mem:backend;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  sql:
+    init:
+      schema-locations: classpath:schema-test.sql

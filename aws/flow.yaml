@@ -47,6 +47,18 @@ Parameters:
   RpId:
     Type: String
     Description: Passkey RP ID, the default domain of the entry CloudFront distribution. The issuer and the app origin are built from it
+  DbHost:
+    Type: String
+    Description: Aurora cluster endpoint (gekko13-db output DbHost)
+  DbCaParameter:
+    Type: String
+    Default: /gekko13/db/ca
+  DbBackendPasswordParameter:
+    Type: String
+    Default: /gekko13/db/backend-password
+  OfferSigningKeyParameter:
+    Type: String
+    Default: /gekko13/backend/offer-key
 
 Resources:
   # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
@@ -311,6 +323,14 @@ Resources:
             - { Name: RP_ID, Value: !Ref RpId }
             - { Name: WEBAUTHN_ORIGINS, Value: !Sub "https://${RpId}" }
             - { Name: CUSTOMER_APP_URL, Value: https://customer-app-notice:9443 }
+            # nonce、契約、送り出しは、共有の Aurora に置く（段 D の D1-a3）。Aurora の証明書を確かめる（DB_CA_PEM を、起動のときにファイルに書く）
+            - { Name: DB_URL, Value: !Sub "jdbc:postgresql://${DbHost}:5432/backend?sslmode=verify-full&sslrootcert=/tmp/db-ca.pem" }
+            - { Name: DB_USER, Value: backend }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbBackendPasswordParameter}" }
+            - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
+            # 2 つのタスクが同じ鍵で提示に署名し、確かめる（判断 53）
+            - { Name: OFFER_SIGNING_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${OfferSigningKeyParameter}" }
           MountPoints:
             - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
           LogConfiguration:

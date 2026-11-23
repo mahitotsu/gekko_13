@@ -129,7 +129,7 @@ class ApplicationController {
 		}
 		String nonce = UUID.randomUUID().toString();
 		long expiresAt = Instant.now().plusSeconds(600).getEpochSecond();
-		this.store.nonces.put(nonce, new Store.Nonce(customer, expiresAt, false));
+		this.store.issueNonce(nonce, customer, expiresAt);
 		String jws = this.offers.sign(customer, plans, nonce, expiresAt);
 		return ResponseEntity.ok(Map.of("offerJws", jws, "offerSet", Map.of("customer", customer, "plans", plans),
 				"offerSetId", OfferSigner.offerSetId(customer, plans), "nonce", nonce, "expiresAt", expiresAt));
@@ -143,7 +143,7 @@ class ApplicationController {
 			return ResponseEntity.status(403).body(Map.of("error", "利用者本人のトークンではない"));
 		}
 		return ResponseEntity.ok(Map.of("contracts",
-				this.store.contracts.stream().map(Store.ContractRecord::contract)
+				this.store.contracts().stream().map(Store.ContractRecord::contract)
 					.filter((c) -> customer.equals(c.get("customer")))
 					.toList()));
 	}
@@ -245,17 +245,17 @@ class ApplicationController {
 			}
 		}
 
-		// 一度しか受け付けない（gekko_11 の G16）
+		// 一度しか受け付けない（gekko_11 の G16）。判定と使用済みへの替えは、1 つの文で行う（複数のタスクで競わない。判断 53）
 		String nonceValue = String.valueOf(application.get("nonce"));
-		Store.Nonce nonce = this.store.nonces.get(nonceValue);
 		long now = Instant.now().getEpochSecond();
-		if (this.defenses.enabled(Defenses.NONCE_ONCE) && (nonce == null || nonce.used()
-				|| !customer.equals(nonce.customer()) || nonce.expiresAt() < now
-				|| ((Number) application.get("expiresAt")).longValue() < now)) {
-			return reject("申込みは未使用で期限内", "使用済み、期限切れ、または発行していない nonce", 409);
+		if (this.defenses.enabled(Defenses.NONCE_ONCE)) {
+			if (((Number) application.get("expiresAt")).longValue() < now
+					|| !this.store.consumeNonce(nonceValue, customer, now)) {
+				return reject("申込みは未使用で期限内", "使用済み、期限切れ、または発行していない nonce", 409);
+			}
 		}
-		if (nonce != null) {
-			this.store.nonces.put(nonceValue, new Store.Nonce(nonce.customer(), nonce.expiresAt(), true));
+		else {
+			this.store.markNonceUsed(nonceValue);
 		}
 
 		// 契約の記録は、署名済みの申込みから導出する。悪い実装（gekko_11 の G17 を外す）は、入力された内容を信じる
@@ -263,8 +263,7 @@ class ApplicationController {
 		if (!this.defenses.enabled(Defenses.DERIVE_RECORD) && body.get("contractEntry") instanceof Map<?, ?> entry) {
 			contract.putAll((Map<String, Object>) entry);
 		}
-		this.store.contracts
-			.add(new Store.ContractRecord(contract, claims.actChain(), now, application, intent, claims.jti()));
+		this.store.addContract(new Store.ContractRecord(contract, claims.actChain(), now, application, intent, claims.jti()));
 		AuditLog.contract(contract, claims.actChain(), claims.jti(), Canonical.challengeOf(application), now);
 
 		// 顧客へ直接送る。宛先は、登録済みの連絡先（gekko_11 の G18）

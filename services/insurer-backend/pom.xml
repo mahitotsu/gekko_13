@@ -45,9 +45,23 @@
       <artifactId>webauthn4j-core</artifactId>
       <version>0.31.11.RELEASE</version>
     </dependency>
+    <!-- nonce、契約、送り出しを、共有の PostgreSQL（AWS では Aurora）に置く。ID とパスワードでつなぐ（段 D の D1-a3） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
