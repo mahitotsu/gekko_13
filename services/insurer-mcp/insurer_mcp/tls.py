@@ -122,8 +122,8 @@ class Refused(Exception):
 
 async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
                        headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 15,
-                       attempts: int = 3) -> tuple[int, bytes]:
-    """_mtls_once を呼び、応答が届く前につなぎが切れたら（ConnectionError、ssl.SSLError、途中で切れた読み取り）、最大 3 回まで送り直す
+                       attempts: int = 6) -> tuple[int, bytes]:
+    """_mtls_once を呼び、応答が届く前につなぎが切れたら（ConnectionError、ssl.SSLError、途中で切れた読み取り）、最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す
     （段 D の D1-a3。止まったタスクへのつなぎを、Service Connect は救いきれなかった。2026-11-23 の AWS）。相手の SPIFFE ID が違う（Refused）、
     時間切れは送り直さない。送り直すのは、トークンの交換（トークンがもう 1 つ出るだけ）と、保険会社のシステムの呼び出し（申込みは nonce が
     1 回しか通さない）である。"""
@@ -137,7 +137,7 @@ async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: 
         except (ConnectionError, ssl.SSLError, asyncio.IncompleteReadError):
             if i >= attempts:
                 raise
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.3 * i)
     raise AssertionError("届かない")
 
 

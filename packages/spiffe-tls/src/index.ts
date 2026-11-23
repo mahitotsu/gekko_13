@@ -204,12 +204,13 @@ export const isRetryable = (e: unknown) => {
 /**
  * mtlsCall と同じく、相手の SPIFFE ID を確かめて、そのときの SVID で mTLS をかけて呼ぶ。応答の本文は流したまま返す（AG-UI の SSE を中継するため）。
  * fetch の形で返すので、openid-client や jose の customFetch にも渡せる。
- * 応答が届く前につなぎが切れたら、最大 3 回まで送り直す（段 D の D1-a3）。止まったタスクへのつなぎを、Service Connect は救いきれなかった
+ * 応答が届く前につなぎが切れたら、最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す（合わせて約 4.5 秒。段 D の D1-a3）。Service Connect の
+ * 外れ値の検出が、止まったタスクを避けるまで続ける（外れ値の検出は、直近 30 秒に 5 回以上失敗したタスクを避ける。ECS の資料。3 回では避けられる前に送り終えた。2026-11-23 の AWS）。止まったタスクへのつなぎを、Service Connect は救いきれなかった
  * （2026-11-23 の AWS）。送り直しは、つなぐたびに Service Connect が送り先を選び直す。POST も送り直すが、受ける側は 2 度届いても困らない
  * （営業 AI エージェントの回は、同じ答えの 2 度目を 409 で拒む。申込みは nonce が 1 回しか通さない。交換は、トークンがもう 1 つ出るだけ）。
  * 相手の SPIFFE ID が違う、時間切れ、取りやめ、応答が始まったあとの失敗は、送り直さない。
  */
-export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 3): typeof fetch {
+export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 6): typeof fetch {
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const headers = Object.fromEntries(new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined)));
@@ -252,7 +253,7 @@ export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutM
         return await once();
       } catch (e) {
         if (i >= attempts || init.signal?.aborted || !isRetryable(e)) throw e;
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 300 * i));
       }
     }
   }) as typeof fetch;

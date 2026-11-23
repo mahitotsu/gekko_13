@@ -85,10 +85,11 @@ final class SpiffeTls {
 	static final Duration INTERNAL_TIMEOUT = Duration.ofSeconds(15);
 
 	/** 応答が届く前につなぎが切れたときに、送り直す回数の上限（最初の 1 回を含む）。 */
-	static final int ATTEMPTS = 3;
+	static final int ATTEMPTS = 6;
 
 	/**
-	 * 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。応答が届く前につなぎが切れたら（IOException）、最大 3 回まで送り直す
+	 * 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。応答が届く前につなぎが切れたら（IOException）、最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す。
+	 * Service Connect の外れ値の検出が、止まったタスクを避けるまで続ける（外れ値の検出は、直近 30 秒に 5 回以上失敗したタスクを避ける。ECS の資料。3 回では避けられる前に送り終えた。2026-11-23 の AWS）
 	 * （段 D の D1-a3。止まったタスクへのつなぎを、Service Connect は救いきれなかった。2026-11-23 の AWS）。相手の SPIFFE ID が違うときは、
 	 * 送り直さない。送るのは、passkey の公開鍵と連絡先の読み取り（GET）と、顧客のアプリへの直送（2 度届くと、受信箱に同じ通知が 2 つ並ぶが、
 	 * 照合は契約の内容で行うので、結果は変わらない）。
@@ -115,7 +116,7 @@ final class SpiffeTls {
 							throw ex;
 						}
 						try {
-							Thread.sleep(200);
+							Thread.sleep(300L * i);
 						}
 						catch (InterruptedException ie) {
 							Thread.currentThread().interrupt();
