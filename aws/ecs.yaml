@@ -104,6 +104,10 @@ Parameters:
     Type: String
     Default: /gekko13/customer-app/state-key
     Description: SSM SecureString with the AES-256 key that seals the customer app sessions in Aurora
+  SalesAgentStateKeyParameter:
+    Type: String
+    Default: /gekko13/sales-agent/state-key
+    Description: SSM SecureString with the AES-256 key that seals the sales agent conversations in Aurora
   DbCaParameter:
     Type: String
     Default: /gekko13/db/ca
@@ -222,6 +226,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbAuditPasswordParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${OfferSigningKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${StateKeyParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SalesAgentStateKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthSigningKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootCertParameter}"

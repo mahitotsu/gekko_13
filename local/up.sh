@@ -42,6 +42,8 @@ for k in DB_ADMIN DB_SPIRE DB_KEYCLOAK DB_AUTH DB_BACKEND DB_CUSTOMER_APP DB_SAL
 done
 # 顧客のアプリのセッションの暗号鍵（AES-256。判断 54）
 grep -q "^STATE_KEY=" run/db.env || printf 'STATE_KEY=%s\n' "$(openssl rand -hex 32)" >> run/db.env
+# 営業 AI エージェントの会話の暗号鍵（判断 55）。サービスごとに分ける
+grep -q "^AGENT_STATE_KEY=" run/db.env || printf 'AGENT_STATE_KEY=%s\n' "$(openssl rand -hex 32)" >> run/db.env
 # shellcheck disable=SC1091
 . run/db.env
 # 保険会社のシステムの提示の鍵（段 D の D1-a3）。AWS と同じく、秘密鍵と公開鍵の PEM を並べ、複数のコンテナが同じ鍵を使う
@@ -128,6 +130,7 @@ start_sales_agent() {
   run --name gekko13-sales-agent --network-alias sales-agent $(app_labels sales-agent) \
     -e SERVICE=sales-agent -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_ORIGIN=http://keycloak:8080 \
+    -e DB_URL=postgres://postgres:5432/sales_agent -e DB_USER=sales_agent -e "DB_PASSWORD=$DB_SALES_AGENT" -e "STATE_KEY=$AGENT_STATE_KEY" \
     -v "$HERE/run/svid/sales-agent:/svid:ro" \
     "$IMAGE"
 }

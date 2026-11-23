@@ -129,6 +129,8 @@ put_secret "/$PREFIX/backend/offer-key" ec_pair
 # 顧客のアプリのセッションを、共有の Aurora に置くときの暗号鍵（AES-256、16 進で 32 バイト。段 D の D1-a3、判断 54）
 hex32() { openssl rand -hex 32 | tr -d '\n'; }
 put_secret "/$PREFIX/customer-app/state-key" hex32
+# 営業 AI エージェントの会話の暗号鍵（判断 55）。サービスごとに分ける
+put_secret "/$PREFIX/sales-agent/state-key" hex32
 # SPIRE のルート CA（ECDSA P-256、5 年）。全部の server が、この下で中間 CA を作る。鍵と証明書は、一緒に一度だけ作る。
 # 片方だけあるときは止める（作り直すと、トラストアンカーが替わり、全部のインスタンスの agent が server を信じなくなる）
 ROOT_KEY="/$PREFIX/spire/root-key"

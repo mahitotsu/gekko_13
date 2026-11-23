@@ -69,6 +69,13 @@ Parameters:
     Type: String
     Default: /gekko13/customer-app/state-key
     Description: SSM SecureString with the AES-256 key that seals the customer app sessions in Aurora (64 hex characters)
+  DbSalesAgentPasswordParameter:
+    Type: String
+    Default: /gekko13/db/sales-agent-password
+  SalesAgentStateKeyParameter:
+    Type: String
+    Default: /gekko13/sales-agent/state-key
+    Description: SSM SecureString with the AES-256 key that seals the sales agent conversations in Aurora (64 hex characters)
 
 Resources:
   # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
@@ -234,6 +241,13 @@ Resources:
             - { Name: SVID_DIR, Value: /svid }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
             - { Name: LOGIN_ISSUER, Value: !Sub "https://${RpId}/login/realms/insurer" }
+            # 会話は、共有の Aurora に置き、どのタスクでも次の回を続ける（段 D の D1-a3。判断 55）。署名した書類が入るので、暗号化する
+            - { Name: DB_URL, Value: !Sub "postgres://${DbHost}:5432/sales_agent" }
+            - { Name: DB_USER, Value: sales_agent }
+          Secrets:
+            - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbSalesAgentPasswordParameter}" }
+            - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
+            - { Name: STATE_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SalesAgentStateKeyParameter}" }
           MountPoints:
             - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }
           LogConfiguration:

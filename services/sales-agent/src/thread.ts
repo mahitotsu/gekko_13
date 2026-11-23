@@ -1,5 +1,6 @@
 // 会話（AG-UI の thread）ごとの状態と、AG-UI のイベントの列（gekko_11 の D-29）。Claude と台本の両方が、これを通して顧客とやりとりする。
-// 画面側の道具（顧客への質問と書類の提示）を呼ぶと、イベントを出してその回を区切り、次の回の tool message を待つ。
+// 画面側の道具（顧客への質問と書類の提示）を呼ぶと、イベントを出してその回を区切る。顧客の答えは、次の回の tool message で届く。
+// 会話の中身（ThreadData）は、区切りごとに共有のデータベースに書き、次の回は、どのタスクでも続けられる（段 D の D1-a3。判断 55）。
 // 書類の識別子と署名の値は、LLM ではなく、ここが直前の提示と画面の回答から入れる（gekko_11 の D-27）。
 import { createHash, randomUUID } from "node:crypto";
 import canonicalize from "canonicalize";
@@ -31,7 +32,7 @@ const model = () =>
   process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY ? (process.env.CLAUDE_MODEL ?? "claude-haiku-5-5") : "scripted";
 
 /** 回の区切り。PAUSE は顧客の答えを待つ、END は営業 AI エージェントの番が終わった。 */
-type Item = BaseEvent | { pause: true } | { end: true; error?: string };
+export type Item = BaseEvent | { pause: true } | { end: true; error?: string };
 
 export interface Signed {
   intent?: Intent;
@@ -40,32 +41,59 @@ export interface Signed {
   assertion?: unknown;
 }
 
-export class Thread {
-  readonly id: string;
-  readonly sub: string;
-  /** 最新の回で受け口が確かめたトークン A。事務サービスを呼ぶときに B に替える（mcp.ts）。 */
-  ctx = "";
-  /** 最新の回の、確かめた主張（取決めを含む）。 */
-  claims = "";
+/**
+ * 会話の中身。顧客の答えを待つ区切りごとに、共有のデータベースに書く（段 D の D1-a3。判断 55）。次の回は、どのタスクでも、これを読んで続ける。
+ * トークン A と、確かめた主張は、回ごとに受け口が確かめるので、置かない。
+ */
+export interface ThreadData {
+  id: string;
+  sub: string;
   /** 直前に事務サービスから受け取った提示。 */
   offer?: Offer;
   /** 顧客が署名した書類。画面が返した、顧客が実際に署名した内容をそのまま持ち、提出する。 */
-  signed: Signed = {};
+  signed: Signed;
   /** 顧客が画面で選んだ案（画面が返した案の中身）。 */
   chosen?: Plan;
   /** 顧客の最初の文。意向確認書面の「当初の意向」に、そのまま入れる（gekko_11 の P-17）。 */
   initialWish?: string;
-  lastUsed = Date.now();
+  /** 答えを待っている画面側の道具。次の回の tool message は、この id への答えだけを受ける。 */
+  pending?: { id: string; name: FrontendTool; args: Record<string, unknown> };
+  /** エンジン（台本、のちに本物の Claude）の進み。中身はエンジンが決める。 */
+  engine: Record<string, unknown>;
+}
 
-  private inbox: string[] = [];
-  private inboxWake?: () => void;
+export const newThreadData = (id: string, sub: string): ThreadData => ({ id, sub, signed: {}, engine: {} });
+
+export class Thread {
+  readonly data: ThreadData;
+  /** この回で受け口が確かめたトークン A。事務サービスを呼ぶときに B に替える（mcp.ts）。 */
+  ctx = "";
+  /** この回の、確かめた主張（取決めを含む）。 */
+  claims = "";
+  /** この回のイベント。区切り（PAUSE か END）までを、回の終わりにまとめて画面へ流す。 */
   private items: Item[] = [];
-  private wake?: () => void;
-  private pending?: { id: string; resolve: (content: string) => void };
 
-  constructor(id: string, sub: string) {
-    this.id = id;
-    this.sub = sub;
+  constructor(data: ThreadData) {
+    this.data = data;
+  }
+
+  get id() {
+    return this.data.id;
+  }
+  get sub() {
+    return this.data.sub;
+  }
+  get offer() {
+    return this.data.offer;
+  }
+  get signed() {
+    return this.data.signed;
+  }
+  set signed(v: Signed) {
+    this.data.signed = v;
+  }
+  get chosen() {
+    return this.data.chosen;
   }
 
   /**
@@ -77,49 +105,35 @@ export class Thread {
     console.log(JSON.stringify({ audit: redact(entry) }));
   }
 
-  /** 顧客の文（user message）を、営業 AI エージェントに渡す。 */
+  /** 顧客の文（user message）を受け取り、記録する。 */
   tell(text: string) {
     this.record("customer_text", { text });
-    this.initialWish ??= text;
-    this.inbox.push(text);
-    this.inboxWake?.();
-  }
-
-  /** 顧客の文を、届いた順に返す（営業 AI エージェントの番の始まり）。 */
-  async *messages(): AsyncGenerator<string> {
-    for (;;) {
-      while (this.inbox.length) yield this.inbox.shift()!;
-      await new Promise<void>((r) => (this.inboxWake = r));
-      this.inboxWake = undefined;
-    }
+    this.data.initialWish ??= text;
   }
 
   /** 事務サービスから受け取った提示を覚え、会話の記録に、nonce と識別子を残す。 */
   setOffer(offer: Offer) {
-    this.offer = offer;
+    this.data.offer = offer;
     this.record("agent_tool", { name: "issue_offer", nonce: offer.nonce, offerSetId: offer.offerSetId });
   }
 
   get waitingFor(): string | undefined {
-    return this.pending?.id;
+    return this.data.pending?.id;
+  }
+
+  /** 区切りまで進んだか（答えを待つか、番が終わった）。エンジンは、区切ったら、その回の処理を止める。 */
+  get stopped(): boolean {
+    const last = this.items.at(-1);
+    return Boolean(last && ("pause" in last || "end" in last));
   }
 
   private push(item: Item) {
     this.items.push(item);
-    this.wake?.();
   }
 
-  /** 次の区切り（PAUSE か END）までのイベントを、届いた順に返す。 */
-  async *drain(): AsyncGenerator<Item> {
-    for (;;) {
-      while (this.items.length) {
-        const item = this.items.shift()!;
-        yield item;
-        if ("pause" in item || "end" in item) return;
-      }
-      await new Promise<void>((r) => (this.wake = r));
-      this.wake = undefined;
-    }
+  /** この回のイベントを、出した順に返す。 */
+  events(): Item[] {
+    return this.items;
   }
 
   /** 営業 AI エージェントの文を、顧客に送る。 */
@@ -138,10 +152,10 @@ export class Thread {
   }
 
   /**
-   * 画面側の道具を呼び、顧客の答えを待つ。LLM が決めた値（llmArgs）に、決まった処理が識別子と署名の値を足して、画面へ送る。
-   * 返すのは、LLM に渡す答えの文。
+   * 画面側の道具を呼び、回を区切る。LLM が決めた値（llmArgs）に、決まった処理が識別子と署名の値を足して、画面へ送る。
+   * 顧客の答えは、次の回の tool message で届く（answer）。そのときは、別のタスクが受けてもよい。
    */
-  async frontend(name: FrontendTool, llmArgs: Record<string, unknown>): Promise<string> {
+  frontend(name: FrontendTool, llmArgs: Record<string, unknown>): void {
     const args = this.argsFor(name, llmArgs);
     const toolCallId = randomUUID();
     // 示した書類のハッシュを、決まった処理が残す。LLM の会話の履歴には入らない。監査サービスが、事務サービスのハッシュと比べる
@@ -154,16 +168,18 @@ export class Thread {
     this.push({ type: EventType.TOOL_CALL_START, toolCallId, toolCallName: name } as BaseEvent);
     this.push({ type: EventType.TOOL_CALL_ARGS, toolCallId, delta: JSON.stringify(args) } as BaseEvent);
     this.push({ type: EventType.TOOL_CALL_END, toolCallId } as BaseEvent);
-    const answer = new Promise<string>((resolve) => (this.pending = { id: toolCallId, resolve }));
+    this.data.pending = { id: toolCallId, name, args };
     this.push({ pause: true });
-    return this.accept(name, args, await answer);
   }
 
-  /** 次の回の tool message で、待っている道具に答える。 */
-  answer(toolCallId: string, content: string): boolean {
-    if (this.pending?.id !== toolCallId) return false;
-    const { resolve } = this.pending;
-    this.pending = undefined;
+  /**
+   * 待っている道具への答え（次の回の tool message）を受け取る。返すのは、LLM（台本）に渡す答えの文。
+   * 待っている道具でなければ undefined。
+   */
+  answer(toolCallId: string, content: string): string | undefined {
+    const pending = this.data.pending;
+    if (pending?.id !== toolCallId) return undefined;
+    this.data.pending = undefined;
     let answer: unknown = content;
     try {
       answer = JSON.parse(content);
@@ -171,8 +187,7 @@ export class Thread {
       // 文の答えは、そのまま残す
     }
     this.record("customer_answer", { answer });
-    resolve(content);
-    return true;
+    return this.accept(pending.name, pending.args, content);
   }
 
   private argsFor(name: FrontendTool, llm: Record<string, unknown>): Record<string, unknown> {
@@ -186,7 +201,7 @@ export class Thread {
         if (!this.offer) throw new Error("示す提示がない（先に issue_offer を使う）");
         return {
           intent: intentOf(this.sub, this.offer, String(llm.planId), String(llm.wish ?? ""), this.chosen, {
-            initialWish: this.initialWish,
+            initialWish: this.data.initialWish,
             changeNote: llm.changeNote ? String(llm.changeNote) : undefined,
           }),
         };
@@ -218,7 +233,7 @@ export class Thread {
       return "顧客は、申込書に署名しました。submit_application で提出できます。";
     }
     if (name === "present_offers" && answer.planId) {
-      this.chosen = answer.plan as Plan | undefined;
+      this.data.chosen = answer.plan as Plan | undefined;
       return `顧客が選んだ案: ${String(answer.planId)}`;
     }
     return String(answer.answer ?? content);
@@ -229,22 +244,4 @@ export class Thread {
 function offerSummary(args: Record<string, unknown>) {
   const offer = args.offer as Offer;
   return { message: args.message, reasons: args.reasons, offer: { nonce: offer.nonce, offerSetId: offer.offerSetId, plans: offer.offerSet.plans } };
-}
-
-/** threadId ごとの会話。1 つの複製で動き、15 分使われなければ捨てる。 */
-const threads = new Map<string, Thread>();
-const IDLE_MS = 15 * 60_000;
-
-export function threadFor(id: string, sub: string, start: (t: Thread) => void): Thread {
-  const now = Date.now();
-  for (const [k, t] of threads) if (now - t.lastUsed > IDLE_MS) threads.delete(k);
-  let t = threads.get(id);
-  if (t && t.sub !== sub) throw new Error("この会話は、ほかの顧客のものである");
-  if (!t) {
-    t = new Thread(id, sub);
-    threads.set(id, t);
-    start(t);
-  }
-  t.lastUsed = now;
-  return t;
 }

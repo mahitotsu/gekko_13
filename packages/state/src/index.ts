@@ -1,15 +1,17 @@
-// 顧客のアプリの状態の置き場所（段 D の D1-a3。判断 53、54）。2 つのタスクが同じ状態を読むよう、共有のデータベース（AWS では Aurora）に置く。
-// - セッションとログインの途中の情報: キーは Cookie の値の SHA-256。中身は AES-256-GCM で暗号化し、キーを付加データにする
-//   （データベースだけが漏れても、DPoP の鍵とトークンは暗号文しか出ない。行を別のキーへ写しても、復号できない）。
-//   暗号鍵は、AWS では aws/deploy.sh が一度だけ作って SSM に置き、ECS が渡す（STATE_KEY、16 進で 32 バイト）。
+// サービスの状態の置き場所（段 D の D1-a3。判断 53〜55）。2 つのタスクが同じ状態を読むよう、共有のデータベース（AWS では Aurora）に置く。
+// 顧客のアプリ（セッション、ログインの途中の情報、受信箱）と、営業 AI エージェント（会話）が使う。
+// - キーは、Cookie の値や会話の ID の SHA-256 にする（データベースが漏れても、セッションを乗っ取れない）。
+// - 暗号鍵（STATE_KEY、16 進で 32 バイト）を渡したときは、中身を AES-256-GCM で暗号化し、種類とキーを付加データにする
+//   （データベースだけが漏れても、暗号文しか出ない。行を別のキーへ写しても、復号できない）。顧客のアプリは必ず渡す（判断 54）。
+//   AWS では aws/deploy.sh が一度だけ作って SSM に置き、ECS が渡す。
 // - 受信箱: 保険会社のシステムからの直送と、画面の読み取りが、別のタスクに当たるので、同じく共有のデータベースに置く。
 // 試験では、メモリの実装（memoryState）を使う。
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import pg from "pg";
 
-/** 状態の種類。session はログイン中のセッション、login はログインの途中（認可コードを受け取るまで）。 */
-export type Kind = "session" | "login";
+/** 状態の種類。session はログイン中のセッション、login はログインの途中（認可コードを受け取るまで）、conversation は営業 AI エージェントの会話。 */
+export type Kind = "session" | "login" | "conversation";
 
 export interface StateStore {
   /** 1 件を読む。なければ、または期限を過ぎていれば undefined。 */
@@ -110,10 +112,11 @@ SELECT pg_advisory_unlock(7231003);
  * 共有のデータベースの実装。環境変数: DB_URL（postgres://ホスト:ポート/データベース）、DB_USER、DB_PASSWORD、STATE_KEY。
  * DB_CA_PEM（Aurora の CA）があれば、TLS で Aurora の証明書と名前を確かめる。手元の PostgreSQL のコンテナでは、平文でつなぐ。
  */
-export async function pgState(env: NodeJS.ProcessEnv = process.env): Promise<StateStore> {
+export async function pgState(env: NodeJS.ProcessEnv = process.env, opts: { seal: boolean } = { seal: true }): Promise<StateStore> {
   const url = env.DB_URL;
   if (!url) throw new Error("環境変数 DB_URL がない（状態を共有のデータベースに置く。判断 53）");
-  const box = sealer(env.STATE_KEY ?? "");
+  const plain = { seal: (_aad: string, v: string) => v, open: (_aad: string, v: string) => v };
+  const box = opts.seal ? sealer(env.STATE_KEY ?? "") : plain;
   const ca = env.DB_CA_PEM ?? (env.DB_CA_FILE ? readFileSync(env.DB_CA_FILE, "utf8") : undefined);
   // 接続の文字列を渡すと、pg は、文字列にない利用者名も、文字列の側（空）で上書きする。宛先は、文字列から取り出して個別に渡す
   const target = new URL(url);
@@ -191,7 +194,7 @@ export async function pgState(env: NodeJS.ProcessEnv = process.env): Promise<Sta
   };
 }
 
-/** 動いている置き場所。main.ts が起動のときに pgState を渡す。試験では、渡さなければメモリの実装になる。 */
+/** 動いている置き場所。各サービスの main.ts が起動のときに pgState を渡す。試験では、渡さなければメモリの実装になる。 */
 let store: StateStore = memoryState();
 export const useState = (s: StateStore) => (store = s);
 export const state = () => store;

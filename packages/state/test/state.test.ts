@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { memoryState, sealer } from "../src/state.ts";
+import { memoryState, sealer } from "../src/index.ts";
 
 // 状態の置き場所（段 D の D1-a3。判断 53、54）。暗号化と、2 つのタスクで共有するときの約束（1 回だけ渡す、ロックで順に更新する）。
 describe("セッションの暗号化", () => {

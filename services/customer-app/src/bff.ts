@@ -1,6 +1,6 @@
 // 顧客のアプリの BFF（gekko_11 の D-41、RFC 10017 の 6.1 節）。OAuth の機密クライアントとして、ログインサーバーで A と P を受け取り、
 // 画面の代わりに営業 AI エージェントと認可サーバーを呼ぶ。トークンと DPoP の鍵は、画面には出さない。
-// セッションは、2 つのタスクで共有するため、暗号化して共有のデータベースに置く（段 D の D1-a3。判断 54。state.ts）。
+// セッションは、2 つのタスクで共有するため、暗号化して共有のデータベースに置く（段 D の D1-a3。判断 54。packages/state）。
 // 画面とは、HttpOnly の Cookie のセッションでつなぐ。顧客の承認（passkey の署名）は、今までどおり画面の端末で行う。
 import type { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -13,7 +13,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { compactVerify, createRemoteJWKSet, customFetch, SignJWT } from "jose";
 import * as oidc from "openid-client";
 import { needsRefresh, verifyIdToken } from "../web/checks.ts";
-import { state } from "./state.ts";
+import { state } from "../../../packages/state/src/index.ts";
 
 const env = (name: string, fallback?: string) => process.env[name] ?? fallback ?? "";
 
@@ -55,7 +55,7 @@ const COOKIE = { path: "/", secure: true, httpOnly: true, sameSite: "Strict" } a
 const MAX_AGE_MS = 60 * 60_000;
 const IDLE_MS = 30 * 60_000;
 
-/** 共有のデータベースに置くセッション（state.ts が暗号化する）。DPoP の鍵は JWK で持つ（判断 54）。 */
+/** 共有のデータベースに置くセッション（packages/state が暗号化する）。DPoP の鍵は JWK で持つ（判断 54）。 */
 interface StoredSession {
   sub: string;
   idToken: string;
@@ -229,7 +229,7 @@ async function proof(session: Session, htm: string, htu: string, token: string) 
 
 const random = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
 
-/** Cookie のセッションを読む。期限を過ぎたものは、置き場所が返さない（state.ts）。 */
+/** Cookie のセッションを読む。期限を過ぎたものは、置き場所が返さない（packages/state）。 */
 async function current(c: Context): Promise<Session | undefined> {
   const sid = getCookie(c, SESSION);
   const session = sid ? await loadSession(sid) : undefined;
@@ -338,7 +338,7 @@ export function addBff(app: Hono) {
     const url = new URL(c.req.url, cfg().appOrigin);
     if (!url.searchParams.has("code") && !url.searchParams.has("error")) return next();
     const id = getCookie(c, LOGIN);
-    // ログインの途中の情報は 1 回だけ使う。2 つのタスクに同時に届いても、渡すのは片方だけ（state.ts の take）
+    // ログインの途中の情報は 1 回だけ使う。2 つのタスクに同時に届いても、渡すのは片方だけ（packages/state の take）
     const raw = id ? await state().take("login", id) : undefined;
     const login = raw ? (JSON.parse(raw) as LoginState) : undefined;
     deleteCookie(c, LOGIN, COOKIE);

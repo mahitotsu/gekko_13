@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Hono } from "hono";
 import { json, mtlsFetch, readBody, type SvidSource } from "../../../packages/spiffe-tls/src/index.ts";
 import { addBff } from "./bff.ts";
-import { state } from "./state.ts";
+import { state } from "../../../packages/state/src/index.ts";
 
 export interface Notice {
   customer: string;

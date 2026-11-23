@@ -1,6 +1,7 @@
 // 営業 AI エージェントを起動する（段 D の D1-a2-2）。受け口は SVID の mTLS（既定 8443）で、呼べるのは顧客のアプリの BFF だけ（gekko_11 の D-41）。
 // BFF は、トークン A と DPoP の proof を付けて呼ぶ。token-guard で、相手、A（ログインサーバーの公開鍵）、DPoP を確かめてから、AG-UI に渡す。
 // DPoP の htu は、BFF が呼ぶ名前（PUBLIC_ORIGIN、既定 https://sales-agent:8443）とパスで照らす。
+// 会話は、共有のデータベースに置く。DB_URL と STATE_KEY がなければ、起動しない（段 D の D1-a3）。
 import type { IncomingMessage } from "node:http";
 import { getRequestListener } from "@hono/node-server";
 import { createRemoteJWKSet } from "jose";
@@ -9,6 +10,7 @@ import { createGuard, Refusal } from "../../../packages/token-guard/src/index.ts
 import { createApp } from "./app.ts";
 import type { Verified } from "./claims.ts";
 import { useSvids } from "./mcp.ts";
+import { pgState, useState } from "../../../packages/state/src/index.ts";
 
 const log = (o: object) => console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ...o }));
 const env = (name: string, fallback?: string) => {
@@ -36,6 +38,9 @@ const svids = new SvidSource(env("SVID_DIR", "/svid"));
 const first = await svids.start();
 log({ ev: "svid", id: first.id, notAfter: first.notAfter, engine: "scripted" });
 useSvids(svids);
+// 会話は、共有のデータベースに置く（段 D の D1-a3。判断 55）。会話には、顧客が署名した書類が入るので、暗号化して置く
+useState(await pgState());
+log({ ev: "state", store: "postgres" });
 
 const listener = getRequestListener(createApp().fetch);
 const port = Number(env("APP_PORT", "8443"));
