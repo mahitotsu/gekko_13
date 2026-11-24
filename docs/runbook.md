@@ -52,6 +52,19 @@ node scripts/ui-flow.ts
 
 ホストが眠ったあとは、手元の SPIRE の agent が立ち直れず、SVID が書かれないことがある（[findings 5-22](findings.md#5-22-手元で主の流れの-27-段がenvoy-なしで通ったサービスのトークンの確かめはtypescriptpythonjava-の-3-つで共通の例-15-件の判定が全部一致した)）。そのときは `local/down.sh` と `local/up.sh` で作り直す。
 
+手元だけで使う切り方が 2 つある。どちらも `local/up.sh` に環境変数を付けて立てたときだけ働き、AWS のタスク定義には付けない。
+
+```sh
+GEKKO13_FAULT_CUT_STREAM=1 GEKKO13_FAULT_DROP_SUBMIT_REPLY=1 local/up.sh sales-agent insurer-mcp
+node scripts/ui-flow.ts
+local/up.sh sales-agent insurer-mcp   # 切り方を外して戻す
+```
+
+- `GEKKO13_FAULT_CUT_STREAM=1`: 営業 AI エージェントが、回を流している途中でつなぎを切る（各 runId の 1 回目だけ）。画面が同じ runId で送り直し、流し直しで続くかを見る。
+- `GEKKO13_FAULT_DROP_SUBMIT_REPLY=1`: 事務サービスが、各 nonce の最初の提出の返事を捨てる。契約はできたのに返事が届かなかった場面で、送り直しても契約が 1 つのままかを見る。
+
+期待する結果: 切り方を付けても、`1 ログイン` から `8c` までの行がどれも `"ok":true` になる。`7c 会話の文とカードが 2 重に出ていない` も通る。
+
 ## AWS で作る
 作る前に、変更をコミットしておく。イメージのタグは、イメージごとの材料のコミットした中身から作る（`scripts/image-tag.sh`）。材料にコミットしていない変更があると、`aws/deploy.sh` は `材料にコミットしていない変更がある` と出して止まる。材料が変わらないイメージは作り直さず、そのタスクも入れ替わらない。どのコミットから作ったかは、イメージのラベル `org.opencontainers.image.revision` に残る。
 
@@ -129,6 +142,22 @@ DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/lo
 
 マネージドスケーリングの値は、要るインスタンスの数を動いている数で割った割合で、100 がちょうど足りている状態である。100 を超えると、インスタンスを増やす。メトリクスの参照は 30 個で、無料枠（3 つまで、1 つに 50 まで）に収まる。下の段のログの集計は、開いて読み込むたびに、読んだ量の料金がかかる（無料枠は月 5 GB）。時間の幅を広げすぎない。
 
+## インスタンスを止めて、主の流れが続くかを確かめる
+主の流れを、案の提示のあとで待たせる。その会話の案の提示を出したインスタンスを止め、ログインし直さずに照合と監査まで通るかを見る（plan.md の D1-a3）。インスタンスを起こし、`aws/deploy.sh` を回してから使う。
+
+```sh
+GEKKO13_STOP_HOW=ec2 aws/d1a3-failover.sh   # EC2 の API で予告なしに止める（ドレインが働かない、いちばん厳しい条件）
+GEKKO13_STOP_HOW=asg aws/d1a3-failover.sh   # ASG を通して止める（ライフサイクルフックとマネージドドレインが働く）
+```
+
+- 止める前に、全部のサービスの 2 タスクが、別々のインスタンスにあるかを確かめる。同じインスタンスに 2 つあれば、片方を止めて置き直させる（3 回まで）。分かれなければ、何も止めずに終わる。止める直前にも確かめる。
+- 止めたあとは、ASG が代わりのインスタンスを起こす。終わったら `aws/scale.sh down` で 0 に戻す。
+- 結果は `local/run/d1a3-failover/<時刻>/result.md` に書く（`local/down.sh` で消えるので、残すものは先に写す）。
+
+期待する結果: `止めたあとの続き` と `止めてから 60 秒後に新しく始めた流れ` が、どちらも `yes` になる。入口の失敗の数は 0 になる。1 回は約 10 分（止めてから 480 秒、入口を見続ける）。起こす、送る、2 つの止め方、0 に戻すまでを通すと、約 45 分で約 0.3 ドルだった（推定。2026-11-24。[findings 5-34](findings.md#5-34-インスタンスを-1-台止めても主の流れが照合と監査まで通った)）。
+
+どこで待ったかは、各サービスのログの `call_retry` の行で読む。`phase` は `handshake`（握手で黙った）か `response`（つないだあとの失敗）、`ms` はその 1 回の経過、`retried` は送り直したかである。
+
 ## 使わない間の費用
 使わない間は、`aws/scale.sh down` でタスクとインスタンスを 0 にするだけにし、スタックは消さない。戻すのは `aws/scale.sh up` だけで足りる。ディストリビューションは有効なまま残り、送り先のタスクがない間は、リバースプロキシが 503 の `no target` を返す。
 
@@ -197,6 +226,7 @@ SPIRE のルート CA を消すと、次に作るときは新しい根になる�
 - **`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`:** Node.js の型の取り除きは `node_modules` の中で動かない。パッケージは相対パスで読む。
 - **`aws/deploy.sh` が、テンプレートの検査で止まる:** テンプレートのコメント以外の行に、日本語がある。CloudFormation は、ASCII 以外の文字を「?」に置き換える。Description と Metadata は英語で書き、日本語は `#` のコメントに移す（[findings 2-1](findings.md#2-1-cloudformation-はテンプレートの-ascii-以外の文字をに置き換えた)）。
 - **ECS のスタックが `ROLLBACK_COMPLETE` になった:** そのままでは作り直せない。資源が残っていないのを確かめてから消し、作り直す。作成中に巻き戻ったときは、Cloud Map の名前空間がスタックの外に残ることがあるので、`aws servicediscovery list-namespaces` で確かめる（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
+- **手元の spire-agent が落ち続け、各サービスの SVID の期限が切れる:** agent のログに `x509svid: could not verify leaf certificate` が出る。agent が持つバンドルが古い（[findings 5-29](findings.md#5-段-d)）。`local/down.sh` は `local/run` を全部消すので使わず、agent だけを立て直す。`docker exec gekko13-spire-server /opt/spire/bin/spire-server bundle show > local/run/bundle/bundle.crt` でバンドルを取り直す。`spire-server token generate -spiffeID spiffe://gekko13.internal/node/local` で新しい join token を作る。`gekko13-spire-agent` を、`local/up.sh` と同じ引数で立て直す。最後に、各サービスの `-helper` のコンテナを `docker restart` する。
 - **spire-agent のタスクが、止まっては再起動する:** インスタンスを起動した直後の 1 分ほどは、agent が server より先に起きる。そのため、server に届かずに止まる。server が起きれば安定する。server がいないまま 5 分ほどたつと、agent の SVID が切れて止まり続ける（[findings 3-4](findings.md#3-4-server-が-5-分ほどいないとagent-は自分の-svid-が切れて止まった)）。spire-server のサービスが動いているかを見る。
 - **agent が「attestation data has already been used」で止まる:** aws_iid は、同じインスタンスで一度しか確認を通さない。ホストの `/var/lib/gekko13/spire-agent` が消えたときに起きる。インスタンスを入れ替える（`scale.sh down` と `up`）。
 - **ホストの中を見たい:** IPv6 だけのインスタンスは、Session Manager に登録されなかった（[findings 2-11](findings.md#2-11-ipv6-だけのインスタンスはsession-manager-に登録されなかった)）。サブネットに IPv4 の経路がないので、公開 IPv4 を付けて入る逃げ道もない。中の様子は、CloudWatch Logs と ECS の API で見る。

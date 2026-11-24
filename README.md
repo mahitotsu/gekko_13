@@ -6,7 +6,7 @@
 
 ## 答え
 - **基盤（確かめた）:** ECS on EC2 と SPIRE で、ワークロードの身元と mTLS を、インスタンスの数と AZ に依らず作れた。インスタンスを 0 にすれば、費用は月 1 ドル未満の固定費だけになる（推定）。事実は [findings.md](docs/findings.md) の 1〜3 節。
-- **第 2 部（途中。段 D の D1-a2）:** gekko_11 の 7 つのサービスを、TypeScript、Java、Python、Go で ECS に載せた。主の流れ（ログインから照合まで）は、CloudFront を通して AWS で通った（[findings 5-23](docs/findings.md#5-23-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。監査の画面でも、その契約が「食い違いなし」と出た（[findings 5-24](docs/findings.md#5-24-aws-でも監査の画面で主の流れの契約が食い違いなしと出た書いた者はログストリームの名前で決められた最初の作りでは一覧の画面が入口の待ちの上限を超えた)）。ここまでは、営業 AI エージェントを台本で動かした。本物の Claude での確かめは残る。次は、新しく載せたサービスの冗長化（D1-a3）と、gekko_11 の 27 のシナリオで手口が止まるかの確かめである。進め方と合格の基準は [plan.md](docs/plan.md)。
+- **第 2 部（途中。段 D の D1-a3 まで）:** gekko_11 の 7 つのサービスを、TypeScript、Java、Python、Go で ECS に載せた。主の流れ（ログインから照合と監査まで）は、CloudFront を通して AWS で通った（[findings 5-23](docs/findings.md#5-23-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)、[5-24](docs/findings.md#5-24-aws-でも監査の画面で主の流れの契約が食い違いなしと出た書いた者はログストリームの名前で決められた最初の作りでは一覧の画面が入口の待ちの上限を超えた)）。状態を Aurora に移して 2 タスクにし、インスタンスを 1 台止めても、主の流れが最後まで通った（[findings 5-34](docs/findings.md#5-34-インスタンスを-1-台止めても主の流れが照合と監査まで通った)）。営業 AI エージェントは台本で動いており、本物の Claude での確かめが残る。
 - **第 1 部の文書:** 第 2 部で使い続ける事実と判断は、第 2 部の文書へ移した。第 1 部の文書は消した。読むときは、git の履歴（コミット `0a9b494` の `docs/phase1/`）から読む。
 
 ## 読む順番
@@ -27,7 +27,7 @@ npm ci
 npm test
 ```
 
-期待する結果: 型の検査と lint が通り、TypeScript の試験が `76 passed`、Python の試験が `21 passed`、Go の試験が `ok` になる。Java の試験は、イメージのビルドの中で回る。
+期待する結果: 型の検査と lint が通り、TypeScript の試験が `106 passed`、Python の試験が `25 passed`、Go の試験が `ok` になる。Java の試験は、イメージのビルドの中で回る。
 
 主の流れを手元で通すときは、`local/up.sh` で全部のサービスを立て、Docker のブラウザで `node scripts/ui-flow.ts` を回す。AWS で作って動かす手順も含めて、[docs/runbook.md](docs/runbook.md) にある。
 
