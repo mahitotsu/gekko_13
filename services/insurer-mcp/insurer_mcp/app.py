@@ -5,6 +5,7 @@ gekko_11 では、Envoy と token-guard が、受け口でトークンを確か�
 ツールの呼び出しは、1 件ずつ記録として標準出力に書く（gekko_11 の D-17）。
 """
 
+import asyncio
 import base64
 import contextvars
 import hashlib
@@ -23,6 +24,12 @@ from insurer_mcp.tls import mtls_request
 
 TRUST_DOMAIN = os.environ.get("TRUST_DOMAIN", "gekko13.internal")
 BACKEND = os.environ.get("BACKEND_URL", "https://insurer-backend:9443")
+# 1 回の応答の待ち（秒）。握手の待ちは、どれも 3 秒（tls.py）
+SUBMIT_TIMEOUT = float(os.environ.get("SUBMIT_TIMEOUT_S", "20"))
+LEAF_TIMEOUT = float(os.environ.get("LEAF_TIMEOUT_S", "5"))
+# 手元の確かめだけで使う切り方。1 にすると、各 nonce の最初の提出の返事を捨てる
+FAULT_DROP_SUBMIT_REPLY = os.environ.get("GEKKO13_FAULT_DROP_SUBMIT_REPLY") == "1"
+_dropped: set[str] = set()
 AUTH = os.environ.get("AUTH_ORIGIN", "https://auth:8443")
 ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token"
 
@@ -47,7 +54,11 @@ async def _call(method: str, url: str, expected: str, headers: dict[str, str], b
     ctx = CALL_SSL.get() or client_ssl
     if ctx is None:
         raise RuntimeError("SVID を読んでいない")
-    return await mtls_request(ctx, method, url, expected, headers, body)
+    # 待ちは外側ほど長くする（段 D の D1-a3）。保険会社のシステムへの提出は、その中で認可サーバーと顧客のアプリを呼ぶので長く待つ。
+    # 認可サーバー（交換、公開鍵）は末端なので短く待ち、送り直す。事務サービスを呼ぶ営業 AI エージェントは、これより長く待つ
+    if url.startswith(BACKEND):
+        return await mtls_request(ctx, method, url, expected, headers, body, timeout=SUBMIT_TIMEOUT, attempts=2)
+    return await mtls_request(ctx, method, url, expected, headers, body, timeout=LEAF_TIMEOUT, attempts=3)
 
 
 async def exchange(subject_token: str) -> str:
@@ -100,18 +111,28 @@ async def _backend(method: str, path: str, json_body: Any = None) -> Any:
         CALL_SSL.set(pinned_ssl())
     try:
         c = await exchange(verified[0])
+        headers = {"authorization": f"Bearer {c}", "accept": "application/json"}
+        body = b""
+        if json_body is not None:
+            headers["content-type"] = "application/json"
+            body = json.dumps(json_body, ensure_ascii=False).encode()
+        status, raw = await _call(method, f"{BACKEND}{path}", spiffe("insurer-backend"), headers, body)
     except PermissionError as e:
         return {"status": 403, "error": str(e)}
-    headers = {"authorization": f"Bearer {c}", "accept": "application/json"}
-    body = b""
-    if json_body is not None:
-        headers["content-type"] = "application/json"
-        body = json.dumps(json_body, ensure_ascii=False).encode()
-    status, raw = await _call(method, f"{BACKEND}{path}", spiffe("insurer-backend"), headers, body)
+    except (TimeoutError, ConnectionError, ssl.SSLError, asyncio.IncompleteReadError) as e:
+        # 認可サーバーか保険会社のシステムに、時間内に届かなかった。例外のまま返すと、窓口には文の誤りしか届かない。
+        # 送り直してよい失敗として返す（提出は、同じ申込みの 2 度目を保険会社のシステムが重ねない。段 D の D1-a3）
+        return {"status": 503, "error": f"保険会社のシステムに届かなかった: {type(e).__name__}", "retryable": True}
     try:
         parsed = json.loads(raw or b"{}")
     except ValueError:
         parsed = {"error": raw.decode(errors="replace")}
+    nonce = ((json_body or {}).get("application") or {}).get("nonce") if isinstance(json_body, dict) else None
+    if FAULT_DROP_SUBMIT_REPLY and method == "POST" and path == "/applications" and nonce and nonce not in _dropped:
+        # 手元の確かめだけで使う（段 D の D1-a3。AWS のタスク定義には付けない）。契約はできたが、返事が届かなかった場面を作る
+        _dropped.add(nonce)
+        print(json.dumps({"svc": "insurer-mcp", "event": "fault_drop_submit_reply", "nonce": nonce, "status": status}), flush=True)
+        return {"status": 503, "error": "保険会社のシステムに届かなかった: 返事を捨てた（手元の確かめ）", "retryable": True}
     return {"status": status, **parsed} if status >= 400 else parsed
 
 

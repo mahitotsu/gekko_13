@@ -16,6 +16,9 @@ import { needsRefresh, verifyIdToken } from "../web/checks.ts";
 import { state } from "../../../packages/state/src/index.ts";
 import { warmKeys } from "../../../packages/token-guard/src/index.ts";
 
+/** 末端の呼び出し（認可サーバー）の 1 回の待ち。握手の待ちは 3 秒（mtlsFetch）。待ちは外側ほど長くする（段 D の D1-a3） */
+const LEAF_TIMEOUT_MS = 5_000;
+
 const env = (name: string, fallback?: string) => process.env[name] ?? fallback ?? "";
 
 const trustDomain = () => env("TRUST_DOMAIN", "gekko13.internal");
@@ -313,7 +316,7 @@ async function callAuth(session: Session, p: string, method: "GET" | "POST", pat
   const { authOrigin, authId } = cfg();
   const url = `${authOrigin}${path}`;
   // 認可サーバー（Spring）は、Host と TLS から自分の URL を組み立て、DPoP の htu と照らす。mTLS で直接呼ぶので、転送のヘッダーは要らない
-  return mtlsFetch(svid(), authId)(url, {
+  return mtlsFetch(svid(), authId, LEAF_TIMEOUT_MS, 3)(url, {
     method,
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),

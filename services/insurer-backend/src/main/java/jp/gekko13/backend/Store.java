@@ -74,9 +74,20 @@ class Store {
 
 	void addContract(ContractRecord record) {
 		this.db.update(
-				"INSERT INTO contract_record (contract, act_chain, at_epoch, application, intent, token_jti) VALUES (?, ?, ?, ?, ?, ?)",
+				"INSERT INTO contract_record (contract, act_chain, at_epoch, application, intent, token_jti, nonce) VALUES (?, ?, ?, ?, ?, ?, ?)",
 				write(record.contract()), write(record.by()), record.at(), write(record.application()),
-				write(record.intent()), record.tokenJti());
+				write(record.intent()), record.tokenJti(), String.valueOf(record.contract().get("nonce")));
+	}
+
+	/** その nonce で記録した契約（提出の冪等。段 D の D1-a3）。なければ空。 */
+	java.util.Optional<ContractRecord> contractByNonce(String nonce) {
+		return this.db.query(
+				"SELECT contract, act_chain, at_epoch, application, intent, token_jti FROM contract_record WHERE nonce = ? ORDER BY id LIMIT 1",
+				(rs, i) -> new ContractRecord(read(rs.getString(1), MAP), read(rs.getString(2), STRINGS), rs.getLong(3),
+						read(rs.getString(4), Object.class), read(rs.getString(5), Object.class), rs.getString(6)),
+				nonce)
+			.stream()
+			.findFirst();
 	}
 
 	/** 契約の記録を、記録した順に返す。 */

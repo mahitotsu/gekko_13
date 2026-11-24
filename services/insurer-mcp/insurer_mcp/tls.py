@@ -130,38 +130,67 @@ class Refused(Exception):
     """相手の SPIFFE ID が違う。要求は送っていない。"""
 
 
-async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
-                       headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 15,
-                       attempts: int = 6) -> tuple[int, bytes]:
-    """_mtls_once を呼び、応答が届く前につなぎが切れたら（ConnectionError、ssl.SSLError、途中で切れた読み取り）、最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す
-    （段 D の D1-a3。止まったタスクへのつなぎを、Service Connect は救いきれなかった。2026-11-23 の AWS）。相手の SPIFFE ID が違う（Refused）、
-    時間切れは送り直さない。送り直すのは、トークンの交換（トークンがもう 1 つ出るだけ）と、保険会社のシステムの呼び出し（申込みは nonce が
-    1 回しか通さない）である。"""
-    import asyncio
+class HandshakeTimeout(TimeoutError):
+    """握手（TCP と TLS）が、握手の待ちのうちに終わらなかった。まだ何も送っていないので、送り直してよい。"""
 
+
+def _log_attempt(**o: Any) -> None:
+    import json as _json
+    import sys as _sys
+
+    print(_json.dumps({"svc": "insurer-mcp", "event": "call_retry", **o}, ensure_ascii=False), file=_sys.stdout, flush=True)
+
+
+async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
+                       headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 5,
+                       attempts: int = 6, handshake_timeout: float = 3) -> tuple[int, bytes]:
+    """_mtls_once を呼び、まだ応答を受け取っていない失敗なら、最大 attempts 回まで、間を 0.3 秒ずつ延ばして送り直す（段 D の D1-a3）。
+    送り直すのは、握手の前の時間切れ（HandshakeTimeout。まだ何も送っていない）と、応答が届く前につなぎが切れたとき（ConnectionError、
+    ssl.SSLError、途中で切れた読み取り）である。Service Connect は TCP の中継なので、止まったタスクへ向かったつなぎは、握手で黙る。
+    つなぎ直すと、Service Connect が送り先を選び直す。相手の SPIFFE ID が違う（Refused）と、握手のあとの時間切れは、送り直さない。
+    待ちは、握手の待ち（handshake_timeout）と、1 回の応答の待ち（timeout）に分ける。呼ぶ側は、外側の待ちより短い値を渡す
+    （待ちは外側ほど長くする。2026-11-24 の AWS で、内側と外側が同じ 15 秒だったため、内側が待たされると外側が先に切れた）。
+    送り直しは、段（握手か、応答か）と経過の秒つきで、1 行ずつログに出す。"""
+    import asyncio
+    import time as _time
+
+    started = _time.monotonic()
     for i in range(1, attempts + 1):
+        t0 = _time.monotonic()
         try:
-            return await _mtls_once(ctx, method, url, expected_id, headers, body, timeout)
+            return await _mtls_once(ctx, method, url, expected_id, headers, body, timeout, handshake_timeout)
         except Refused:
             raise
-        except (ConnectionError, ssl.SSLError, asyncio.IncompleteReadError):
+        except (HandshakeTimeout, ConnectionError, ssl.SSLError, asyncio.IncompleteReadError) as e:
+            phase = "handshake" if isinstance(e, HandshakeTimeout) else "response"
+            _log_attempt(url=url, attempt=i, phase=phase, error=type(e).__name__,
+                         ms=round((_time.monotonic() - t0) * 1000), total_ms=round((_time.monotonic() - started) * 1000))
             if i >= attempts:
                 raise
             await asyncio.sleep(0.3 * i)
+        except TimeoutError:
+            _log_attempt(url=url, attempt=i, phase="response", error="TimeoutError", retried=False,
+                         ms=round((_time.monotonic() - t0) * 1000), total_ms=round((_time.monotonic() - started) * 1000))
+            raise
     raise AssertionError("届かない")
 
 
 async def _mtls_once(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
-                       headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 15) -> tuple[int, bytes]:
+                     headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 5,
+                     handshake_timeout: float = 3) -> tuple[int, bytes]:
     """SVID の mTLS で 1 回呼ぶ（HTTP/1.1、Connection: close）。握手のあと、相手の SPIFFE ID を確かめてから、要求を送る。
     トークンを、確かめていない相手に送らないため。接続は使い回さない（入れ替わる前の証明書で示し続けないため）。
-    待ちは 15 秒。止まったタスクに当たると、Service Connect が別のタスクへつなぎ直すので、その間に見切らない（段 D の D1-a3。推定の値）。"""
+    握手は handshake_timeout、応答は timeout まで待つ。"""
     import asyncio
     from urllib.parse import urlsplit
 
     u = urlsplit(url)
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(u.hostname, u.port or 443, ssl=ctx, server_hostname=u.hostname), timeout)
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(u.hostname, u.port or 443, ssl=ctx, server_hostname=u.hostname,
+                                    ssl_handshake_timeout=handshake_timeout), handshake_timeout)
+    except TimeoutError as e:
+        raise HandshakeTimeout(f"握手が {handshake_timeout} 秒で終わらなかった") from e
     try:
         der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
         got = spiffe_id_of(der) if der else None

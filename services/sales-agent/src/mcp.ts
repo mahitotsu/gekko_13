@@ -36,7 +36,8 @@ export async function callMcp(ctx: string, name: string, args: Record<string, un
   // 古い証明書は、入れ替わったあとも期限まで有効である
   const pinned = { current: svids.current } as SvidSource;
   const b = await exchangeForNext({
-    authFetch: mtlsFetch(pinned, `spiffe://${trustDomain()}/svc/auth`),
+    // 認可サーバーは末端なので、1 回 5 秒で見切って送り直す。事務サービスは、その中で保険会社のシステムを最長約 25 秒待つので、30 秒待つ（段 D の D1-a3）
+    authFetch: mtlsFetch(pinned, `spiffe://${trustDomain()}/svc/auth`, 5_000, 3),
     authOrigin: AUTH_ORIGIN,
     service: "sales-agent",
     next: "insurer-mcp",
@@ -52,7 +53,13 @@ export async function callMcp(ctx: string, name: string, args: Record<string, un
   try {
     const r = await client.callTool({ name, arguments: args });
     const text = (r.content as { text: string }[])[0]?.text ?? "{}";
-    return { isError: Boolean(r.isError), body: JSON.parse(text) };
+    // 道具の誤りは、本文が JSON でないことがある（事務サービスの SDK が、例外を「Error calling tool ...」の文で返す）。
+    // そのまま読むと、ここで止まる（2026-11-24 の AWS）。文のときは、誤りの本文として返す
+    try {
+      return { isError: Boolean(r.isError), body: JSON.parse(text) };
+    } catch {
+      return { isError: true, body: { error: text } };
+    }
   } finally {
     await client.close();
   }

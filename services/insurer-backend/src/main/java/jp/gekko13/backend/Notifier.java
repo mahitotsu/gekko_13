@@ -28,9 +28,30 @@ class Notifier {
 
 	private final Courier courier;
 
-	Notifier(Store store, Courier courier) {
+	/** 書いた通知を、すぐ 1 度送る処理を動かす先。既定は仮想スレッド。試験では、その場で動かす。 */
+	private final java.util.concurrent.Executor kick;
+
+	Notifier(Store store, Courier courier, java.util.concurrent.Executor noticeExecutor) {
 		this.store = store;
 		this.courier = courier;
+		this.kick = noticeExecutor;
+	}
+
+	/**
+	 * 通知を送り出しの表に「すぐ送る」行として書き、裏ですぐ 1 度送る（段 D の D1-a3）。要求は、送り先の遅れを待たずに返せる。
+	 * 届かなければ、Redeliverer が間を延ばして送り直す。宛先がなければ、届かなかった記録だけを残す。
+	 */
+	void enqueue(List<String> to, Map<String, Object> notice) {
+		if (to.isEmpty()) {
+			log.info("notice_not_sent: 連絡先の登録がない");
+			this.store.addDelivery("(連絡先の登録がない)", notice, false, 1, null, "連絡先の登録がない");
+			return;
+		}
+		long now = System.currentTimeMillis();
+		for (String each : to) {
+			this.store.addDelivery(each, notice, false, 0, now, null);
+		}
+		this.kick.execute(this::redeliverDue);
 	}
 
 	/** 登録した全ての宛先へ送る。宛先がなければ送らず、届かなかった記録だけを残す（送り直さない）。 */

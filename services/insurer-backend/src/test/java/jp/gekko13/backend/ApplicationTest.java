@@ -190,6 +190,48 @@ class ApplicationTest {
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
+	void resubmittingTheSameApplicationTellsTheExistingContractWithoutAddingOne() throws Exception {
+		Map<String, Object> body = prepare("alice", "fixed-60", Map.of());
+		MvcResult first = submit(claims("alice", true), body);
+		int contracts = this.store.contracts().size();
+		MvcResult again = submit(claims("alice", true), body);
+		assertThat(again.getResponse().getStatus()).isEqualTo(409);
+		Map<String, Object> answer = read(again);
+		assertThat(answer.get("alreadyAccepted")).isEqualTo(true);
+		assertThat(((Map<String, Object>) answer.get("contract")).get("contractId"))
+			.isEqualTo(((Map<String, Object>) read(first).get("contract")).get("contractId"));
+		assertThat(this.store.contracts()).hasSize(contracts);
+	}
+
+	@Test
+	void anotherApplicationWithAUsedNonceIsRefusedWithoutTheContract() throws Exception {
+		Map<String, Object> body = prepare("alice", "fixed-60", Map.of());
+		assertThat(submit(claims("alice", true), body).getResponse().getStatus()).isEqualTo(200);
+		Map<String, Object> other = prepare("alice", "fixed-120", Map.of());
+		// 使用済みの nonce に、別の案の申込みを載せ替える（署名は合わないが、nonce の段より前で断られないよう、署名の照合を外す）
+		TestBackendConfig.OFF.put(Defenses.PASSKEY_SEAL, "off");
+		TestBackendConfig.OFF.put(Defenses.SEAL_CHAIN, "off");
+		TestBackendConfig.OFF.put(Defenses.OFFER_SIGNATURE, "off");
+		@SuppressWarnings("unchecked")
+		Map<String, Object> app = new LinkedHashMap<>((Map<String, Object>) other.get("application"));
+		app.put("nonce", ((Map<?, ?>) body.get("application")).get("nonce"));
+		other.put("application", app);
+		MvcResult r = submit(claims("alice", true), other);
+		assertThat(r.getResponse().getStatus()).isEqualTo(409);
+		assertThat(read(r)).doesNotContainKey("contract");
+	}
+
+	@Test
+	void contractNoticeIsWrittenToTheOutboxAndSentRightAway() throws Exception {
+		submit(claims("alice", true), prepare("alice", "fixed-60", Map.of()));
+		Store.Delivery d = last(this.store.outbox());
+		assertThat(d.to()).isEqualTo("/notices/inbox-of-alice-0123456789ab");
+		assertThat(d.delivered()).isTrue();
+		assertThat(TestBackendConfig.DELIVERED).contains("/notices/inbox-of-alice-0123456789ab");
+	}
+
+	@Test
 	void nonceIsConsumedOnlyForItsCustomerWithinItsTerm() {
 		long now = java.time.Instant.now().getEpochSecond();
 		this.store.issueNonce("n-store-1", "alice", now + 60);

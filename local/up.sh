@@ -9,6 +9,8 @@
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
 #   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry）
 #   主の流れの 5 つのサービスは、AWS と同じく 2 つずつ立てる。GEKKO13_LOCAL_REPLICAS で数を変える（段 D の D1-a3）。
+#   手元の確かめだけで使う切り方: GEKKO13_FAULT_CUT_STREAM=1（営業 AI エージェントが、回の途中でつなぎを切る）、
+#   GEKKO13_FAULT_DROP_SUBMIT_REPLY=1（事務サービスが、最初の提出の返事を捨てる）。
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$(pwd)
@@ -160,6 +162,7 @@ start_insurer_mcp() {
   # shellcheck disable=SC2046
   run --name "gekko13-insurer-mcp$R" --network-alias insurer-mcp --user "$(id -u):$(id -g)" $(app_labels insurer-mcp) \
     -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
+    -e "GEKKO13_FAULT_DROP_SUBMIT_REPLY=${GEKKO13_FAULT_DROP_SUBMIT_REPLY:-}" \
     -v "$HERE/run/svid/insurer-mcp:/svid:ro" \
     "$MCP_IMAGE"
 }

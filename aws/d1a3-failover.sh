@@ -10,6 +10,9 @@
 #   5. 止めてから 60 秒後に、新しく始めた主の流れも通るかを見る。
 # 結果は local/run/d1a3-failover/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/d1a3-failover.sh [止めたあとに入口を見る秒（既定 480）]
+#   止め方は GEKKO13_STOP_HOW で選ぶ。ec2（既定）は EC2 の API で予告なしに止める（ASG のライフサイクルフックもドレインも働かない。
+#   いちばん厳しい条件）。asg は ASG を通して止める（terminate-instance-in-auto-scaling-group。ライフサイクルフックとマネージドドレインが働き、
+#   ECS がタスクを逃がしてから止まる。スポットの中断と同じドレインを通る。段 D の D1-a3）。
 # 前提: 全部のサービスが 2 タスクで安定している（0 で確かめ、崩れていれば止めずに終わる）。
 #   止める直前にも、止める台にどれかのサービスの 2 タスクが両方載っていないかを確かめ、載っていれば止めずに終わる。
 #   実行すると費用が出る。ASG が代わりのインスタンスを起動する。
@@ -17,6 +20,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION=${AWS_REGION:-ap-northeast-1}
 WATCH=${1:-480}
+STOP_HOW=${GEKKO13_STOP_HOW:-ec2}
+case "$STOP_HOW" in ec2 | asg) ;; *) echo "GEKKO13_STOP_HOW は ec2 か asg: $STOP_HOW" >&2; exit 2 ;; esac
 stack_out() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
 CLUSTER=$(stack_out gekko13-ecs ClusterName)
 LOG_GROUP=$(stack_out gekko13-ecs LogGroupName)
@@ -121,8 +126,13 @@ BOTH=$(awk '$2 != "spire-agent" && $1 >= 2 { print $2 }' "$RUN/victim-tasks.txt"
 [ -z "$BOTH" ] || stop_here "止める台に、2 タスクが両方載っているサービスがある: $BOTH" "$RUN/placement-victim.txt"
 
 T0=$(date +%s)
-aws ec2 terminate-instances --region "$REGION" --instance-ids "$VICTIM" >/dev/null
-echo "始点: 台を止めた（$(date -u -d "@$T0" +%H:%M:%SZ)）"
+if [ "$STOP_HOW" = asg ]; then
+  # 希望台数は減らさない（ASG が代わりの台を起こす）。止まるのは、ECS がタスクを逃がしたあと
+  aws autoscaling terminate-instance-in-auto-scaling-group --region "$REGION" --instance-id "$VICTIM" --no-should-decrement-desired-capacity >/dev/null
+else
+  aws ec2 terminate-instances --region "$REGION" --instance-ids "$VICTIM" >/dev/null
+fi
+echo "始点: 台を止めた（$STOP_HOW、$(date -u -d "@$T0" +%H:%M:%SZ)）"
 
 # 3. 5 秒後に続きを進めさせる
 sleep 5
@@ -148,7 +158,7 @@ summary() {
 {
   echo "# 流れの途中で台を 1 台止めた $(basename "$RUN")"
   echo
-  echo "案の提示を出したタスク: $TASK。止めた台の AZ: $AZ。載っていたタスク: $(awk '{printf "%s×%s ", $2, $1}' "$RUN/victim-tasks.txt")"
+  echo "止め方: $STOP_HOW。案の提示を出したタスク: $TASK。止めた台の AZ: $AZ。載っていたタスク: $(awk '{printf "%s×%s ", $2, $1}' "$RUN/victim-tasks.txt")"
   echo
   echo "- 止めたあとの続き（ログインし直さずに照合と監査まで）: $FLOW_OK"
   echo "- 止めてから 60 秒後に新しく始めた流れ: $NEW_OK"

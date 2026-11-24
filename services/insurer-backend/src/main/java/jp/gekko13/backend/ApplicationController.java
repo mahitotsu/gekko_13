@@ -6,8 +6,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,6 +26,8 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 class ApplicationController {
+
+	private static final Logger log = LoggerFactory.getLogger(ApplicationController.class);
 
 	private static final String CLAIMS = "x-auth-claims";
 
@@ -251,6 +256,15 @@ class ApplicationController {
 		if (this.defenses.enabled(Defenses.NONCE_ONCE)) {
 			if (((Number) application.get("expiresAt")).longValue() < now
 					|| !this.store.consumeNonce(nonceValue, customer, now)) {
+				// 提出の冪等（段 D の D1-a3）。同じ顧客の、同じ署名済みの申込みの 2 度目は、いまのとおり 409 で断る（G16）が、本文に
+				// 受け付け済みの印と、もうある契約を入れる。返事を失った窓口が送り直しても、契約は 1 つのままで、窓口は契約を知れる
+				Optional<Store.ContractRecord> done = this.store.contractByNonce(nonceValue);
+				if (done.isPresent() && customer.equals(done.get().contract().get("customer"))
+						&& Canonical.of(done.get().application()).equals(Canonical.of(application))) {
+					log.info("duplicate_submit: nonce={} contract={}", nonceValue, done.get().contract().get("contractId"));
+					return ResponseEntity.status(409).body(Map.of("error", "この申込みは受け付け済み", "alreadyAccepted", true,
+							"contract", done.get().contract()));
+				}
 				return reject("申込みは未使用で期限内", "使用済み、期限切れ、または発行していない nonce", 409);
 			}
 		}
@@ -269,7 +283,8 @@ class ApplicationController {
 		// 顧客へ直接送る。宛先は、登録済みの連絡先（gekko_11 の G18）
 		List<String> to = (!this.defenses.enabled(Defenses.REGISTERED_CONTACT) && body.get("contact") instanceof String c)
 				? List.of(c) : this.contacts.inboxesOf(customer).stream().map((inbox) -> "/notices/" + inbox).toList();
-		this.notifier.send(to, Map.of("customer", customer, "contract", contract));
+		// 送るのは裏で行う（送り出しの表に書いてから返す）。要求の中で送り先の遅れを待たない（段 D の D1-a3）
+		this.notifier.enqueue(to, Map.of("customer", customer, "contract", contract));
 		return ResponseEntity.ok(Map.of("ok", true, "contract", contract));
 	}
 

@@ -195,7 +195,7 @@ export function mtlsCall(
 }
 
 /** 応答が届く前に、つなぎが切れたときの誤り。送り直してよい（段 D の D1-a3）。 */
-const RETRYABLE = new Set(["ECONNRESET", "EPIPE", "ECONNREFUSED", "ECONNABORTED"]);
+const RETRYABLE = new Set(["ECONNRESET", "EPIPE", "ECONNREFUSED", "ECONNABORTED", "EHANDSHAKETIMEOUT"]);
 export const isRetryable = (e: unknown) => {
   const err = e as NodeJS.ErrnoException;
   return RETRYABLE.has(err.code ?? "") || /socket disconnected before secure TLS|socket hang up/.test(err.message ?? "");
@@ -210,7 +210,7 @@ export const isRetryable = (e: unknown) => {
  * （営業 AI エージェントの回は、同じ答えの 2 度目を 409 で拒む。申込みは nonce が 1 回しか通さない。交換は、トークンがもう 1 つ出るだけ）。
  * 相手の SPIFFE ID が違う、時間切れ、取りやめ、応答が始まったあとの失敗は、送り直さない。
  */
-export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 6): typeof fetch {
+export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 6, handshakeTimeoutMs = 3_000): typeof fetch {
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const headers = Object.fromEntries(new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined)));
@@ -243,16 +243,34 @@ export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutM
             resolve(new Response(status === 204 || status === 304 ? null : (Readable.toWeb(res) as ReadableStream), { status, headers: out }));
           },
         );
+        // 握手の待ち（段 D の D1-a3）。Service Connect は TCP の中継なので、止まったタスクへ向かったつなぎは、TCP はつながっても握手で黙る。
+        // 握手が終わる前なら、まだ何も送っていないので、見切って送り直してよい（つなぎ直すと、Service Connect が送り先を選び直す）
+        req.on("socket", (s) => {
+          const timer = setTimeout(
+            () => req.destroy(Object.assign(new Error(`握手が ${handshakeTimeoutMs} ms で終わらなかった`), { code: "EHANDSHAKETIMEOUT" })),
+            handshakeTimeoutMs,
+          );
+          s.once("secureConnect", () => clearTimeout(timer));
+          s.once("close", () => clearTimeout(timer));
+        });
         req.on("timeout", () => req.destroy(new Error("timeout")));
         req.on("error", reject);
         init.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")));
         req.end(body);
       });
+    const started = Date.now();
     for (let i = 1; ; i++) {
+      const t0 = Date.now();
       try {
         return await once();
       } catch (e) {
-        if (i >= attempts || init.signal?.aborted || !isRetryable(e)) throw e;
+        const retried = !(i >= attempts || init.signal?.aborted || !isRetryable(e));
+        // 送り直しと時間切れを、段と経過の秒つきで残す（どの呼び出しの、どの段で待ったかを、あとで読むため）
+        if (!init.signal?.aborted) {
+          const code = (e as NodeJS.ErrnoException).code;
+          console.log(JSON.stringify({ at: new Date().toISOString(), ev: "call_retry", url: url.origin + url.pathname, attempt: i, phase: code === "EHANDSHAKETIMEOUT" ? "handshake" : "response", error: code ?? (e as Error).message, retried, ms: Date.now() - t0, totalMs: Date.now() - started }));
+        }
+        if (!retried) throw e;
         await new Promise((r) => setTimeout(r, 300 * i));
       }
     }

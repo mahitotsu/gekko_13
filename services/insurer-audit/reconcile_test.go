@@ -250,3 +250,26 @@ func TestHashMatchesTheOtherLanguages(t *testing.T) {
 		t.Fatalf("hash = %v", got)
 	}
 }
+
+// 窓口が、返事の届かなかった提出を、同じ申込みで送り直した（段 D の D1-a3）。契約を作ったのは 1 度目の提出（B）で、
+// 2 度目の提出（B2）は「受け付け済み」と契約の番号を受け取った。契約を作った連鎖の B と同じトークンの記録で突き合わせる
+func TestResubmittedApplicationIsReconciledWithTheSubmissionThatMadeTheContract(t *testing.T) {
+	m := regular(fixed60, Route, act)
+	h := hash(application)
+	var kept []Entry
+	for _, e := range m.entries {
+		if e.Kind() == "tool_call" {
+			e.Record["status"] = float64(503)
+			delete(e.Record, "contract_id")
+		}
+		kept = append(kept, e)
+	}
+	m.entries = kept
+	m.add("auth", "app", map[string]any{"kind": "exchange", "client": "sales-agent", "sub": "alice", "jti": "jB2", "from_jti": "jA", "act": map[string]any{"sub": "sales-agent"}}).
+		add("insurer-mcp", "app", map[string]any{"kind": "tool_call", "tool": "submit_application", "sub": "alice", "jti": "jB2", "nonce": nonce,
+			"customer": "alice", "plan": fixed60, "application_hash": h, "contract_id": "C-1", "status": 409})
+	r := reconcile(t, m)
+	if r.Status != "食い違いなし" {
+		t.Fatalf("status = %s: %+v", r.Status, r.Checks)
+	}
+}

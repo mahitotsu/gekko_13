@@ -82,16 +82,26 @@ final class SpiffeTls {
 	 * サービスどうしの呼び出しの待ち（つなぐときと読むとき）。止まったタスクに当たると、Service Connect が別のタスクへつなぎ直す
 	 * （つなぎの失敗を 2 回までリトライする。ECS の資料）。その間にアプリが見切らないよう、長めにとる（段 D の D1-a3。推定の値）。
 	 */
-	static final Duration INTERNAL_TIMEOUT = Duration.ofSeconds(15);
+	/**
+	 * 1 回の応答の待ち。保険会社のシステムが呼ぶのは、どれも末端（認可サーバー、顧客のアプリ）なので短くし、内側で見切って送り直す。
+	 * 呼ぶ側（事務サービス）は、これより長く待つ（待ちは外側ほど長くする。段 D の D1-a3。2026-11-24 の AWS で、内側と外側が同じ 15 秒だったため、
+	 * 内側が待たされると外側が先に切れた）。
+	 */
+	static final Duration INTERNAL_TIMEOUT = Duration.ofSeconds(5);
 
-	/** 応答が届く前につなぎが切れたときに、送り直す回数の上限（最初の 1 回を含む）。 */
-	static final int ATTEMPTS = 6;
+	/** 握手（TCP と TLS）の待ち。JDK の HttpClient の connectTimeout は、TLS の握手まで含む（JDK 21 で試した。2026-11-24）。 */
+	static final Duration HANDSHAKE_TIMEOUT = Duration.ofSeconds(3);
+
+	/** 送り直す回数の上限（最初の 1 回を含む）。握手の待ちで見切ると、3 回で約 10 秒に収まる。 */
+	static final int ATTEMPTS = 3;
+
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(SpiffeTls.class);
 
 	/**
 	 * 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。応答が届く前につなぎが切れたら（IOException）か、502、503、504 が返ったら、
-	 * 最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す。
-	 * Service Connect の外れ値の検出が、止まったタスクを避けるまで続ける（外れ値の検出は、直近 30 秒に 5 回以上失敗したタスクを避ける。ECS の資料。3 回では避けられる前に送り終えた。2026-11-23 の AWS）
-	 * （段 D の D1-a3。止まったタスクへのつなぎを、Service Connect は救いきれなかった。2026-11-23 の AWS）。相手の SPIFFE ID が違うときは、
+	 * 最大 3 回まで、間を 0.3 秒ずつ延ばして送り直す。握手の待ちは 3 秒、1 回の応答の待ちは timeout。
+	 * Service Connect は TCP の中継なので、止まったタスクへ向かったつなぎは、握手で黙る。握手の待ちで見切ってつなぎ直すと、Service Connect が
+	 * 送り先を選び直す（段 D の D1-a3。2026-11-24 の AWS）。相手の SPIFFE ID が違うときは、
 	 * 送り直さない。送るのは、passkey の公開鍵と連絡先の読み取り（GET）と、顧客のアプリへの直送（2 度届くと、受信箱に同じ通知が 2 つ並ぶが、
 	 * 照合は契約の内容で行うので、結果は変わらない）。
 	 */
@@ -104,16 +114,19 @@ final class SpiffeTls {
 			SSLContext ctx = SSLContext.getInstance("TLSv1.3");
 			ctx.init(bundle.getManagers().getKeyManagers(), new javax.net.ssl.TrustManager[] { new Expecting(base, expectedId) },
 					null);
-			HttpClient http = HttpClient.newBuilder().sslContext(ctx).connectTimeout(timeout).build();
+			HttpClient http = HttpClient.newBuilder().sslContext(ctx).connectTimeout(HANDSHAKE_TIMEOUT).build();
 			JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(http);
 			factory.setReadTimeout(timeout);
 			return RestClient.builder().requestFactory(factory).requestInterceptor((request, body, execution) -> {
+				long started = System.nanoTime();
 				for (int i = 1;; i++) {
+					long t0 = System.nanoTime();
 					try {
 						org.springframework.http.client.ClientHttpResponse response = execution.execute(request, body);
 						int status = response.getStatusCode().value();
 						// 中継（Service Connect）が送り先に届かなかったときの応答も、送り直す（段 D の D1-a3。2026-11-24 の AWS）
 						if ((status == 502 || status == 503 || status == 504) && i < ATTEMPTS) {
+							logAttempt(request, i, "response", "status " + status, true, t0, started);
 							response.close();
 							Thread.sleep(300L * i);
 							continue;
@@ -125,7 +138,10 @@ final class SpiffeTls {
 						throw new java.io.InterruptedIOException("送り直しの待ちが止められた");
 					}
 					catch (java.io.IOException ex) {
-						if (i >= ATTEMPTS || ex instanceof javax.net.ssl.SSLPeerUnverifiedException) {
+						boolean retried = !(i >= ATTEMPTS || ex instanceof javax.net.ssl.SSLPeerUnverifiedException);
+						logAttempt(request, i, ex instanceof java.net.http.HttpConnectTimeoutException ? "handshake" : "response",
+								ex.getClass().getSimpleName(), retried, t0, started);
+						if (!retried) {
 							throw ex;
 						}
 						try {
@@ -142,6 +158,14 @@ final class SpiffeTls {
 		catch (Exception ex) {
 			throw new IllegalStateException("mTLS の呼び出しを作れない: " + ex.getMessage(), ex);
 		}
+	}
+
+	/** 送り直しと時間切れを、段と経過の秒つきで 1 行残す（どの呼び出しの、どの段で待ったかを、あとで読むため）。 */
+	private static void logAttempt(org.springframework.http.HttpRequest request, int attempt, String phase, String error,
+			boolean retried, long t0, long started) {
+		log.info("call_retry: url={} attempt={} phase={} error={} retried={} ms={} totalMs={}",
+				request.getURI().getHost() + request.getURI().getPath(), attempt, phase, error, retried,
+				(System.nanoTime() - t0) / 1_000_000, (System.nanoTime() - started) / 1_000_000);
 	}
 
 	/**

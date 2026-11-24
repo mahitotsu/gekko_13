@@ -387,7 +387,11 @@ func (rc Reconciler) reconcile(nonce string, allSelf []map[string]any) (*Report,
 	checks = append(checks, check("経由", thirdParty, p, "契約の記録の経由と C の act が、交換の記録の道と一致する", c))
 
 	// 事務サービスのツールの記録
-	tool := submitted(byNonce, nonce, str(contract["contractId"]))
+	var chainB any
+	if len(chain) == 3 {
+		chainB = chain[1].Get("jti")
+	}
+	tool := submitted(byNonce, nonce, str(contract["contractId"]), chainB)
 	c, p = nil, nil
 	if tool == nil {
 		p = append(p, "事務サービスに、この申込みを取り次いだ記録がない")
@@ -524,12 +528,19 @@ func issuedWith(sn *seenSet, jti string) (*Entry, error) {
 	return nil, nil
 }
 
-// submitted は、事務サービスの submit_application の記録。契約の番号が合うものを選び、なければ通ったものの最後を選ぶ。
-func submitted(byNonce []Entry, nonce, contractID string) *Entry {
+// submitted は、事務サービスの submit_application の記録。契約を作ったトークンの連鎖の B（chainB）と同じトークンのものを選ぶ。
+// 窓口が提出を送り直すと（段 D の D1-a3。返事が届かなかった提出を、同じ申込みで送り直す）、記録が複数になり、契約の番号は、
+// 受け付け済みと返された 2 度目の記録にも付くためである。なければ、契約の番号が合うもの、それもなければ通ったものの最後を選ぶ。
+func submitted(byNonce []Entry, nonce, contractID string, chainB any) *Entry {
 	var tools []Entry
 	for _, e := range byNonce {
 		if e.WrittenByOwner() && e.Kind() == "tool_call" && str(e.Get("tool")) == "submit_application" && str(e.Get("nonce")) == nonce {
 			tools = append(tools, e)
+		}
+	}
+	for _, e := range tools {
+		if chainB != nil && equal(chainB, e.Get("jti")) {
+			return &e
 		}
 	}
 	for _, e := range tools {

@@ -60,6 +60,13 @@ class TestBackendConfig {
 		};
 	}
 
+	/** 書いた通知をすぐ送る処理は、試験では、その場で動かす（試験どうしで、裏の送りが混ざらない）。 */
+	@Bean
+	@Primary
+	java.util.concurrent.Executor testNoticeKick() {
+		return Runnable::run;
+	}
+
 	/** 顧客ごとの受信箱の番号（認可サーバーに登録した連絡先の代わり）。 */
 	@Bean
 	@Primary

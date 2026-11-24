@@ -25,7 +25,7 @@ export interface Plan {
 
 /** 台本の進み。答えを待っている画面側の道具に当たる。 */
 interface Script {
-  step?: "kind" | "offers" | "intent" | "application";
+  step?: "kind" | "offers" | "intent" | "application" | "resubmit";
   /** 顧客が答えた受け取り方。 */
   kind?: string;
   /** 顧客が選んだ案の番号。 */
@@ -82,9 +82,22 @@ export async function scriptedRun(t: Thread, input: Input, call: typeof callMcp 
       t.data.engine = { ...s, step: "application" } satisfies Script;
       return t.frontend("present_application", { planId: s.planId });
     }
-    case "application": {
-      if (!answer.includes("署名しました")) return finish("申込書への署名がなかったので、提出しません。");
+    case "application":
+    case "resubmit": {
+      if (s.step === "application" && !answer.includes("署名しました")) return finish("申込書への署名がなかったので、提出しません。");
+      if (s.step === "resubmit" && !answer.includes("もう一度送る")) {
+        t.signed = {};
+        return finish("提出をやめました。");
+      }
       const r = await submitSigned(t, call);
+      if (r.body?.retryable === true) {
+        // 届かなかった。署名済みの申込書は残してあるので、同じ申込みをもう一度送れる（保険会社のシステムは重ねない。段 D の D1-a3）
+        t.data.engine = { ...s, step: "resubmit" } satisfies Script;
+        return t.frontend("ask_customer", {
+          question: "保険会社に、申込みが届きませんでした。署名済みの申込書は残してあります。もう一度送りますか。",
+          options: ["もう一度送る", "やめる"],
+        });
+      }
       return finish(
         r.isError || r.body?.error
           ? `提出を断られました: ${JSON.stringify(r.body)}`

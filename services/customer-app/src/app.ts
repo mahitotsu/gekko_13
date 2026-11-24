@@ -89,7 +89,7 @@ export function createApp(svids?: SvidSource) {
   app.get("/config.json", (c) => c.json(config()));
   app.get("/offers-jwks.json", async (c) => {
     if (!offerKeys || Date.now() - offerKeys.at > 60_000) {
-      const res = svids ? await mtlsFetch(svids, backendId())(OFFER_KEYS_URL).catch(() => undefined) : undefined;
+      const res = svids ? await mtlsFetch(svids, backendId(), 5_000, 3)(OFFER_KEYS_URL).catch(() => undefined) : undefined;
       if (!res?.ok) return c.json({ error: "提示の公開鍵を取れない" }, 502);
       offerKeys = { at: Date.now(), body: await res.json() };
     }
