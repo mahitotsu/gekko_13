@@ -108,8 +108,10 @@ export function shuffle<T>(xs: T[], random = Math.random): T[] {
 export type ProxyOptions = {
   routes: Route[];
   resolver: Resolver;
-  /** 送り先の応答を待つ上限。Web Functions のリクエストの上限より短くする */
+  /** 送り先が黙っている間を待つ上限（応答の前も、応答の途中も）。Web Functions のリクエストの上限より短くする */
   timeoutMs: number;
+  /** 送り先につなぐのを待つ上限（既定 2 秒）。消えたタスクの IP へのつなぎを早く見切り、次の送り先へ回す */
+  connectTimeoutMs?: number;
   /** 読み切る本文の上限 */
   maxBodyBytes: number;
   /** 1 つのリクエストで試す送り先の数の上限 */
@@ -142,17 +144,31 @@ export function publicForwardHeaders(headers: IncomingHttpHeaders, publicOrigin:
 type Attempt = { kind: "response"; res: IncomingMessage } | { kind: "retryable"; error: Error } | { kind: "fatal"; error: Error };
 
 export function createProxy(o: ProxyOptions) {
+  // プールの待ち（timeout）は、使っていない接続を閉じるのに効く。送り先の Keep-Alive のヒント（Node の既定は 5 秒）から 1 秒を引いた値で閉じ、
+  // 送り先が先に閉じた接続を使い回さないようにする（Node の lib/_http_agent.js）。
   const agent = new Agent({ keepAlive: true, timeout: o.timeoutMs });
+  const connectTimeoutMs = o.connectTimeoutMs ?? 2_000;
 
   function attempt(t: Target, req: IncomingMessage, body: Buffer): Promise<Attempt> {
     return new Promise((resolve) => {
       let connected = false;
       const headers = publicForwardHeaders(forwardHeaders(req.headers), o.publicOrigin);
       if (body.length > 0 || "content-length" in req.headers) headers["content-length"] = String(body.length);
-      const up = request({ host: t.host, port: t.port, method: req.method, path: req.url, headers, agent, timeout: o.timeoutMs });
+      const up = request({ host: t.host, port: t.port, method: req.method, path: req.url, headers, agent });
       up.on("socket", (s) => {
-        if (!s.connecting) connected = true;
-        else s.once("connect", () => (connected = true));
+        // 要求の待ちは、接続を受け取るたびに張り直す。使い回した接続には、プールで閉じるための短い待ち（ヒントの 5 秒 - 1 秒）が残っている。
+        // Node は、要求の待ちがプールの待ちと等しいと張り直さないので、要求の途中で 4 秒で切れていた（nodejs/node#53458。段 D の D1-a3、2026-11-24 の AWS）
+        up.setTimeout(o.timeoutMs);
+        if (!s.connecting) {
+          connected = true;
+          return;
+        }
+        const timer = setTimeout(() => up.destroy(new Error("送り先に時間内につながらなかった")), connectTimeoutMs);
+        s.once("connect", () => {
+          connected = true;
+          clearTimeout(timer);
+        });
+        s.once("close", () => clearTimeout(timer));
       });
       up.on("response", (res) => resolve({ kind: "response", res }));
       up.on("timeout", () => up.destroy(new Error("送り先が時間内に応えなかった")));

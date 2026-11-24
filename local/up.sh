@@ -149,6 +149,7 @@ start_sales_agent() {
   run --name "gekko13-sales-agent$R" --network-alias sales-agent $(app_labels sales-agent) \
     -e SERVICE=sales-agent -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_ORIGIN=http://keycloak:8080 \
+    -e "GEKKO13_FAULT_CUT_STREAM=${GEKKO13_FAULT_CUT_STREAM:-}" \
     -e DB_URL=postgres://postgres:5432/sales_agent -e DB_USER=sales_agent -e "DB_PASSWORD=$DB_SALES_AGENT" -e "STATE_KEY=$AGENT_STATE_KEY" \
     -v "$HERE/run/svid/sales-agent:/svid:ro" \
     "$IMAGE"

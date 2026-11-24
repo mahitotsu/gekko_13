@@ -4,6 +4,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
@@ -37,6 +39,25 @@ class TestBackendConfig {
 	@Primary
 	PasskeyDirectory testPasskeys() {
 		return (user) -> PASSKEYS.getOrDefault(user, List.of());
+	}
+
+	/** 直送で、これから失敗させる回数。 */
+	static final AtomicInteger FAIL_NEXT = new AtomicInteger();
+
+	/** 届いた直送の宛先。 */
+	static final List<String> DELIVERED = new CopyOnWriteArrayList<>();
+
+	/** 顧客のアプリの直送の受け口の代わり。FAIL_NEXT の回数だけ、つなげない（例外）。 */
+	@Bean
+	@Primary
+	Courier testCourier() {
+		return (to, notice) -> {
+			if (FAIL_NEXT.getAndUpdate((n) -> Math.max(n - 1, 0)) > 0) {
+				throw new IllegalStateException("つなげない（試験）");
+			}
+			DELIVERED.add(to);
+			return true;
+		};
 	}
 
 	/** 顧客ごとの受信箱の番号（認可サーバーに登録した連絡先の代わり）。 */

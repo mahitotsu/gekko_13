@@ -30,9 +30,11 @@ import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -151,10 +153,44 @@ public class AuthorizationServerConfig {
 		return decoder;
 	}
 
-	/** ログインサーバーの公開鍵。必要になってから取る。AWS では CloudFront を通した公開の名前で、TLS でログインサーバーを確かめる。 */
+	/**
+	 * ログインサーバーの公開鍵。AWS では CloudFront を通した公開の名前で、TLS でログインサーバーを確かめる。
+	 * 期限を切らずに持ち、知らない鍵の ID が来たときだけ取り直す（Nimbus の既定は 5 分ごとに取り直す）。起動したらすぐ取る（warmLoginKeys）
+	 */
 	@Bean
 	LoginKeys loginKeys(AuthProperties props) throws Exception {
-		return new LoginKeys(JWKSourceBuilder.<SecurityContext>create(URI.create(props.loginJwksUrl()).toURL()).build());
+		return new LoginKeys(JWKSourceBuilder.<SecurityContext>create(URI.create(props.loginJwksUrl()).toURL())
+			.cacheForever()
+			.retrying(true)
+			.build());
+	}
+
+	/**
+	 * 起動したらすぐ、ログインサーバーの公開鍵を取る。取れるまで、間を延ばして取り直す。受け始めるのは待たない（段 D の D1-a3）。
+	 * 0 から起こすと、ログインサーバーより先に起きることがあるためである。
+	 */
+	@EventListener(ApplicationReadyEvent.class)
+	void warmLoginKeys(ApplicationReadyEvent event) {
+		LoginKeys keys = event.getApplicationContext().getBean(LoginKeys.class);
+		Thread.ofVirtual().name("login-keys-warm").start(() -> {
+			for (long delay = 1_000;; delay = Math.min(delay * 2, 10_000)) {
+				try {
+					keys.load();
+					log.info("login_keys_ready");
+					return;
+				}
+				catch (Exception ex) {
+					log.info("login_keys_retry: {} in {}ms", ex.getMessage(), delay);
+					try {
+						Thread.sleep(delay);
+					}
+					catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+						return;
+					}
+				}
+			}
+		});
 	}
 
 	@Bean

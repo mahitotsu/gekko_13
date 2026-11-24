@@ -186,3 +186,24 @@ export async function exchangeForNext(o: { authFetch: typeof fetch; authOrigin: 
     scope: "apply",
   });
 }
+
+/**
+ * トークンの鍵を、起動したらすぐ取り、取れるまで間を延ばして取り直す（段 D の D1-a3）。受け始めるのは待たない。
+ * 0 から起こすと、ログインサーバーより先に起きることがあり、待つとヘルスチェックで入れ替えられるためである。
+ * 鍵を持たないまま要求を受けると、その要求の中で取りに行くことになり、送り先が止まった直後には待たされる（2026-11-24 の AWS）。
+ * 戻り値は、鍵が取れた時点で解決する Promise（試験で使う）。
+ */
+export function warmKeys(reload: () => Promise<void>, log: (o: object) => void, maxDelayMs = 10_000, firstDelayMs = 1_000): Promise<void> {
+  return (async () => {
+    for (let delay = firstDelayMs; ; delay = Math.min(delay * 2, maxDelayMs)) {
+      try {
+        await reload();
+        log({ ev: "keys_ready" });
+        return;
+      } catch (e) {
+        log({ ev: "keys_retry", error: (e as Error).message, inMs: delay });
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  })();
+}

@@ -2,6 +2,7 @@
 // - ROUTES: 振り分け。例 "/login=keycloak,/=customer-app"
 // - NAMESPACE: 送り先の SRV を引く名前空間。例 "svc.gekko13.internal"
 // - PUBLIC_ORIGIN: 入口の公開の origin。送り先に X-Forwarded-* で渡す。例 "https://dXXXX.cloudfront.net"
+// - UPSTREAM_TIMEOUT_MS: 送り先が黙っている間を待つ上限（既定 25 秒）。CONNECT_TIMEOUT_MS: 送り先につなぐのを待つ上限（既定 2 秒）
 // - STATIC_TARGETS: ローカルの確かめ用。あれば SRV を引かずに、この送り先へ送る。例 "keycloak=127.0.0.1:8180,customer-app=127.0.0.1:8080"
 import { createServer } from "node:http";
 import { createProxy, parseRoutes, srvResolver, staticResolver } from "./proxy.ts";
@@ -22,6 +23,7 @@ const handle = createProxy({
   routes,
   resolver,
   timeoutMs: Number(process.env.UPSTREAM_TIMEOUT_MS ?? 25_000),
+  connectTimeoutMs: Number(process.env.CONNECT_TIMEOUT_MS ?? 2_000),
   maxBodyBytes: Number(process.env.MAX_BODY_BYTES ?? 6 * 1024 * 1024),
   maxAttempts: 3,
   log,

@@ -25,4 +25,8 @@ CREATE TABLE IF NOT EXISTS delivery (
     notice text NOT NULL,
     delivered boolean NOT NULL
 );
+-- 送り直し（段 D の D1-a3）。試した回数、次に試す時刻（UNIX ミリ秒。送り直さないときは NULL）、最後の誤り。前からある行は送り直さない
+ALTER TABLE delivery ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 1;
+ALTER TABLE delivery ADD COLUMN IF NOT EXISTS next_at bigint;
+ALTER TABLE delivery ADD COLUMN IF NOT EXISTS last_error text;
 SELECT pg_advisory_unlock(7231002);

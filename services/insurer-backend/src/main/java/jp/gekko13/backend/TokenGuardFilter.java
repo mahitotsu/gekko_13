@@ -27,8 +27,10 @@ import jakarta.servlet.http.HttpServletResponse;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.ssl.SslBundles;
 import org.springframework.context.annotation.Profile;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -74,29 +76,67 @@ class TokenGuardFilter extends OncePerRequestFilter {
 				Instant::now);
 	}
 
-	/** 認可サーバーの公開鍵。知らない鍵の ID が来たら、10 秒に 1 回まで取り直す。 */
+	/** 認可サーバーの公開鍵。起動したらすぐ取り（warmKeys）、知らない鍵の ID が来たら、10 秒に 1 回まで取り直す。 */
 	private RSAKey keyFor(String kid) {
 		RSAKey key = this.keys.get(String.valueOf(kid));
 		if (key == null && Instant.now().isAfter(this.fetched.plusSeconds(10))) {
 			this.fetched = Instant.now();
-			String body = SpiffeTls.client(this.bundles, this.props.spiffeId("auth"), TIMEOUT)
-				.get()
-				.uri(this.props.authUrl() + "/oauth2/jwks")
-				.retrieve()
-				.body(String.class);
 			try {
-				for (JWK jwk : JWKSet.parse(body).getKeys()) {
-					if (jwk instanceof RSAKey rsa) {
-						this.keys.put(String.valueOf(rsa.getKeyID()), rsa);
-					}
-				}
+				fetchKeys();
 			}
-			catch (java.text.ParseException ex) {
-				throw new IllegalStateException("認可サーバーの公開鍵が読めない", ex);
+			catch (RuntimeException ex) {
+				// 取り直せなければ、手元の鍵で確かめ続ける
+				log.info("keys_refresh_failed: {}", ex.getMessage());
 			}
 			key = this.keys.get(String.valueOf(kid));
 		}
 		return key;
+	}
+
+	private void fetchKeys() {
+		String body = SpiffeTls.client(this.bundles, this.props.spiffeId("auth"), TIMEOUT)
+			.get()
+			.uri(this.props.authUrl() + "/oauth2/jwks")
+			.retrieve()
+			.body(String.class);
+		try {
+			for (JWK jwk : JWKSet.parse(body).getKeys()) {
+				if (jwk instanceof RSAKey rsa) {
+					this.keys.put(String.valueOf(rsa.getKeyID()), rsa);
+				}
+			}
+		}
+		catch (java.text.ParseException ex) {
+			throw new IllegalStateException("認可サーバーの公開鍵が読めない", ex);
+		}
+	}
+
+	/**
+	 * 起動したらすぐ、認可サーバーの公開鍵を取る。取れるまで、間を延ばして取り直す。受け始めるのは待たない（段 D の D1-a3）。
+	 * 鍵を持たないまま要求を受けると、その要求の中で取りに行き、送り先が止まった直後には待たされる（2026-11-24 の AWS）。
+	 */
+	@EventListener(ApplicationReadyEvent.class)
+	void warmKeys() {
+		Thread.ofVirtual().name("keys-warm").start(() -> {
+			for (long delay = 1_000;; delay = Math.min(delay * 2, 10_000)) {
+				try {
+					fetchKeys();
+					this.fetched = Instant.now();
+					log.info("keys_ready");
+					return;
+				}
+				catch (RuntimeException ex) {
+					log.info("keys_retry: {} in {}ms", ex.getMessage(), delay);
+					try {
+						Thread.sleep(delay);
+					}
+					catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+						return;
+					}
+				}
+			}
+		});
 	}
 
 	/** 取り次いだ窓口とトークンを受け取ったクライアントの登録が、外れていないか（gekko_11 の G10）。 */

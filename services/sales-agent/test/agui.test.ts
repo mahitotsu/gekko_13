@@ -18,10 +18,10 @@ function app() {
   return a;
 }
 
-const run = (threadId: string, messages: object[], sub = "alice") =>
+const run = (threadId: string, messages: object[], sub = "alice", runId: string = crypto.randomUUID()) =>
   app().request(
     "/agui",
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId, runId: crypto.randomUUID(), state: {}, messages, tools: [], context: [], forwardedProps: {} }) },
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId, runId, state: {}, messages, tools: [], context: [], forwardedProps: {} }) },
     { incoming: { verified: { token: "a-token", claims: { sub } } } },
   );
 
@@ -58,6 +58,26 @@ describe("AG-UI の受け口", () => {
     const first = await events(res);
     expect(first[0]?.type).toBe("RUN_STARTED");
     expect(first.at(-1)?.type).toBe("RUN_FINISHED");
+  });
+
+  it("同じ runId の送り直しは、回を進め直さずに、同じイベントを流し直す（流している途中で切れた回を、画面が送り直す）", async () => {
+    useState(memoryState());
+    const first = await events(await run("th-e", [{ id: "u1", role: "user", content: "相談したい" }]));
+    const call = first.find((e) => e.type === "TOOL_CALL_START")!;
+    const answer = [{ id: "t1", role: "tool", toolCallId: call.toolCallId, content: "a" }];
+    const once = await events(await run("th-e", answer, "alice", "run-2"));
+    // 回は終わり、待っている道具はもうない。同じ runId なら 409 にせず、同じ続きを返す
+    const again = await events(await run("th-e", answer, "alice", "run-2"));
+    expect(again).toEqual(once);
+    expect(again.filter((e) => e.type === "TEXT_MESSAGE_CONTENT").map((e) => e.delta)).toEqual(["答え: a"]);
+    // 違う runId で同じ答えを送ると、いまと同じく断る（待っている道具がない）
+    expect((await run("th-e", answer, "alice", "run-3")).status).toBe(400);
+  });
+
+  it("同じ runId でも、ほかの顧客には流し直さない", async () => {
+    useState(memoryState());
+    await events(await run("th-f", [{ id: "u1", role: "user", content: "相談したい" }], "alice", "run-1"));
+    expect((await run("th-f", [{ id: "u1", role: "user", content: "相談したい" }], "mallory", "run-1")).status).toBe(403);
   });
 
   it("ほかの顧客の会話は、続けさせない", async () => {

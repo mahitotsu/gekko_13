@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * 保険会社のシステムの記憶。2 つのタスクが同じものを読むよう、共有のデータベース（AWS では Aurora）に置く（段 D の D1-a3。判断 53）。
@@ -28,6 +30,10 @@ class Store {
 	record Delivery(String to, Map<String, Object> notice, boolean delivered) {
 	}
 
+	/** 送り直しを待つ通知。 */
+	record Pending(long id, String to, Map<String, Object> notice, int attempts) {
+	}
+
 	private static final ObjectMapper JSON = new ObjectMapper();
 
 	private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {
@@ -38,8 +44,11 @@ class Store {
 
 	private final JdbcTemplate db;
 
-	Store(JdbcTemplate db) {
+	private final TransactionTemplate tx;
+
+	Store(JdbcTemplate db, PlatformTransactionManager transactions) {
 		this.db = db;
+		this.tx = new TransactionTemplate(transactions);
 	}
 
 	/** 提示に付けた nonce を、未使用として残す。 */
@@ -78,9 +87,35 @@ class Store {
 						read(rs.getString(4), Object.class), read(rs.getString(5), Object.class), rs.getString(6)));
 	}
 
-	void addDelivery(Delivery delivery) {
-		this.db.update("INSERT INTO delivery (recipient, notice, delivered) VALUES (?, ?, ?)", delivery.to(),
-				write(delivery.notice()), delivery.delivered());
+	/** 直送の記録を足す。nextAt（UNIX ミリ秒）があれば、その時刻を過ぎてから送り直す。 */
+	void addDelivery(String to, Map<String, Object> notice, boolean delivered, int attempts, Long nextAt, String error) {
+		this.db.update(
+				"INSERT INTO delivery (recipient, notice, delivered, attempts, next_at, last_error) VALUES (?, ?, ?, ?, ?, ?)",
+				to, write(notice), delivered, attempts, nextAt, error);
+	}
+
+	/**
+	 * 送り直しの時期が来た通知を、limit 件まで借りる。借りた行は、leaseMs の間、ほかのタスクに渡らない（次に試す時刻を先へ延ばす）。
+	 * 2 つのタスクが同時に借りても、同じ行を取らない（FOR UPDATE SKIP LOCKED）。送るのはトランザクションの外で行う。
+	 */
+	List<Pending> claimDue(long now, int limit, long leaseMs) {
+		return this.tx.execute((status) -> {
+			List<Pending> due = this.db.query(
+					"SELECT id, recipient, notice, attempts FROM delivery WHERE delivered = false AND next_at IS NOT NULL"
+							+ " AND next_at <= ? ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED",
+					(rs, i) -> new Pending(rs.getLong(1), rs.getString(2), read(rs.getString(3), MAP), rs.getInt(4)), now,
+					limit);
+			for (Pending p : due) {
+				this.db.update("UPDATE delivery SET next_at = ? WHERE id = ?", now + leaseMs, p.id());
+			}
+			return due;
+		});
+	}
+
+	/** 送り直した結果を書く。nextAt が null なら、もう送り直さない。 */
+	void markAttempt(long id, boolean delivered, int attempts, Long nextAt, String error) {
+		this.db.update("UPDATE delivery SET delivered = ?, attempts = ?, next_at = ?, last_error = ? WHERE id = ?", delivered,
+				attempts, nextAt, error, id);
 	}
 
 	/** 送り出しの記録を、送った順に返す。 */

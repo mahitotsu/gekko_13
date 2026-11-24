@@ -1,7 +1,7 @@
 // 申込みの進め方（gekko_11 の D-29、D-34、P-18）。営業 AI エージェントと回を重ね、道具の呼び出しをカードにする。画面の部品から切り離す。
 import { createLocalJWKSet, type JSONWebKeySet } from "jose";
 import { reconcile, type Copy } from "../src/reconcile.ts";
-import { createAgent, statusOf, type Agent } from "./agent.ts";
+import { createAgent, statusOf, transient, type Agent } from "./agent.ts";
 import { usedPasskey, type Config, type Device, type Session } from "./auth.ts";
 import { verifyOffer, type Application, type Intent, type Offer } from "./checks.ts";
 import { challengeOf } from "./codec.ts";
@@ -16,6 +16,11 @@ export const PASSKEY_FAILED = "passkey で署名できませんでした。取�
 
 type Notice = { contract: { contractId?: string; nonce: string; plan: { name: string } } };
 const LABEL = { match: "一致", mismatch: "食い違い", missing: "未着", unexpected: "覚えのない契約" };
+/** 1 つの回を送る回数の上限（最初の 1 回を含む）と、送り直しの最初の間（倍に延ばす。合わせて約 7 秒）。 */
+const RUN_ATTEMPTS = 4;
+const RUN_RETRY_MS = 1000;
+
+
 const RECONCILE_TRIES = 5;
 const RECONCILE_WAIT_MS = 2000;
 
@@ -100,31 +105,52 @@ export function createController(deps: {
     answerTool(id, { error: `この画面にない道具: ${name}` });
   }
 
-  /** 1 回分を走らせ、道具なしで番が終わったら、続きか完了のカードを出す。 */
-  async function run() {
+  /**
+   * 1 回分を走らせ、道具なしで番が終わったら、続きか完了のカードを出す。
+   * つなぎが切れたら（入口か BFF の 502、503、504、ネットワークの誤り）、同じ runId で、間を延ばして送り直す（段 D の D1-a3）。
+   * 営業 AI エージェントは、同じ runId の回を進め直さずに流し直すので、すでに画面に出した分は飛ばす。
+   */
+  async function run(runId: string) {
     const mine = generation;
     const current = () => mine === generation;
     dispatch({ type: "busy", busy: true });
     let called = false;
     let failed = false;
     const tools: Promise<void>[] = [];
-    const once = () =>
-      agent.run({
-        onText: (content) => current() && dispatch({ type: "text", content }),
-        onToolCall: (id, name, args) => {
-          if (!current()) return;
-          called = true;
-          tools.push(showTool(id, name, args).catch(fail));
+    /** 画面に出した文と道具の呼び出しの数。送り直しでは、先頭からこの数だけ飛ばす。 */
+    let shown = 0;
+    let seen = 0;
+    const fresh = () => current() && seen++ >= shown && ++shown > 0;
+    const once = () => {
+      seen = 0;
+      return agent.run(
+        {
+          onText: (content) => fresh() && dispatch({ type: "text", content }),
+          onToolCall: (id, name, args) => {
+            if (!fresh()) return;
+            called = true;
+            tools.push(showTool(id, name, args).catch(fail));
+          },
+          onRunError: (message) => {
+            if (!current()) return;
+            failed = true;
+            fail(new Error(message));
+          },
         },
-        onRunError: (message) => {
-          if (!current()) return;
-          failed = true;
-          fail(new Error(message));
-        },
-      });
+        runId,
+      );
+    };
     try {
       // A の更新と送り直しは、BFF が行う（gekko_11 の P-18）。BFF が 401 を返すのは、ログインし直すしかないときである
-      await once();
+      for (let i = 1; ; i++) {
+        try {
+          await once();
+          break;
+        } catch (e) {
+          if (!current() || failed || i >= RUN_ATTEMPTS || !transient(e)) throw e;
+          await new Promise((r) => setTimeout(r, RUN_RETRY_MS * 2 ** (i - 1)));
+        }
+      }
       await Promise.all(tools);
     } catch (e) {
       if (!current()) return; // 始め直した: 止めた回の失敗は見せない
@@ -143,7 +169,9 @@ export function createController(deps: {
   }
 
   const enqueue = () => {
-    queue = queue.then(() => run()).catch(fail);
+    // runId は、顧客の 1 つの文か答えごとに 1 つ（送り直しでは同じものを使う）
+    const runId = crypto.randomUUID();
+    queue = queue.then(() => run(runId)).catch(fail);
     return queue;
   };
 

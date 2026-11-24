@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -31,11 +32,37 @@ def log(**o: Any) -> None:
 
 
 class Keys:
-    """認可サーバーの公開鍵。知らない鍵の ID が来たら、10 秒に 1 回まで取り直す。"""
+    """認可サーバーの公開鍵。起動したらすぐ取り（warm）、知らない鍵の ID が来たら、10 秒に 1 回まで取り直す。"""
 
     def __init__(self) -> None:
         self.keys: dict[str | None, Any] = {}
         self.fetched = 0.0
+        self._warming: asyncio.Task[None] | None = None
+
+    async def _fetch(self) -> None:
+        status, raw = await app._call("GET", f"{app.AUTH}/oauth2/jwks", app.spiffe("auth"), {"accept": "application/json"})
+        if status != 200:
+            raise RuntimeError(f"認可サーバーの公開鍵を取れない: {status}")
+        self.keys = keys_from_jwks(json.loads(raw))
+
+    async def warm(self, max_delay: float = 10.0, first_delay: float = 1.0) -> None:
+        """取れるまで、間を延ばして取り直す。受け始めるのは待たない（段 D の D1-a3）。
+        鍵を持たないまま要求を受けると、その要求の中で取りに行き、送り先が止まった直後には待たされる（2026-11-24 の AWS）。"""
+        delay = first_delay
+        while True:
+            try:
+                await self._fetch()
+                self.fetched = time.time()
+                log(event="keys_ready")
+                return
+            except Exception as e:  # noqa: BLE001  取れなければ、間を置いて取り直す
+                log(event="keys_retry", error=str(e), in_s=delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, max_delay)
+
+    def start_warming(self) -> None:
+        if self._warming is None:
+            self._warming = asyncio.get_running_loop().create_task(self.warm())
 
     async def ensure(self, token: str | None) -> None:
         try:
@@ -45,13 +72,17 @@ class Keys:
         if kid in self.keys or time.time() - self.fetched < 10:
             return
         self.fetched = time.time()
-        status, raw = await app._call("GET", f"{app.AUTH}/oauth2/jwks", app.spiffe("auth"), {"accept": "application/json"})
-        if status == 200:
-            self.keys = keys_from_jwks(json.loads(raw))
+        try:
+            await self._fetch()
+        except Exception as e:  # noqa: BLE001  取り直せなければ、手元の鍵で確かめ続ける
+            log(event="keys_refresh_failed", error=str(e))
 
 
 def guard_middleware(inner: Any, guard: Guard, keys: Keys) -> Any:
     async def asgi(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            # 起動の直後に、鍵を取りに行く（サーバーと同じイベントループで）
+            keys.start_warming()
         if scope["type"] != "http":
             return await inner(scope, receive, send)
         client = scope.get("client")

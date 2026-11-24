@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAgent, statusOf } from "../web/agent.ts";
+import { createAgent, statusOf, transient } from "../web/agent.ts";
 
 const base = { threadId: "t", runId: "r" };
 const sse = (events: object[]) =>
@@ -107,5 +107,64 @@ describe("AG-UI の接続（@ag-ui/client。gekko_11 の D-29）", () => {
     agent.say("希望");
     await agent.run(h).catch(() => undefined);
     expect(seen.errors).toEqual(["止まりました"]);
+  });
+});
+
+describe("つなぎが切れたときの送り直し（段 D の D1-a3）", () => {
+  it("渡した runId で送る。502 は、状態つきの誤りになり、送り直す対象になる", async () => {
+    const runIds: string[] = [];
+    let n = 0;
+    const agent = createAgent(
+      "http://agent.test/agui",
+      async () => ({}),
+      (async (_url: string, init: RequestInit) => {
+        runIds.push(JSON.parse(init.body as string).runId);
+        return ++n === 1 ? new Response("bad gateway", { status: 502 }) : sse(toolRun);
+      }) as typeof fetch,
+    );
+    const { seen, h } = handlers();
+    agent.say("希望");
+    const err = await agent.run(h, "run-1").catch((e: unknown) => e);
+    expect(statusOf(err)).toBe(502);
+    expect(transient(err)).toBe(true);
+    await agent.run(h, "run-1");
+    expect(runIds).toEqual(["run-1", "run-1"]);
+    expect(seen.texts).toEqual(["説明"]);
+  });
+
+  it("ネットワークの誤りは送り直し、断られた要求（409、401）は送り直さない", async () => {
+    expect(transient(new TypeError("fetch failed"))).toBe(true);
+    expect(transient(Object.assign(new Error("conflict"), { status: 409 }))).toBe(false);
+    expect(transient(Object.assign(new Error("expired"), { status: 401 }))).toBe(false);
+  });
+});
+
+describe("途中で切れた回の流し直し（段 D の D1-a3）", () => {
+  it("切れた回の書きかけを履歴に残さず、流し直しの文と道具の呼び出しをそのまま読む", async () => {
+    const enc = new TextEncoder();
+    let n = 0;
+    const agent = createAgent(
+      "http://agent.test/agui",
+      async () => ({}),
+      (async () => {
+        const cut = ++n === 1;
+        const body = new ReadableStream({
+          start(c) {
+            // 1 回目は、文と、道具の呼び出しの途中（END の前）で切れる
+            for (const e of cut ? toolRun.slice(0, 6) : toolRun) c.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+            if (cut) setTimeout(() => c.error(new TypeError("terminated")), 10);
+            else c.close();
+          },
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch,
+    );
+    const { seen, h } = handlers();
+    agent.say("希望");
+    const err = await agent.run(h, "run-1").catch((e: unknown) => e);
+    expect(transient(err)).toBe(true);
+    await agent.run(h, "run-1");
+    expect(seen.texts).toEqual(["説明", "説明"]);
+    expect(seen.tools).toEqual([["c1", "ask_customer", { question: "q", options: ["a"] }]]);
   });
 });

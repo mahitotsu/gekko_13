@@ -6,7 +6,7 @@ import type { IncomingMessage } from "node:http";
 import { getRequestListener } from "@hono/node-server";
 import { createRemoteJWKSet } from "jose";
 import { createMtlsServer, peerX5tS256, SvidSource } from "../../../packages/spiffe-tls/src/index.ts";
-import { createGuard, Refusal } from "../../../packages/token-guard/src/index.ts";
+import { createGuard, Refusal, warmKeys } from "../../../packages/token-guard/src/index.ts";
 import { createApp } from "./app.ts";
 import type { Verified } from "./claims.ts";
 import { useSvids } from "./mcp.ts";
@@ -26,10 +26,14 @@ const loginOrigin = env("LOGIN_ORIGIN", new URL(issuer).origin);
 const jwksUrl = new URL(`${new URL(issuer).pathname}/protocol/openid-connect/certs`, loginOrigin);
 const publicOrigin = env("PUBLIC_ORIGIN", "https://sales-agent:8443");
 
+// 鍵は期限を切らずに持ち、知らない kid が来たときだけ取り直す（30 秒に 1 回まで）。起動したらすぐ取っておく（warmKeys）
+const loginKeys = createRemoteJWKSet(jwksUrl, { cacheMaxAge: Infinity, cooldownDuration: 30_000 });
+void warmKeys(() => loginKeys.reload(), log);
+
 const guard = createGuard({
   service: "sales-agent",
   issuer,
-  keys: createRemoteJWKSet(jwksUrl, { cooldownDuration: 30_000 }),
+  keys: loginKeys,
   ingress: "dpop",
   allowedCallers: [`spiffe://${td}/svc/customer-app`],
 });

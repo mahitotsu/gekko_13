@@ -88,7 +88,8 @@ final class SpiffeTls {
 	static final int ATTEMPTS = 6;
 
 	/**
-	 * 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。応答が届く前につなぎが切れたら（IOException）、最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す。
+	 * 相手の SPIFFE ID を確かめて呼ぶ RestClient。呼ぶたびに作る。応答が届く前につなぎが切れたら（IOException）か、502、503、504 が返ったら、
+	 * 最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す。
 	 * Service Connect の外れ値の検出が、止まったタスクを避けるまで続ける（外れ値の検出は、直近 30 秒に 5 回以上失敗したタスクを避ける。ECS の資料。3 回では避けられる前に送り終えた。2026-11-23 の AWS）
 	 * （段 D の D1-a3。止まったタスクへのつなぎを、Service Connect は救いきれなかった。2026-11-23 の AWS）。相手の SPIFFE ID が違うときは、
 	 * 送り直さない。送るのは、passkey の公開鍵と連絡先の読み取り（GET）と、顧客のアプリへの直送（2 度届くと、受信箱に同じ通知が 2 つ並ぶが、
@@ -109,7 +110,19 @@ final class SpiffeTls {
 			return RestClient.builder().requestFactory(factory).requestInterceptor((request, body, execution) -> {
 				for (int i = 1;; i++) {
 					try {
-						return execution.execute(request, body);
+						org.springframework.http.client.ClientHttpResponse response = execution.execute(request, body);
+						int status = response.getStatusCode().value();
+						// 中継（Service Connect）が送り先に届かなかったときの応答も、送り直す（段 D の D1-a3。2026-11-24 の AWS）
+						if ((status == 502 || status == 503 || status == 504) && i < ATTEMPTS) {
+							response.close();
+							Thread.sleep(300L * i);
+							continue;
+						}
+						return response;
+					}
+					catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+						throw new java.io.InterruptedIOException("送り直しの待ちが止められた");
 					}
 					catch (java.io.IOException ex) {
 						if (i >= ATTEMPTS || ex instanceof javax.net.ssl.SSLPeerUnverifiedException) {

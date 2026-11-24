@@ -98,15 +98,30 @@ try {
   const afterSubmit = (await page.getByTestId("error").isVisible()) ? await page.getByTestId("error").textContent() : null;
   expect("4-6 提出が受け付けられた", !afterSubmit, { error: afterSubmit });
 
-  // 7. 照合。会話の最後と、受信箱と契約の画面の両方で、今回の申込みが「一致」になる
-  await page.getByTestId("check-session").click();
-  const item = page.getByTestId(`reconcile-${nonce}`);
-  await item.waitFor({ timeout: 15_000 });
-  expect("7a 照合（会話の最後）", (await item.getAttribute("data-status")) === "match", { nonce, status: await item.getAttribute("data-status") });
-  await page.getByTestId("tab-inbox").click();
-  const row = page.getByTestId(`inbox-${nonce}`);
-  await row.waitFor({ timeout: 15_000 });
-  expect("7b 照合（受信箱と契約）", (await row.getAttribute("data-status")) === "match", { status: await row.getAttribute("data-status") });
+  // 7. 照合。会話の最後と、受信箱と契約の画面の両方で、今回の申込みが「一致」になる。
+  // 直送は、届かなければ保険会社のシステムが送り直すので、「一致」になるまで、最長 30 秒、照合し直す（段 D の D1-a3。plan.md の 4-3）
+  const untilMatch = async (open: () => Promise<void>, testId: string) => {
+    const started = Date.now();
+    let status: string | null = null;
+    while (Date.now() - started < 30_000) {
+      await open();
+      const el = page.getByTestId(testId);
+      await el.waitFor({ timeout: 15_000 });
+      status = await el.getAttribute("data-status");
+      if (status === "match") break;
+      await page.waitForTimeout(2_000);
+    }
+    return { status, waitedMs: Date.now() - started };
+  };
+  const a7 = await untilMatch(() => page.getByTestId("check-session").click(), `reconcile-${nonce}`);
+  expect("7a 照合（会話の最後）", a7.status === "match", { nonce, ...a7 });
+  const b7 = await untilMatch(() => page.getByTestId("tab-inbox").click(), `inbox-${nonce}`);
+  expect("7b 照合（受信箱と契約）", b7.status === "match", b7);
+  // 回が途中で切れて画面が送り直しても、営業 AI エージェントの文とカードが 2 重に出ていない（AG-UI の回の冪等。段 D の D1-a3）
+  const cards = await page.locator("details[data-tool]").evaluateAll((els) => els.map((e) => `${e.getAttribute("data-tool")}:${e.textContent ?? ""}`));
+  const notes = await page.locator(".agent").evaluateAll((els) => els.map((e) => e.textContent ?? ""));
+  const dup = (xs: string[]) => xs.filter((x, i) => xs.indexOf(x) !== i).map((x) => x.slice(0, 60));
+  expect("7c 会話の文とカードが 2 重に出ていない", dup(cards).length === 0 && dup(notes).length === 0, { cards: cards.length, notes: notes.length, dupCards: dup(cards), dupNotes: dup(notes) });
 
   // 8. 監査（段 D の D1-a2-3）。顧客は、ログインサーバーにログインしていても、監査の画面を見られない。
   // ログインサーバーが、監査のクライアントの認証の流れで、役割 AUDITOR のない利用者を止める（監査サービスも重ねて確かめる）

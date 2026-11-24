@@ -56,10 +56,41 @@ class ApplicationTest {
 		TestBackendConfig.PASSKEYS.put("alice", List.of(this.alice.registered()));
 	}
 
+	@Autowired
+	Notifier notifier;
+
 	@AfterEach
 	void reset() {
 		TestBackendConfig.OFF.clear();
 		TestBackendConfig.PASSKEYS.clear();
+		TestBackendConfig.FAIL_NEXT.set(0);
+		TestBackendConfig.DELIVERED.clear();
+	}
+
+	@Test
+	void undeliveredNoticeIsRedeliveredOnceFromTheOutbox() {
+		TestBackendConfig.FAIL_NEXT.set(1);
+		this.notifier.send(List.of("/notices/inbox-redeliver"), Map.of("customer", "alice"));
+		assertThat(last(this.store.outbox()).delivered()).isFalse();
+		long later = System.currentTimeMillis() + Notifier.backoffMs(1) + 1;
+		// 時期が来た行は 1 度だけ借りられる（2 度目は、借りている間なので取れない）
+		List<Store.Pending> first = this.store.claimDue(later, 20, Notifier.LEASE_MS);
+		assertThat(first).extracting(Store.Pending::to).contains("/notices/inbox-redeliver");
+		assertThat(this.store.claimDue(later, 20, Notifier.LEASE_MS)).extracting(Store.Pending::to)
+			.doesNotContain("/notices/inbox-redeliver");
+		Store.Pending p = first.stream().filter((x) -> x.to().equals("/notices/inbox-redeliver")).findFirst().orElseThrow();
+		// 借りた行を、いまの時刻で時期が来た形に戻す
+		this.store.markAttempt(p.id(), false, 1, System.currentTimeMillis() - 1, "試験");
+		assertThat(this.notifier.redeliverDue()).isGreaterThanOrEqualTo(1);
+		assertThat(TestBackendConfig.DELIVERED).contains("/notices/inbox-redeliver");
+		assertThat(last(this.store.outbox()).delivered()).isTrue();
+	}
+
+	@Test
+	void noticeToAnAddressOutsideTheCustomerAppIsNotRedelivered() {
+		this.notifier.send(List.of("http://attacker.invalid/notices"), Map.of("customer", "alice"));
+		assertThat(this.store.claimDue(Long.MAX_VALUE / 2, 20, Notifier.LEASE_MS)).extracting(Store.Pending::to)
+			.doesNotContain("http://attacker.invalid/notices");
 	}
 
 	@Test

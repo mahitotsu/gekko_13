@@ -130,6 +130,46 @@ describe("中継", () => {
   });
 });
 
+describe("待ち", () => {
+  it("使い回した接続でも、要求の途中で送り先の Keep-Alive のヒントの短い待ちで切らない（nodejs/node#53458）", async () => {
+    // 送り先の Keep-Alive のヒントは 2 秒（プールでは 1 秒で閉じる）。2 回目は応答まで 2.5 秒かかる
+    let n = 0;
+    const slow = createServer((_req, res) => {
+      const wait = n++ === 0 ? 0 : 2_500;
+      setTimeout(() => res.writeHead(200, { "content-type": "text/plain" }).end("ok"), wait);
+    });
+    slow.keepAliveTimeout = 2_000;
+    const port = await listen(slow);
+    const handle = createProxy({ routes: parseRoutes("/=customer-app"), resolver: staticResolver(`customer-app=127.0.0.1:${port}`), timeoutMs: 5_000, maxBodyBytes: 1024, maxAttempts: 1, log: () => {} });
+    const p = await listen(createServer((req, res) => void handle(req, res)));
+    expect((await fetch(`http://127.0.0.1:${p}/a`)).status).toBe(200);
+    // 1 回目の接続がプールにある間に、2 回目を送る（同じ接続を使い回す）
+    expect((await fetch(`http://127.0.0.1:${p}/b`)).status).toBe(200);
+  }, 10_000);
+
+  it("つながらない送り先は、つなぐ待ちで見切り、次の送り先へ回す", async () => {
+    const ec = await listen(upstream("customer-app"));
+    const logs: Record<string, unknown>[] = [];
+    // 10.255.255.1 は経路のない宛先。つなぎが返らない（返らずに誤りになる環境でも、次の送り先へ回るのは同じ）
+    const resolver: Resolver = { resolve: async () => [{ host: "10.255.255.1", port: 9 }, { host: "127.0.0.1", port: ec }], failed: () => {} };
+    const handle = createProxy({ routes: parseRoutes("/=customer-app"), resolver, timeoutMs: 5_000, connectTimeoutMs: 300, maxBodyBytes: 1024, maxAttempts: 3, log: (o) => logs.push(o as Record<string, unknown>), random: () => 0.99 });
+    const p = await listen(createServer((req, res) => void handle(req, res)));
+    const started = Date.now();
+    const r = await fetch(`http://127.0.0.1:${p}/x`, { method: "POST", body: "hello" });
+    expect(r.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(logs.find((l) => l.ev === "upstream-failed")).toMatchObject({ kind: "retryable" });
+  });
+
+  it("つながったあとに送り先が黙ったら、要求の待ちで切って 502 を返す（本文は送り直さない）", async () => {
+    const silent = createServer(() => {});
+    const port = await listen(silent);
+    const handle = createProxy({ routes: parseRoutes("/=customer-app"), resolver: staticResolver(`customer-app=127.0.0.1:${port}`), timeoutMs: 300, maxBodyBytes: 1024, maxAttempts: 3, log: () => {} });
+    const p = await listen(createServer((req, res) => void handle(req, res)));
+    expect((await fetch(`http://127.0.0.1:${p}/x`, { method: "POST", body: "hello" })).status).toBe(502);
+  });
+});
+
 describe("公開の origin の転送のヘッダー", () => {
   it("閲覧者の転送のヘッダーを捨て、公開の origin から付け直す", () => {
     const out = publicForwardHeaders({ "x-forwarded-host": "evil.example", forwarded: "host=evil", "x-forwarded-for": "198.51.100.7", cookie: "a=1" }, "https://d1.cloudfront.net");

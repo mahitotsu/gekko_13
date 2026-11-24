@@ -6,7 +6,7 @@
 import { serve } from "@hono/node-server";
 import { createMtlsServer, SvidSource } from "../../../packages/spiffe-tls/src/index.ts";
 import { createApp, handleNotice } from "./app.ts";
-import { useSvids } from "./bff.ts";
+import { useSvids, warmLoginKeys } from "./bff.ts";
 import { pgState, useState } from "../../../packages/state/src/index.ts";
 
 const log = (o: object) => console.log(JSON.stringify({ at: new Date().toISOString(), svc: "customer-app", ...o }));
@@ -17,6 +17,8 @@ log({ ev: "svid", id: first.id, notAfter: first.notAfter });
 useSvids(svids);
 useState(await pgState());
 log({ ev: "state", store: "postgres" });
+
+void warmLoginKeys(log);
 
 const appPort = Number(process.env.APP_PORT ?? 8080);
 serve({ fetch: createApp(svids).fetch, hostname: "0.0.0.0", port: appPort }, () => log({ ev: "listening", port: appPort }));

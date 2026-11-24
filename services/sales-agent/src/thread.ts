@@ -60,6 +60,11 @@ export interface ThreadData {
   pending?: { id: string; name: FrontendTool; args: Record<string, unknown> };
   /** エンジン（台本、のちに本物の Claude）の進み。中身はエンジンが決める。 */
   engine: Record<string, unknown>;
+  /**
+   * 最後に進めた回の runId と、その回で流したイベント（AG-UI の回の冪等。段 D の D1-a3）。同じ runId で送り直されたら、
+   * 回を進め直さず、これを流し直す。流している途中でつなぎが切れても、画面は同じ runId で送り直せば、同じ続きを受け取れる。
+   */
+  lastRun?: { runId: string; items: Item[] };
 }
 
 export const newThreadData = (id: string, sub: string): ThreadData => ({ id, sub, signed: {}, engine: {} });

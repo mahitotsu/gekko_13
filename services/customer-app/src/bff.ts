@@ -14,6 +14,7 @@ import { compactVerify, createRemoteJWKSet, customFetch, SignJWT } from "jose";
 import * as oidc from "openid-client";
 import { needsRefresh, verifyIdToken } from "../web/checks.ts";
 import { state } from "../../../packages/state/src/index.ts";
+import { warmKeys } from "../../../packages/token-guard/src/index.ts";
 
 const env = (name: string, fallback?: string) => process.env[name] ?? fallback ?? "";
 
@@ -177,10 +178,26 @@ export function loginFetch(loginOrigin: string): typeof fetch {
   }) as typeof fetch;
 }
 
-/** ログインサーバーの公開鍵の一覧。ログインサーバーへの出口から取る。 */
+/**
+ * ログインサーバーの公開鍵の一覧。ログインサーバーへの出口から取る。1 つを使い回し、期限を切らずに持つ。
+ * 知らない kid が来たときだけ取り直す（30 秒に 1 回まで）。起動したら warmLoginKeys ですぐ取っておく（段 D の D1-a3）
+ */
+let loginKeys: ReturnType<typeof createRemoteJWKSet> | undefined;
 function loginJwks() {
-  const c = cfg();
-  return createRemoteJWKSet(new URL(`${c.issuer}/protocol/openid-connect/certs`), { [customFetch]: loginFetch(c.loginOrigin) });
+  if (!loginKeys) {
+    const c = cfg();
+    loginKeys = createRemoteJWKSet(new URL(`${c.issuer}/protocol/openid-connect/certs`), {
+      [customFetch]: loginFetch(c.loginOrigin),
+      cacheMaxAge: Infinity,
+      cooldownDuration: 30_000,
+    });
+  }
+  return loginKeys;
+}
+
+/** 起動したらすぐ、ログインサーバーの公開鍵を取っておく（取れるまで取り直す。受け始めるのは待たない）。 */
+export function warmLoginKeys(log: (o: object) => void): Promise<void> {
+  return warmKeys(() => loginJwks().reload(), log);
 }
 
 /** ログインサーバーの機密クライアントの設定。クライアント認証は、SPIRE の JWT-SVID（gekko_11 の D-38、D-41）。 */

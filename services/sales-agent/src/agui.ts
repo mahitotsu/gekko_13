@@ -20,6 +20,13 @@ const IDLE_MS = 15 * 60_000;
 /** 回を進めている間、SSE のコメントを流す間隔。入口の待ちの上限（UPSTREAM_TIMEOUT_MS、25 秒）より十分短くする。 */
 const KEEPALIVE_MS = 5_000;
 
+/**
+ * 手元の確かめだけで使う切り方（段 D の D1-a3。AWS のタスク定義には付けない）。1 にすると、回を進めて書き戻したあと、
+ * 各 runId の 1 回目だけ、イベントを半分流したところでつなぎを切る。画面が同じ runId で送り直し、流し直しで続くかを見る。
+ */
+const CUT_STREAM = process.env.GEKKO13_FAULT_CUT_STREAM === "1";
+const cut = new Set<string>();
+
 /** エンジンの 1 回分。区切りまで進める。 */
 export type Engine = (t: Thread, input: { text: string } | { answer: string }) => Promise<void>;
 
@@ -52,8 +59,18 @@ export async function handleRun(c: Context, engine: Engine) {
     if (!waiting && !input.messages.some((m) => m.role === "user")) throw new Refused(400, "顧客の文（user message）がない");
     return data;
   };
+  /** 同じ runId の送り直しなら、その回で流したイベント。本人の会話であることは、先に確かめる。 */
+  const replayOf = (raw: string | undefined): Item[] | undefined => {
+    if (!raw) return undefined;
+    const data = JSON.parse(raw) as ThreadData;
+    if (data.sub !== sub) throw new Refused(403, "この会話は、ほかの顧客のものである");
+    return data.lastRun?.runId === input.runId ? data.lastRun.items : undefined;
+  };
+  let replay: Item[] | undefined;
   try {
-    check(await state().get("conversation", input.threadId));
+    const raw = await state().get("conversation", input.threadId);
+    replay = replayOf(raw);
+    if (!replay) check(raw);
   } catch (e) {
     if (e instanceof Refused) return c.json({ error: e.message }, e.status);
     throw e;
@@ -69,7 +86,10 @@ export async function handleRun(c: Context, engine: Engine) {
     const beat = setInterval(() => void s.write(": keep-alive\n\n").catch(() => undefined), KEEPALIVE_MS);
     let items: Item[];
     try {
-      items = await state().locked("conversation", input.threadId, async (raw) => {
+      items = replay ?? await state().locked("conversation", input.threadId, async (raw) => {
+        // ロックを待つ間に、同じ runId の送り直しが先に進めていたら、その結果を流す（会話は変えない）
+        const done = replayOf(raw);
+        if (done) return { result: done };
         const t = new Thread(check(raw));
         t.ctx = verified.token;
         t.claims = claims;
@@ -84,6 +104,7 @@ export async function handleRun(c: Context, engine: Engine) {
           t.tell(text);
           await run(t, engine, { text });
         }
+        t.data.lastRun = { runId: input.runId, items: t.events() };
         return { value: JSON.stringify(t.data), expiresAt: Date.now() + IDLE_MS, result: t.events() };
       });
     } catch (e) {
@@ -92,7 +113,17 @@ export async function handleRun(c: Context, engine: Engine) {
     } finally {
       clearInterval(beat);
     }
-    for (const item of items) {
+    const incoming = (c.env as { incoming?: IncomingMessage } | undefined)?.incoming;
+    const cutAt = CUT_STREAM && !replay && incoming && !cut.has(input.runId) ? Math.max(1, Math.floor(items.length / 2)) : -1;
+    if (cutAt > 0) cut.add(input.runId);
+    for (const [i, item] of items.entries()) {
+      if (i === cutAt) {
+        console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "fault_cut_stream", runId: input.runId, after: i, of: items.length }));
+        // 流した分が画面に届いてから切る（すぐ切ると、送っていない分が捨てられ、画面には何も届かない）
+        await new Promise((r) => setTimeout(r, 500));
+        incoming!.socket.destroy();
+        return;
+      }
       if ("pause" in item) return void (await s.write(sse({ type: EventType.RUN_FINISHED, ...base })));
       if ("end" in item) {
         return void (await s.write(sse(item.error ? { type: EventType.RUN_ERROR, message: item.error } : { type: EventType.RUN_FINISHED, ...base })));
