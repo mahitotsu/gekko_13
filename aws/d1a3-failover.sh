@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # 段 D の D1-a3: 流れの途中でインスタンスを 1 台、予告なしに止め（スポットの中断より厳しい条件）、主の流れが続くかを見る（plan.md の 4-3 の D1-a3 の予測）。
+#   0. 確かめの前提（全部のサービスの 2 タスクが、健康で、別々の台にある）を整える。同じ台に 2 つあるサービスは、
+#      片方を止めて置き直させる（1 サービスずつ、3 回まで）。分かれなければ、何も止めずに終わる。
 #   1. CloudFront を通して、主の流れ（scripts/ui-flow.ts）を、案の提示のあとで待たせる（PAUSE_FILE）。
 #   2. その会話の案の提示を出した営業 AI エージェントのタスク（CloudWatch Logs のログストリームで決める）が載ったインスタンスを止める。
 #      同じ台の顧客のアプリのタスクも、一緒に止まる（載っていたタスクを記録する）。
@@ -8,7 +10,9 @@
 #   5. 止めてから 60 秒後に、新しく始めた主の流れも通るかを見る。
 # 結果は local/run/d1a3-failover/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/d1a3-failover.sh [止めたあとに入口を見る秒（既定 480）]
-# 前提: 全部のサービスが 2 タスクで安定している。実行すると費用が出る。ASG が代わりのインスタンスを起動する。
+# 前提: 全部のサービスが 2 タスクで安定している（0 で確かめ、崩れていれば止めずに終わる）。
+#   止める直前にも、止める台にどれかのサービスの 2 タスクが両方載っていないかを確かめ、載っていれば止めずに終わる。
+#   実行すると費用が出る。ASG が代わりのインスタンスを起動する。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REGION=${AWS_REGION:-ap-northeast-1}
@@ -23,6 +27,51 @@ RUN=local/run/d1a3-failover/$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$RUN"
 GO=$RUN/go
 
+# 0. 確かめの前提を整える。spire-agent は台ごとに 1 つなので見ない
+SERVICES="spire-server auth keycloak customer-app sales-agent insurer-mcp insurer-backend insurer-audit"
+# 行は「サービス タスクの数 台の数 健康の状態 コンテナインスタンスの ID…」。数えるのは RUNNING のタスクだけ
+placement() {
+  local s arns rows
+  for s in $SERVICES; do
+    arns=$(aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --service-name "$s" --desired-status RUNNING --query 'taskArns' --output text)
+    rows=
+    # shellcheck disable=SC2086
+    [ -z "$arns" ] || rows=$(aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --tasks $arns \
+      --query 'tasks[?lastStatus==`RUNNING`].[containerInstanceArn,healthStatus]' --output text)
+    printf '%s\n' "$rows" | awk -v s="$s" 'NF == 2 { n++; sub(".*/", "", $1); ci[n] = $1; hosts[$1] = 1; health[$2] = 1 }
+      END { h = 0; for (k in hosts) h++; hs = ""; for (k in health) hs = hs (hs == "" ? "" : ",") k
+            printf "%s %d %d %s", s, n, h, (hs == "" ? "-" : hs); for (i = 1; i <= n; i++) printf " %s", ci[i]; print "" }'
+  done
+}
+# どのサービスも 2 タスクで、そろって HEALTHY（ヘルスチェックのないタスクはそろって UNKNOWN）
+ready() { awk '$2 != 2 || ($4 != "HEALTHY" && $4 != "UNKNOWN") { bad = 1 } END { exit bad }' "$1"; }
+# 2 タスクが同じ台にあるサービス
+stacked() { awk '$2 == 2 && $3 == 1 { print $1 }' "$1"; }
+# 整うまで 10 分待つ。最後に見た配置を $1 に書く
+wait_ready() { for _ in $(seq 1 60); do placement > "$1"; ready "$1" && return 0; sleep 10; done; return 1; }
+stop_here() { echo "$1。止めずに終わる。配置（サービス タスクの数 台の数 健康 コンテナインスタンス）:" >&2; sed 's/^/  /' "$2" >&2; exit 1; }
+
+wait_ready "$RUN/placement-before.txt" || stop_here "全部のサービスが 2 タスクで健康になっていない" "$RUN/placement-before.txt"
+MOVED=no
+for s in $(stacked "$RUN/placement-before.txt"); do
+  for try in 1 2 3; do
+    t=$(aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --service-name "$s" --desired-status RUNNING --query 'taskArns[0]' --output text)
+    echo "$s: 2 タスクが同じ台にある。1 つを止めて置き直させる（$try 回め）"
+    aws ecs stop-task --region "$REGION" --cluster "$CLUSTER" --task "$t" --reason "d1a3-failover: two tasks on one instance" >/dev/null
+    aws ecs wait tasks-stopped --region "$REGION" --cluster "$CLUSTER" --tasks "$t"
+    aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services "$s" || stop_here "$s が 10 分で安定しなかった" "$RUN/placement-before.txt"
+    wait_ready "$RUN/placement-now.txt" || stop_here "置き直したあと、全部のサービスが 2 タスクで健康にならなかった" "$RUN/placement-now.txt"
+    MOVED=yes
+    stacked "$RUN/placement-now.txt" | grep -qx "$s" || break
+  done
+done
+placement > "$RUN/placement-after.txt"
+ready "$RUN/placement-after.txt" || stop_here "整えたあと、全部のサービスが 2 タスクで健康でない" "$RUN/placement-after.txt"
+[ -z "$(stacked "$RUN/placement-after.txt")" ] || stop_here "3 回置き直しても、2 タスクが同じ台にあるサービスが残った: $(stacked "$RUN/placement-after.txt" | tr '\n' ' ')" "$RUN/placement-after.txt"
+echo "前提: 全部のサービスの 2 タスクが、別々の台にある"
+# 置き直したタスクが Service Connect に載るまでの余裕
+[ "$MOVED" = no ] || sleep 30
+
 # 2 秒ごとに入口を呼ぶ。行は「時刻（UNIX 秒） 種類 状態」
 probe() {
   while :; do
@@ -36,7 +85,8 @@ probe() {
 }
 probe > "$RUN/probe.txt" &
 PROBE=$!
-trap 'kill $PROBE 2>/dev/null || true' EXIT
+FLOW=
+trap 'kill $PROBE $FLOW 2>/dev/null || true' EXIT
 
 # 1. 案の提示のあとで待たせる
 S=$(date +%s)
@@ -65,6 +115,10 @@ aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --container-instance 
   xargs -r -n 100 aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --query 'tasks[].group' --output text --tasks |
   tr '\t' '\n' | sed 's/^service://' | sort | uniq -c > "$RUN/victim-tasks.txt"
 echo "案の提示を出したタスク: $TASK。止める台: $AZ の 1 台。載っているタスク:"; sed 's/^/  /' "$RUN/victim-tasks.txt"
+# 止める直前の確かめ。整えてから、ここまでの間にタスクが入れ替わることがある
+placement > "$RUN/placement-victim.txt"
+BOTH=$(awk '$2 != "spire-agent" && $1 >= 2 { print $2 }' "$RUN/victim-tasks.txt" | tr '\n' ' ')
+[ -z "$BOTH" ] || stop_here "止める台に、2 タスクが両方載っているサービスがある: $BOTH" "$RUN/placement-victim.txt"
 
 T0=$(date +%s)
 aws ec2 terminate-instances --region "$REGION" --instance-ids "$VICTIM" >/dev/null
