@@ -76,6 +76,16 @@ Parameters:
     Type: String
     Default: /gekko13/sales-agent/state-key
     Description: SSM SecureString with the AES-256 key that seals the sales agent conversations in Aurora (64 hex characters)
+  Running:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Whether the services run. The only source of the task counts: true runs two tasks per service, false runs none.
+      Change it with aws/scale.sh, never with update-service
+
+Conditions:
+  Run: !Equals [!Ref Running, "true"]
 
 Resources:
   # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
@@ -184,9 +194,9 @@ Resources:
       ServiceName: customer-app
       TaskDefinition: !Ref CustomerAppTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # Running のとき 2 タスクに固定する（判断 56、61）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
-      DesiredCount: 2
+      DesiredCount: !If [Run, 2, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
       AvailabilityZoneRebalancing: ENABLED
       # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
@@ -380,9 +390,9 @@ Resources:
       ServiceName: sales-agent
       TaskDefinition: !Ref SalesAgentTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # Running のとき 2 タスクに固定する（判断 56、61）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
-      DesiredCount: 2
+      DesiredCount: !If [Run, 2, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
       AvailabilityZoneRebalancing: ENABLED
       # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
@@ -400,9 +410,9 @@ Resources:
       ServiceName: insurer-mcp
       TaskDefinition: !Ref InsurerMcpTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # Running のとき 2 タスクに固定する（判断 56、61）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
-      DesiredCount: 2
+      DesiredCount: !If [Run, 2, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
       AvailabilityZoneRebalancing: ENABLED
       # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
@@ -420,9 +430,9 @@ Resources:
       ServiceName: insurer-backend
       TaskDefinition: !Ref InsurerBackendTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # Running のとき 2 タスクに固定する（判断 56、61）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
-      DesiredCount: 2
+      DesiredCount: !If [Run, 2, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
       AvailabilityZoneRebalancing: ENABLED
       # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）
@@ -548,9 +558,9 @@ Resources:
       ServiceName: insurer-audit
       TaskDefinition: !Ref InsurerAuditTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      # 2 タスクに固定する（段 D の D1-a3。判断 56）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
+      # Running のとき 2 タスクに固定する（判断 56、61）。状態は共有の Aurora にあるので、どちらのタスクに当たってもよい。
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
-      DesiredCount: 2
+      DesiredCount: !If [Run, 2, 0]
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
       AvailabilityZoneRebalancing: ENABLED
       # 2 タスクを、AZ に散らし、同じ AZ の中でも別のインスタンスに散らす。1 台を止めても、片方が残るように（段 D の D1-a3）

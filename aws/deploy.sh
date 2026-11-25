@@ -21,8 +21,8 @@ MAX_HOSTS=${GEKKO13_MAX_HOSTS:-4}
 INSTANCE_TYPES=${GEKKO13_INSTANCE_TYPES:-t4g.medium,c6g.large,c7g.large,t4g.large}
 [ "$(tr ',' '\n' <<<"$INSTANCE_TYPES" | grep -c .)" = 4 ] || { echo "GEKKO13_INSTANCE_TYPES は、ちょうど 4 つの種類をカンマで並べる: $INSTANCE_TYPES" >&2; exit 2; }
 CONTAINER_INSIGHTS=${GEKKO13_CONTAINER_INSIGHTS:-disabled}
-PREFIX=gekko13
-REGION=${AWS_REGION:-ap-northeast-1}
+# shellcheck source=aws/lib.sh
+. aws/lib.sh
 SPIRE=1.15.3
 HELPER=0.11.0
 # イメージのタグは、イメージごとの材料の、コミットした中身から作る（scripts/image-tag.sh）。材料が同じなら作り直さず、
@@ -44,8 +44,20 @@ LABEL="org.opencontainers.image.revision=$REVISION"
 # CloudFormation は ASCII 以外の文字を「?」に置き換える。送る前に止める
 scripts/check-templates.sh
 
+# 渡すタスク数の元（Running）を決める。スタックがそろわないか、実際のタスク数と合わなければ、何も作らずに止める（findings 5-21、5-27）。
+# 0 台のときは false のまま送る。新しいタスク定義は登録され、次の aws/scale.sh up で起きる
+RUNNING=$(deploy_running)
+# 新しいサービスで DesiredCount を書かないと、1 になる（CloudFormation の資料）。初めてのときは、オートスケーリングなしで作る
+if [ "${GEKKO13_AUTOSCALING:-false}" = true ] && [ "$(running_of "$PREFIX-apps")" = absent ]; then
+  echo "初めてのデプロイでは GEKKO13_AUTOSCALING=true を付けない（作ったあとで付ける）" >&2; exit 2
+fi
+for s in $RUN_STACKS; do
+  # running_of を代入で受け、AWS の呼び出しが失敗したときも止める
+  CUR=$(running_of "$s")
+  [ "$CUR" = absent ] || check_ready "$s"
+done
+
 cfn() { aws cloudformation deploy --region "$REGION" --no-fail-on-empty-changeset "$@"; }
-out() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
 # ホストは、IPv6 で届くデュアルスタックの名前からイメージを取る（既定の dkr.ecr の名前は IPv4 だけ。docs/findings.md）
 dualstack() { sed -E 's/\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com/.dkr-ecr.\1.on.aws/' <<<"$1"; }
 
@@ -187,26 +199,6 @@ else
   SUBNETS=$(out "$PREFIX-network" SubnetId)
 fi
 
-# scale.sh down のあとは、spire-server のタスク数が 0 のまま残る。テンプレートの値（1）は変わらないので、
-# スタックの更新では戻らず、server のいないサービスが安定しないまま更新が待ち続ける。更新の前に 1 に戻す。
-# 配置制約（B-4 の試験が付ける）が残っていれば、外す。CloudFormation は、テンプレートに書いていない制約を戻さないので、
-# 残っていると、制約に合うインスタンスがないときに server を置けず、更新が待ち続ける（docs/findings.md）
-if aws ecs describe-services --region "$REGION" --cluster "$PREFIX" --services spire-server \
-  --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q spire-server; then
-  aws ecs update-service --region "$REGION" --cluster "$PREFIX" --service spire-server --desired-count 2 \
-    --placement-constraints '[{"type":"distinctInstance"}]' >/dev/null
-fi
-
-# scale.sh down は、Keycloak と auth のタスクのオートスケーリングの幅を 0〜0 にする。CloudFormation は、テンプレートが変わらないかぎり
-# 幅を戻さないので、スタックの更新でタスクを入れ替えると、オートスケーリングがタスク数を 0 に下げる（docs/findings.md の 4-35）。更新の前に戻す
-for s in keycloak auth; do
-  if aws application-autoscaling describe-scalable-targets --region "$REGION" --service-namespace ecs --resource-ids "service/$PREFIX/$s" \
-    --query 'ScalableTargets[0].ResourceId' --output text 2>/dev/null | grep -q "$s"; then
-    aws application-autoscaling register-scalable-target --region "$REGION" --service-namespace ecs \
-      --scalable-dimension ecs:service:DesiredCount --resource-id "service/$PREFIX/$s" --min-capacity 2 --max-capacity 4 >/dev/null
-  fi
-done
-
 # テンプレートは、日本語のコメントを含めると、直接送れる大きさ（51,200 バイト）を超えることがある。
 # 送る前に、行頭のコメント（「# 」で始まる行）だけを除く。シバン（#!）は残す。S3 のバケットは使わない（docs/findings.md の 4-12）
 TMP=$(mktemp -d)
@@ -224,6 +216,7 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "MaxInstances=$MAX_HOSTS" \
   "InstanceTypes=$INSTANCE_TYPES" \
   "ContainerInsights=$CONTAINER_INSIGHTS" \
+  "Running=$RUNNING" \
   "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
   "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \
   "SpireAgentImage=$(dualstack "$(out "$PREFIX-registry" SpireAgentRepositoryUri)"):$SPIRE" \
@@ -246,6 +239,7 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
   "DbHost=$DB_HOST" \
   "EnableAutoScaling=${GEKKO13_AUTOSCALING:-false}" \
+  "Running=$RUNNING" \
   "RpId=$(rp_id)"
 
 # 主の流れのサービス（段 D の D1-a2）。ディストリビューションのドメイン名（RpId）から issuer と origin を作るので、
@@ -262,6 +256,7 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "McpImage=$(dualstack "$MCP_REPO"):$MCP_TAG" \
     "BackendImage=$(dualstack "$BACKEND_REPO"):$BACKEND_TAG" \
     "AuditImage=$(dualstack "$AUDIT_REPO"):$AUDIT_TAG" \
+    "Running=$RUNNING" \
     "DbHost=$DB_HOST" \
     "RpId=$(rp_id)"
 fi
@@ -296,4 +291,4 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "AppLogGroup=$(out "$PREFIX-ecs" LogGroupName)"
 fi
 
-echo "作った。入口: https://$(rp_id)/ 。使い終わったら aws/scale.sh down で、タスクと台を 0 にする"
+echo "作った（Running=$RUNNING）。入口: https://$(rp_id)/ 。起こすのは aws/scale.sh up、使い終わったら aws/scale.sh down"

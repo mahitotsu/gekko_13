@@ -6,7 +6,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "tsc --noEmit && tsc --noEmit -p services/customer-app/web && eslint . && vitest run && scripts/test-python.sh && scripts/test-go.sh && scripts/check-templates.sh",
+    "test": "tsc --noEmit && tsc --noEmit -p services/customer-app/web && eslint . && vitest run && scripts/test-python.sh && scripts/test-go.sh && scripts/check-templates.sh && scripts/test-scale.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "local:up": "local/up.sh",

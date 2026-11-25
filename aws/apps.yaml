@@ -83,8 +83,18 @@ Parameters:
     Description: >-
       Create target tracking scaling (2 to 4 tasks) for Keycloak and auth. Off by default: every service runs a fixed two tasks.
       Turn it on for load tests; it adds two CloudWatch alarms per service
+  Running:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Whether the services run. The only source of the task counts: true runs two tasks per service, false runs none.
+      Change it with aws/scale.sh, never with update-service
 
 Conditions:
+  Run: !Equals [!Ref Running, "true"]
+  # 入口のドメイン名（RpId）がまだなければ、Keycloak は起こさない
+  RunKeycloak: !And [!Condition Run, !Condition HasRpId]
   HasRpId: !Not [!Equals [!Ref RpId, ""]]
   AutoScaling: !Equals [!Ref EnableAutoScaling, "true"]
 
@@ -266,7 +276,9 @@ Resources:
       ServiceName: auth
       TaskDefinition: !Ref AuthTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: 2
+      # タスク数は Running だけで決める（判断 61）。オートスケーリングありでは書かず、幅（AuthScalingTarget）だけを持つ。
+      # 書かなければ、CloudFormation は今の数を変えない
+      DesiredCount: !If [AutoScaling, !Ref "AWS::NoValue", !If [Run, 2, 0]]
       # ローリングアップデートする。AZ に散らす。タスクの数は、オートスケーリングが 2〜4 で変える（AuthScaling）
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
@@ -288,7 +300,8 @@ Resources:
       ServiceName: keycloak
       TaskDefinition: !Ref KeycloakTask
       CapacityProviderStrategy: [{ CapacityProvider: !Ref CapacityProviderName, Weight: 1 }]
-      DesiredCount: !If [HasRpId, 2, 0]
+      # 数の決め方は AuthService と同じ
+      DesiredCount: !If [AutoScaling, !Ref "AWS::NoValue", !If [RunKeycloak, 2, 0]]
       # MaximumPercent を 100 にすると、AZ の偏りを ECS が直さない（AvailabilityZoneRebalancing の条件。ECS の資料）
       DeploymentConfiguration: { MinimumHealthyPercent: 50, MaximumPercent: 200 }
       AvailabilityZoneRebalancing: ENABLED
@@ -304,7 +317,7 @@ Resources:
   # タスクのオートスケーリング（段 D の D1-a1）。CPU の使用率（予約に対する割合）を 60 % に保つよう、2〜4 で変える。
   # 1 つの方針で、CloudWatch のアラームが 2 つできる（1 つ月 0.1 ドル）。D1-a3 で、既定では作らず、どのサービスも 2 タスクに固定した
   # （判断 56）。性能を確かめるときは、EnableAutoScaling を true にして戻す。
-  # aws/scale.sh down は、ターゲットがあれば、先に最小と最大を 0 にしてから、タスクを 0 にする（ここで 2 に戻されないように）
+  # 幅は Running で決まる（true なら 2〜4、false なら 0〜0）。幅が変わると、Application Auto Scaling が今の数を幅の中へ直す（判断 61）
   KeycloakScalingTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Condition: AutoScaling
@@ -312,13 +325,13 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: Target tracking keeps Keycloak CPU near 60 percent with 2 to 4 tasks. Two CloudWatch alarms per policy. Created only when EnableAutoScaling is true
-        must: aws/scale.sh down must set min and max to 0 before scaling tasks to zero
+        must: The range follows the Running parameter (0 to 0 when stopped). Never register the target outside this template
     Properties:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
       ResourceId: !Sub "service/${ClusterName}/keycloak"
-      MinCapacity: !If [HasRpId, 2, 0]
-      MaxCapacity: !If [HasRpId, 4, 0]
+      MinCapacity: !If [RunKeycloak, 2, 0]
+      MaxCapacity: !If [RunKeycloak, 4, 0]
   KeycloakScaling:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Condition: AutoScaling
@@ -339,8 +352,8 @@ Resources:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
       ResourceId: !Sub "service/${ClusterName}/auth"
-      MinCapacity: 2
-      MaxCapacity: 4
+      MinCapacity: !If [Run, 2, 0]
+      MaxCapacity: !If [Run, 4, 0]
   AuthScaling:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Condition: AutoScaling

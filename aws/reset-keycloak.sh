@@ -3,15 +3,14 @@
 # レルムは「すでにあれば取り込まない」ので、データベースを消してから Keycloak を起こし直す。
 # 消えるもの: Aurora の keycloak のデータベースの全部（利用者が登録したパスキー、ログインのセッション）。戻せない。
 # 動かす前に、持ち主に対象を見せて承認を得る（CLAUDE.md の「承認が要る操作」）。インスタンスが動いている間に回す。
-# 手順: Keycloak のタスクを 0 にする → 一度だけのタスク（db-init のイメージ）で DROP と CREATE → タスクの定義を外す → Keycloak を 2 に戻す。
+# 手順: Keycloak と auth のタスクを 0 にする（apps のスタックの Running）→ 一度だけのタスク（db-init のイメージ）で DROP と CREATE → タスクの定義を外す → Running を戻す。
 # 使い方: aws/reset-keycloak.sh --yes
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ "${1:-}" = --yes ] || { echo "消す操作なので、--yes を付けて回す（持ち主の承認のあと）" >&2; exit 2; }
-REGION=${AWS_REGION:-ap-northeast-1}
-PREFIX=gekko13
-out() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" --output text; }
-param() { aws cloudformation describe-stacks --region "$REGION" --stack-name "$1" --query "Stacks[0].Parameters[?ParameterKey=='$2'].ParameterValue" --output text; }
+# shellcheck source=aws/lib.sh
+. aws/lib.sh
+param() { param_of "$@"; }
 CLUSTER=$(out "$PREFIX-ecs" ClusterName)
 ROLE=$(out "$PREFIX-ecs" ExecutionRoleArn)
 LOGS=$(out "$PREFIX-ecs" LogGroupName)
@@ -20,11 +19,17 @@ IMAGE=$(param "$PREFIX-ecs" DbInitImage)
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ssm() { echo "arn:aws:ssm:$REGION:$ACCOUNT:parameter$1"; }
 
-echo "Keycloak のタスクを 0 にする"
-aws application-autoscaling register-scalable-target --region "$REGION" --service-namespace ecs \
-  --scalable-dimension ecs:service:DesiredCount --resource-id "service/$CLUSTER/keycloak" --min-capacity 0 --max-capacity 0 >/dev/null
-aws ecs update-service --region "$REGION" --cluster "$CLUSTER" --service keycloak --desired-count 0 >/dev/null
-aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services keycloak
+# Keycloak は apps のスタックにあるので、同じスタックの auth も一緒に止まる。ほかのスタックは動かしたまま（run-task の台が要る）
+for s in $RUN_STACKS; do
+  [ "$(running_of "$s")" = true ] || { echo "$s の Running が true でない。aws/scale.sh up のあとで回す" >&2; exit 1; }
+done
+# データベースを消す前の確かめなので、2 つとも見えて、どちらも 0 のときだけ通す
+stopped() { service_counts "$CLUSTER" | awk '($1=="keycloak" || $1=="auth") {seen++; if ($2+$3+$4>0) n=1} END {exit (n || seen!=2)}'; }
+echo "Keycloak と auth のタスクを 0 にする"
+set_running false "$PREFIX-apps"
+wait_stacks "$PREFIX-apps"
+for i in $(seq 1 60); do stopped && break; sleep 10; done
+stopped || { echo "Keycloak と auth が 10 分で 0 にならなかった。データベースは消していない" >&2; exit 1; }
 
 SQL='printf "%s\n" "$DB_CA_PEM" > /tmp/ca.pem && PGPASSWORD="$DB_ADMIN_PASSWORD" psql "host=$DB_HOST port=5432 dbname=postgres user=$DB_ADMIN_USER sslmode=verify-full sslrootcert=/tmp/ca.pem" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS keycloak WITH (FORCE)" -c "CREATE DATABASE keycloak OWNER keycloak" && echo "keycloak のデータベースを作り直した"'
 DEF=$(cat <<EOF
@@ -42,11 +47,11 @@ TASK=$(aws ecs run-task --region "$REGION" --cluster "$CLUSTER" --task-definitio
 aws ecs wait tasks-stopped --region "$REGION" --cluster "$CLUSTER" --tasks "$TASK"
 CODE=$(aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --tasks "$TASK" --query 'tasks[0].containers[0].exitCode' --output text)
 aws ecs deregister-task-definition --region "$REGION" --task-definition "$TD" >/dev/null
-[ "$CODE" = 0 ] || { echo "作り直しのタスクが失敗した（exit $CODE）。CloudWatch Logs の keycloak-reset を見る。Keycloak は 0 のまま" >&2; exit 1; }
+[ "$CODE" = 0 ] || { echo "作り直しのタスクが失敗した（exit $CODE）。CloudWatch Logs の keycloak-reset を見る。Keycloak と auth は 0 のまま（aws/scale.sh up で戻る）" >&2; exit 1; }
 
-echo "Keycloak を 2 に戻す（レルムを取り込み直す）"
-aws application-autoscaling register-scalable-target --region "$REGION" --service-namespace ecs \
-  --scalable-dimension ecs:service:DesiredCount --resource-id "service/$CLUSTER/keycloak" --min-capacity 2 --max-capacity 4 >/dev/null
-aws ecs update-service --region "$REGION" --cluster "$CLUSTER" --service keycloak --desired-count 2 >/dev/null
-aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services keycloak
+echo "Keycloak と auth を戻す（レルムを取り込み直す）"
+set_running true "$PREFIX-apps"
+wait_stacks "$PREFIX-apps"
+aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services keycloak auth
+verify_counts true "$CLUSTER"
 echo "終わった"

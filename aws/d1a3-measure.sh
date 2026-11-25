@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 段 D の D1-a3: インスタンスが 0 の状態から、CloudFront を通して主の流れが使えるまでの時間を測る。定義は docs/log.md の 2026-11-23 の決定。
-#   始点: タスク数を戻した時刻（aws/scale.sh up）。
+#   始点: aws/scale.sh up を呼ぶ直前（Running を true にする。スタックの更新が始まるまでの数秒も含む）。
 #   終点: 次の 3 つがそろった時刻。CloudFront を通して Keycloak の discovery が、ディストリビューションのドメイン名を issuer にして返る。
 #         auth のログに「Started InsurerAuthApplication」が出る。CloudFront を通して、主の流れ（scripts/ui-flow.ts）が最後まで通る（通った回が終わった時刻）。
 #   内訳: インスタンスが ASG に加わった時刻。全部のサービスで 2 タスクが動き、2 つの AZ に分かれた時刻（終点には入れない）。
@@ -22,7 +22,21 @@ export DEMO_PASSWORD
 hosts() { aws autoscaling describe-auto-scaling-groups --region "$REGION" --auto-scaling-group-names "$ASG" --query 'length(AutoScalingGroups[0].Instances)' --output text; }
 now() { date +%s; }
 
+# 前提。1 つでも崩れていたら測らない
+# shellcheck source=aws/lib.sh
+. aws/lib.sh
 [ "$(hosts)" = 0 ] || { echo "台が 0 ではない。aws/scale.sh down で 0 にしてから測る" >&2; exit 1; }
+for s in $RUN_STACKS; do
+  [ "$(running_of "$s")" = false ] || { echo "$s の Running が false でない。aws/scale.sh down で 0 にしてから測る" >&2; exit 1; }
+done
+# shellcheck disable=SC2086
+check_ready $RUN_STACKS
+verify_counts false "$CLUSTER"
+DB_CLUSTER=$(out gekko13-db DbClusterId)
+ACU=$(aws cloudwatch get-metric-statistics --region "$REGION" --namespace AWS/RDS --metric-name ServerlessDatabaseCapacity \
+  --dimensions "Name=DBClusterIdentifier,Value=$DB_CLUSTER" --start-time "$(date -u -d '-5 min' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 60 --statistics Maximum --query 'sort_by(Datapoints,&Timestamp)[-1].Maximum' --output text)
+[ "$ACU" = 0.0 ] || { echo "Aurora が 0 ACU ではない（$ACU）。一時停止するまで待ってから測る" >&2; exit 1; }
 RUN=local/run/d1a3/$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$RUN"
 
@@ -66,6 +80,7 @@ while :; do
   # 主の流れは、Keycloak と auth が応えてから回す。通らなければ、次の周でもう一度回す
   if [ -n "${AT[CloudFront を通して Keycloak が応えた]:-}" ] && [ -n "$AUTH_STARTED" ] && [ -z "${AT[主の流れが通った]:-}" ]; then
     FLOWS=$((FLOWS + 1))
+    FLOW_START=$(( $(now) - T0 ))
     if timeout 240 node scripts/ui-flow.ts "https://$DOMAIN" > "$RUN/flow-$FLOWS.log" 2>&1; then
       mark "主の流れが通った"
     else
@@ -85,6 +100,9 @@ FLOW=${AT["主の流れが通った"]}
 END=$KC
 [ "$AUTH_STARTED" -gt "$END" ] && END=$AUTH_STARTED
 [ "$FLOW" -gt "$END" ] && END=$FLOW
+# 内訳（ログの時刻）。終点には入れない
+SERVER_AT=$(log_time spire-server/spire-server "Starting Server APIs")
+AGENT_AT=$(log_time spire-agent/spire-agent "Node attestation was successful")
 {
   echo "# D1-a3 の測定 $(basename "$RUN")"
   echo
@@ -92,9 +110,12 @@ END=$KC
   echo "|---|---|"
   for k in "${!AT[@]}"; do echo "| $k | ${AT[$k]} |"; done | sort -t'|' -k3 -n
   echo "| auth の起動（ログの時刻） | $AUTH_STARTED |"
+  echo "| server が受け始めた（内訳、ログの時刻） | ${SERVER_AT:-なし} |"
+  echo "| 最初の agent の attestation（内訳、ログの時刻） | ${AGENT_AT:-なし} |"
+  echo "| 通った流れの始まり（内訳） | $FLOW_START |"
   echo "| **終点（使えるまで）** | **$END** |"
   echo
-  echo "主の流れを回した回数: $FLOWS。台の数: $(hosts)"
+  echo "主の流れを回した回数: $FLOWS（1 回目で通ったか: $([ "$FLOWS" = 1 ] && echo はい || echo いいえ)）。台の数: $(hosts)"
   echo "判定（${LIMIT} 秒以内か）: $([ "$END" -le "$LIMIT" ] && echo 以内 || echo 超えた)"
 } | tee "$RUN/result.md"
 echo "結果: $RUN/result.md（local/down.sh で消えるので、残すものは先に写す）"

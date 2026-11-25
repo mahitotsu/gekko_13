@@ -88,17 +88,19 @@ GEKKO13_AZS=2 GEKKO13_MAX_HOSTS=2 aws/deploy.sh
 | 7 | entry | 入口のリバースプロキシ |
 | 8 | edge | ディストリビューション |
 
-db は、初めて作るときに 10 分ほどかかる。作った直後は、キャパシティプロバイダーがインスタンスを起動する。spire-server、auth、keycloak は 2 タスクずつ、主の流れのサービスは 1 タスクずつ動く。2 タスクのサービスは 2 つの AZ に散らすので、インスタンスは 2 台以上になる。サービスを新しく足したときは、送ったあとに、そのサービスを呼ぶ側のタスクを入れ替える（[findings 5-23](findings.md#5-23-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。
+db は、初めて作るときに 10 分ほどかかる。初めて作った直後は、タスクもインスタンスも 0 のままである。`aws/scale.sh up` で起こすと、どのサービスも 2 タスクで動く。2 つの AZ に散らすので、インスタンスは 2 台以上になる。サービスを新しく足したときは、送ったあとに、そのサービスを呼ぶ側のタスクを入れ替える（[findings 5-23](findings.md#5-23-aws-でも主の流れの-27-段が-cloudfront-を通して通った同時に作った-service-connect-のサービスどうしはタスクを入れ替えるまで互いの名前を引けなかった)）。
 
-`aws/deploy.sh` は、初めて回すときに、秘密を作って SSM の SecureString に置く。Aurora の管理者とサービスごとのパスワード、auth の署名鍵、SPIRE のルート CA の鍵と証明書である。どれも、すでにあれば作り直さない。SPIRE のルート CA は、鍵と証明書の片方だけがあると止まる（作り直すと、トラストアンカーが替わるため）。ディストリビューションを初めて作ったときは、keycloak が 0 タスクのままになる（ディストリビューションのドメイン名から、自分の URL を作るため）。そのときは、もう一度 `aws/deploy.sh` を回す。
+`aws/deploy.sh` は、初めて回すときに、秘密を作って SSM の SecureString に置く。Aurora の管理者とサービスごとのパスワード、auth の署名鍵、SPIRE のルート CA の鍵と証明書である。どれも、すでにあれば作り直さない。SPIRE のルート CA は、鍵と証明書の片方だけがあると止まる（作り直すと、トラストアンカーが替わるため）。ディストリビューションを初めて作ったときは、keycloak が 0 タスクのままになる（ディストリビューションのドメイン名から、自分の URL を作るため）。そのときは、もう一度 `aws/deploy.sh` を回してから、`aws/scale.sh up` で起こす。
 
 メモリを測るときは、`GEKKO13_CONTAINER_INSIGHTS=enabled` を足す。測り終えたら、付けずに回し直して止める。
 
 ## インスタンスを起動する・0 にする
 ```sh
-aws/scale.sh up      # 全部のサービスを 2 にして、安定するまで待つ（タスクのオートスケーリングがあれば、幅を 2〜4 に戻す）
-aws/scale.sh down    # DAEMON 以外の全サービスを 0 にし、ASG の希望台数も 0 にして、インスタンスが 0 になるまで待つ
+aws/scale.sh up      # Running を true にし、全部のサービスが 2 になって安定するまで待つ（オートスケーリングがあれば、幅を 2〜4 に戻す）
+aws/scale.sh down    # Running を false にし、タスクが 0 になったら ASG の希望台数も 0 にして、インスタンスが 0 になるまで待つ
 ```
+
+タスク数は、3 つのスタックのパラメーター `Running` だけで決まる（[判断 61](design-decisions.md)）。`update-service` で直接変えない。スタックが更新中なら、`scale.sh` は何も変えずに止まる。急いで止めるときは、`GEKKO13_CANCEL=1 aws/scale.sh down` で更新を取り消してから 0 にする。`aws/deploy.sh` は `Running` を変えず、0 台のときは 0 台のまま送る。3 つのスタックの値がそろわないか、実際のタスク数と合わなければ、止まる。そのときは `aws/scale.sh` でそろえる。
 
 期待する結果: `up` は数分で `安定した（台 N 台）` と出る。主の流れのサービスを足してからは、起動の途中で 6 台まで増え、安定すると 3 台ほどになった（2026-11-22）。`down` は約 3 分で `台が 0 になった` と出る。SPIRE の登録と、Keycloak と auth のデータは Aurora に残り、ルート CA も変わらないので、`up` のあとも作り直しは要らない。Aurora が止まっていれば、SPIRE server のタスクの db-init が、再開するまで待つ（約 15 秒）。
 
@@ -125,7 +127,7 @@ DEMO_PASSWORD=$(aws ssm get-parameter --region ap-northeast-1 --name /gekko13/lo
 
 主の流れと監査の画面は、手元と同じ `scripts/ui-flow.ts` に入口を渡して確かめる（固定の利用者のパスワードの渡し方は上と同じ）。
 
-レルムの JSON（`services/keycloak/realm/insurer.json`）を直したときは、`aws/reset-keycloak.sh --yes` で Aurora の Keycloak のデータベースを作り直し、取り込み直させる。利用者が登録したパスキーとセッションは消え、戻せない。回す前に持ち主の承認を得る。作り直したあとは、auth のタスクを入れ替える（`aws ecs update-service --service auth --force-new-deployment`）。auth は、作り直す前の Keycloak の管理のトークンを持ち続け、連絡先とパスキーの一覧の呼び出しが 401 になる。
+レルムの JSON（`services/keycloak/realm/insurer.json`）を直したときは、`aws/reset-keycloak.sh --yes` で Aurora の Keycloak のデータベースを作り直し、取り込み直させる。作り直す間は、auth も一緒に止まる（apps のスタックの `Running` を false にするため）。利用者が登録したパスキーとセッションは消え、戻せない。回す前に持ち主の承認を得る。auth は止まって起き直すので、作り直す前の Keycloak の管理のトークンは残らない。
 
 ディストリビューションのドメイン名（`dXXXX.cloudfront.net`）は、パスキーの RP ID になるので変えない。スタックは消してもディストリビューションが残る作り（`DeletionPolicy: Retain`）にしてある。
 
