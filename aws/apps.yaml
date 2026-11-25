@@ -83,6 +83,11 @@ Parameters:
     Description: >-
       Create target tracking scaling (2 to 4 tasks) for Keycloak and auth. Off by default: every service runs a fixed two tasks.
       Turn it on for load tests; it adds two CloudWatch alarms per service
+  EnableTracing:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Load the OpenTelemetry instrumentation and send spans to the collector on the same instance (172.17.0.1:4318)
   Running:
     Type: String
     Default: "false"
@@ -93,6 +98,7 @@ Parameters:
 
 Conditions:
   Run: !Equals [!Ref Running, "true"]
+  Tracing: !Equals [!Ref EnableTracing, "true"]
   # 入口のドメイン名（RpId）がまだなければ、Keycloak は起こさない
   RunKeycloak: !And [!Condition Run, !Condition HasRpId]
   HasRpId: !Not [!Equals [!Ref RpId, ""]]
@@ -178,6 +184,11 @@ Resources:
             Retries: 3
             StartPeriod: 120
           Environment:
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "auth" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_BSP_SCHEDULE_DELAY, Value: "2000" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: ISSUER, Value: https://auth:8443 }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
@@ -188,7 +199,7 @@ Resources:
             - { Name: LOGIN_ISSUER, Value: !Sub "https://${RpId}/login/realms/insurer" }
             - { Name: LOGIN_URL, Value: !Sub "https://${RpId}/login" }
             - { Name: JWT_SVID_FILE, Value: /svid/jwt_svid.token }
-            - { Name: JAVA_TOOL_OPTIONS, Value: -Djava.net.preferIPv6Addresses=true }
+            - { Name: JAVA_TOOL_OPTIONS, Value: !If [Tracing, "-Djava.net.preferIPv6Addresses=true -javaagent:/app/otel.jar", "-Djava.net.preferIPv6Addresses=true"] }
           Secrets:
             - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbAuthPasswordParameter}" }
             - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }

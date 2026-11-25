@@ -19,6 +19,8 @@ from typing import Any
 from cryptography import x509
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from insurer_mcp import tracing
+
 #: 相手のアドレス（host, port）ごとの、相手の証明書（DER）
 PEER_CERTS: dict[tuple[str, int], bytes] = {}
 
@@ -158,7 +160,12 @@ async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: 
     for i in range(1, attempts + 1):
         t0 = _time.monotonic()
         try:
-            return await _mtls_once(ctx, method, url, expected_id, headers, body, timeout, handshake_timeout)
+            sent = dict(headers or {})
+            with tracing.client_span(method, url, sent) as span:
+                status, raw = await _mtls_once(ctx, method, url, expected_id, sent, body, timeout, handshake_timeout)
+                if span is not None:
+                    span.set_attribute("http.response.status_code", status)
+                return status, raw
         except Refused:
             raise
         except (HandshakeTimeout, ConnectionError, ssl.SSLError, asyncio.IncompleteReadError) as e:

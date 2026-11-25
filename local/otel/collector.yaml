@@ -1,0 +1,18 @@
+# 手元の collector（段 T）。受け口と、URL のクエリを含む属性を消す処理は、AWS（aws/ecs.yaml）とそろえる。出し先だけが違い、標準出力に書く。
+receivers:
+  otlp: { protocols: { http: { endpoint: 0.0.0.0:4318 } } }
+processors:
+  memory_limiter: { check_interval: 1s, limit_mib: 100, spike_limit_mib: 20 }
+  attributes/strip:
+    actions:
+      - { key: url.query, action: delete }
+      - { key: url.full, action: delete }
+      - { key: http.url, action: delete }
+      - { key: http.target, action: delete }
+  batch: { timeout: 2s }
+exporters:
+  debug: { verbosity: detailed, sampling_initial: 100000 }
+service:
+  telemetry: { metrics: { level: none } }
+  pipelines:
+    traces: { receivers: [otlp], processors: [memory_limiter, attributes/strip, batch], exporters: [debug] }

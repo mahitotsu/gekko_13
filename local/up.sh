@@ -7,10 +7,11 @@
 #   /login はログインサーバー、/audit は監査サービス、それ以外は顧客のアプリ。Chromium は *.localhost をループバックに解決する。
 # 手順: PostgreSQL → SPIRE の server → バンドルと join token → 登録 → agent → サービス → 入口。
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
-#   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry）
+#   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry、otel）
 #   主の流れの 5 つのサービスは、AWS と同じく 2 つずつ立てる。GEKKO13_LOCAL_REPLICAS で数を変える（段 D の D1-a3）。
 #   手元の確かめだけで使う切り方: GEKKO13_FAULT_CUT_STREAM=1（営業 AI エージェントが、回の途中でつなぎを切る）、
 #   GEKKO13_FAULT_DROP_SUBMIT_REPLY=1（事務サービスが、最初の提出の返事を捨てる）。
+#   GEKKO13_TRACING=1 で、collector（標準出力に書く）を立て、各サービスの計装を入れる（段 T）。
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$(pwd)
@@ -125,7 +126,7 @@ start_keycloak() {
 # 認可サーバー。メモリを 512 MB に絞って動かす（段 C の C-3 の見当にする）
 start_auth() {
   # shellcheck disable=SC2046
-  run --name gekko13-auth --network-alias auth --memory 512m $(app_labels auth) \
+  run --name gekko13-auth --network-alias auth --memory 512m $(app_labels auth) $(trace auth java) \
     -e SVID_DIR=/svid -e ISSUER=https://auth:8443 -e "TRUST_DOMAIN=$TD" \
     -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_URL=http://keycloak:8080/login -e JWT_SVID_FILE=/svid/jwt_svid.token \
     -e DB_URL=jdbc:postgresql://postgres:5432/auth -e DB_USER=auth -e "DB_PASSWORD=$DB_AUTH" \
@@ -136,7 +137,7 @@ start_auth() {
 # 顧客のアプリ（画面の配信元と BFF）。8080 は入口から、9443 は保険会社のシステムからの直送（mTLS）
 start_customer_app() {
   # shellcheck disable=SC2046
-  run --name "gekko13-customer-app$R" --network-alias customer-app $(app_labels customer-app) \
+  run --name "gekko13-customer-app$R" --network-alias customer-app $(app_labels customer-app) $(trace customer-app node) \
     -e SERVICE=customer-app -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
     -e "ISSUER=$ISSUER" -e "APP_ORIGIN=$ORIGIN" -e "RP_ID=$RP_ID" -e LOGIN_ORIGIN=http://keycloak:8080 \
     -e AUTH_ORIGIN=https://auth:8443 -e AGENT_ORIGIN=https://sales-agent:8443 \
@@ -148,7 +149,7 @@ start_customer_app() {
 # 営業 AI エージェント（台本）。受け口は SVID の mTLS（8443）で、顧客のアプリの BFF だけが呼ぶ
 start_sales_agent() {
   # shellcheck disable=SC2046
-  run --name "gekko13-sales-agent$R" --network-alias sales-agent $(app_labels sales-agent) \
+  run --name "gekko13-sales-agent$R" --network-alias sales-agent $(app_labels sales-agent) $(trace sales-agent node) \
     -e SERVICE=sales-agent -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_ORIGIN=http://keycloak:8080 \
     -e "GEKKO13_FAULT_CUT_STREAM=${GEKKO13_FAULT_CUT_STREAM:-}" \
@@ -160,7 +161,7 @@ start_sales_agent() {
 # 事務サービス（Python）。受け口は SVID の mTLS（9443）で、営業 AI エージェントだけが呼ぶ。svid-helper と同じホストの利用者で読む
 start_insurer_mcp() {
   # shellcheck disable=SC2046
-  run --name "gekko13-insurer-mcp$R" --network-alias insurer-mcp --user "$(id -u):$(id -g)" $(app_labels insurer-mcp) \
+  run --name "gekko13-insurer-mcp$R" --network-alias insurer-mcp --user "$(id -u):$(id -g)" $(app_labels insurer-mcp) $(trace insurer-mcp) \
     -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -e "GEKKO13_FAULT_DROP_SUBMIT_REPLY=${GEKKO13_FAULT_DROP_SUBMIT_REPLY:-}" \
     -v "$HERE/run/svid/insurer-mcp:/svid:ro" \
@@ -170,7 +171,7 @@ start_insurer_mcp() {
 # 保険会社のシステム（Java）。受け口は SVID の mTLS（9443）。直送は、顧客のアプリの 9443 へ送る
 start_insurer_backend() {
   # shellcheck disable=SC2046
-  run --name "gekko13-insurer-backend$R" --network-alias insurer-backend --memory 512m $(app_labels insurer-backend) \
+  run --name "gekko13-insurer-backend$R" --network-alias insurer-backend --memory 512m $(app_labels insurer-backend) $(trace insurer-backend java) \
     -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" -e "RP_ID=$RP_ID" -e "WEBAUTHN_ORIGINS=$ORIGIN" \
     -e CUSTOMER_APP_URL=https://customer-app:9443 \
     -e DB_URL=jdbc:postgresql://postgres:5432/backend -e DB_USER=backend -e "DB_PASSWORD=$DB_BACKEND" \
@@ -183,7 +184,7 @@ start_insurer_backend() {
 # （書いた者は、ECS と同じ名前のラベルで決める）。docker のソケットを渡すのは手元だけで、AWS では渡さない
 start_insurer_audit() {
   # shellcheck disable=SC2046
-  run --name "gekko13-insurer-audit$R" --network-alias insurer-audit $(app_labels insurer-audit) \
+  run --name "gekko13-insurer-audit$R" --network-alias insurer-audit $(app_labels insurer-audit) $(trace insurer-audit) \
     --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
     -e SVID_DIR=/svid -e JWT_SVID_FILE=/svid/jwt_svid.token -e "TRUST_DOMAIN=$TD" \
     -e "ISSUER=$ISSUER" -e "PUBLIC_ORIGIN=$ORIGIN/audit" -e LOGIN_ORIGIN=http://keycloak:8080 \
@@ -202,6 +203,22 @@ start_entry() {
     node:24-alpine node /app/src/main.ts
 }
 
+# トレース（段 T）。AWS と同じく、入れたときだけ環境変数を渡す。collector は、ADOT をダイジェストで固定する
+OTEL_IMAGE=public.ecr.aws/aws-observability/aws-otel-collector@sha256:955e240b27d7fd3c7995fd937db4b963975948eb553f656d8c37a564e5b5e07d
+start_otel() {
+  run --name gekko13-otel --network-alias otel --memory 128m -v "$HERE/otel/collector.yaml:/etc/otel/collector.yaml:ro" \
+    "$OTEL_IMAGE" --config /etc/otel/collector.yaml
+}
+# trace <サービス> <node か java か その他>: コンテナに渡す環境変数
+trace() {
+  [ "${GEKKO13_TRACING:-}" = 1 ] || return 0
+  printf "%s " -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel:4318 -e "OTEL_SERVICE_NAME=$1" -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none
+  case ${2:-} in
+    node) printf "%s " -e NODE_OPTIONS=--import=/app/packages/tracing/src/register.ts ;;
+    java) printf "%s " -e JAVA_TOOL_OPTIONS=-javaagent:/app/otel.jar -e OTEL_BSP_SCHEDULE_DELAY=2000 ;;
+  esac
+}
+
 # サービスを指定されたら、そのサービスだけを入れ替える
 if [ $# -gt 0 ]; then
   for s in "$@"; do
@@ -212,7 +229,7 @@ if [ $# -gt 0 ]; then
       insurer-mcp) build_mcp ;;
       insurer-backend) build_backend ;;
       insurer-audit) build_audit ;;
-      entry) ;;
+      entry | otel) ;;
       *) echo "知らないサービス: $s" >&2; exit 1 ;;
     esac
     docker rm -f "gekko13-$s" >/dev/null 2>&1 || true
@@ -264,6 +281,7 @@ run --name gekko13-spire-agent --pid host \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   "ghcr.io/spiffe/spire-agent:$SPIRE" -config /etc/spire/agent.conf -joinToken "$JOIN_TOKEN"
 
+[ "${GEKKO13_TRACING:-}" != 1 ] || start_otel
 start_keycloak
 helper auth jwt
 start_auth

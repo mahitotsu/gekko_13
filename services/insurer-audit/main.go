@@ -32,6 +32,9 @@ const internalTimeout = 15 * time.Second
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("svc", "insurer-audit"))
 	ctx := context.Background()
+	if err := setupTracing(ctx); err != nil {
+		slog.Error("トレースを始められない（続ける）", "error", err)
+	}
 	td := spiffeid.RequireTrustDomainFromString(env("TRUST_DOMAIN", "gekko13.internal"))
 	svids, err := NewFileSVID(env("SVID_DIR", "/svid"), td)
 	if err != nil {
@@ -66,7 +69,7 @@ func main() {
 	}
 	addr := ":" + env("APP_PORT", "8080")
 	slog.Info("listening", "addr", addr, "records", env("RECORDS", "cloudwatch"))
-	server := &http.Server{Addr: addr, Handler: Handler("/audit", auth, records.Snapshot), ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: addr, Handler: traceHandler(Handler("/audit", auth, records.Snapshot)), ReadHeaderTimeout: 10 * time.Second}
 	if err := server.ListenAndServe(); err != nil {
 		slog.Error("止まった", "error", err)
 		os.Exit(1)

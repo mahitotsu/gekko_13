@@ -63,6 +63,14 @@ Parameters:
   SvidTtlSeconds:
     Type: Number
     Default: 300
+  EnableTracing:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Run the OpenTelemetry collector (one per instance). Set the same value in the apps and flow stacks
+  OtelCollectorImage:
+    Type: String
+    Description: URI and tag of the AWS Distro for OpenTelemetry collector copy in ECR
   DbInitImage:
     Type: String
     Description: URI and tag of the gekko13/db-init image in ECR (services/db-init)
@@ -148,6 +156,7 @@ Parameters:
 
 Conditions:
   Run: !Equals [!Ref Running, "true"]
+  Tracing: !Equals [!Ref EnableTracing, "true"]
 
 
 Resources:
@@ -665,6 +674,86 @@ Resources:
       Cluster: !Ref Cluster
       ServiceName: spire-agent
       TaskDefinition: !Ref SpireAgentTask
+      LaunchType: EC2
+      SchedulingStrategy: DAEMON
+
+  # トレースの collector（段 T）。EnableTracing=true のときだけ、インスタンスごとに 1 つ動かす。
+  # host のネットワークではタスクロールを使えない（UserData の ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=false）ので、bridge で、ホストの 4318 に出す。
+  # アプリは、docker0 の既定のアドレス（172.17.0.1）へ送る。URL のクエリを含む属性は、ここで消す（認可コードが載るため。手元の設定は local/otel/collector.yaml）
+  # 同じホストのコンテナと、同じセキュリティグループのホストからは届く。トレースは監査の証拠にしない
+  OtelCollectorTaskRole:
+    Type: AWS::IAM::Role
+    Condition: Tracing
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: put-spans
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: xray:PutTraceSegments, Resource: "*" }
+  OtelCollectorTask:
+    Type: AWS::ECS::TaskDefinition
+    Condition: Tracing
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: One collector per instance receives OTLP from the apps and sends spans to the X-Ray OTLP endpoint over IPv6
+        must: Keep the attribute processor that drops URL query strings (authorization codes)
+    Properties:
+      Family: !Sub "${Prefix}-otel-collector"
+      RequiresCompatibilities: [EC2]
+      NetworkMode: bridge
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt OtelCollectorTaskRole.Arn
+      ContainerDefinitions:
+        - Name: collector
+          Image: !Ref OtelCollectorImage
+          Essential: true
+          MemoryReservation: 64
+          Memory: 128
+          PortMappings: [{ ContainerPort: 4318, HostPort: 4318, Protocol: tcp }]
+          Environment:
+            - Name: AOT_CONFIG_CONTENT
+              Value: !Sub |
+                receivers:
+                  otlp: { protocols: { http: { endpoint: "0.0.0.0:4318" } } }
+                processors:
+                  memory_limiter: { check_interval: 1s, limit_mib: 100, spike_limit_mib: 20 }
+                  attributes/strip:
+                    actions:
+                      - { key: url.query, action: delete }
+                      - { key: url.full, action: delete }
+                      - { key: http.url, action: delete }
+                      - { key: http.target, action: delete }
+                  batch: { timeout: 2s }
+                exporters:
+                  otlphttp/xray:
+                    compression: gzip
+                    traces_endpoint: "https://xray.${AWS::Region}.api.aws/v1/traces"
+                    auth: { authenticator: sigv4auth }
+                extensions:
+                  sigv4auth: { region: "${AWS::Region}", service: xray }
+                service:
+                  extensions: [sigv4auth]
+                  pipelines:
+                    traces: { receivers: [otlp], processors: [memory_limiter, attributes/strip, batch], exporters: [otlphttp/xray] }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: otel-collector, mode: non-blocking }
+  OtelCollectorService:
+    Type: AWS::ECS::Service
+    Condition: Tracing
+    DependsOn: CapacityProviderAssociation
+    Properties:
+      Cluster: !Ref Cluster
+      ServiceName: otel-collector
+      TaskDefinition: !Ref OtelCollectorTask
       LaunchType: EC2
       SchedulingStrategy: DAEMON
 

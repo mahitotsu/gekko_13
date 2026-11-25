@@ -92,7 +92,7 @@ func (s *FileSVID) GetX509BundleForTrustDomain(td spiffeid.TrustDomain) (*x509bu
 func (s *FileSVID) Client(expected spiffeid.ID, timeout time.Duration) *http.Client {
 	cfg := tlsconfig.MTLSClientConfig(s, s, tlsconfig.AuthorizeID(expected))
 	cfg.MinVersion = tls.VersionTLS13
-	return &http.Client{Timeout: timeout, Transport: retryGet{&http.Transport{TLSClientConfig: cfg, DisableKeepAlives: true}}}
+	return &http.Client{Timeout: timeout, Transport: retryGet{traceTransport(&http.Transport{TLSClientConfig: cfg, DisableKeepAlives: true})}}
 }
 
 // retryGet は、本文のない GET を、応答が届く前に失敗したら、最大 6 回まで、間を 0.3 秒ずつ延ばして送り直す（段 D の D1-a3。止まったタスクへのつなぎを、

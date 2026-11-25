@@ -7,6 +7,7 @@
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
 #   GEKKO13_AUTOSCALING=true で、Keycloak と auth のタスクのオートスケーリング（2〜4）を作る。既定は作らず、どのサービスも 2 タスク
 #   （段 D の D1-a3。判断 56。性能を確かめるときに使う。アラームの固定費がかかる）。
+#   GEKKO13_TRACING=true で、トレース（collector と計装）を入れる。既定は入れない（段 T）。
 # 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（Keycloak と auth）→ flow（主の流れのサービス）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -25,6 +26,11 @@ CONTAINER_INSIGHTS=${GEKKO13_CONTAINER_INSIGHTS:-disabled}
 . aws/lib.sh
 SPIRE=1.15.3
 HELPER=0.11.0
+# トレースの collector（ADOT）。タグは版で、中身はダイジェストで固定する
+OTEL=v0.51.0
+OTEL_SOURCE=public.ecr.aws/aws-observability/aws-otel-collector@sha256:955e240b27d7fd3c7995fd937db4b963975948eb553f656d8c37a564e5b5e07d
+TRACING=${GEKKO13_TRACING:-false}
+case $TRACING in true | false) ;; *) echo "GEKKO13_TRACING は true か false: $TRACING" >&2; exit 2 ;; esac
 # イメージのタグは、イメージごとの材料の、コミットした中身から作る（scripts/image-tag.sh）。材料が同じなら作り直さず、
 # タスクも入れ替わらない。材料にコミットしていない変更があれば、ここで止まる。どのコミットから作ったかは、ラベルに残す
 REVISION=$(git rev-parse HEAD)
@@ -71,6 +77,7 @@ copy() { docker buildx imagetools inspect "$2" >/dev/null 2>&1 || docker buildx 
 copy "ghcr.io/spiffe/spire-server:$SPIRE" "$(out "$PREFIX-registry" SpireServerRepositoryUri):$SPIRE"
 copy "ghcr.io/spiffe/spire-agent:$SPIRE" "$(out "$PREFIX-registry" SpireAgentRepositoryUri):$SPIRE"
 copy "ghcr.io/spiffe/spiffe-helper:$HELPER" "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri):$HELPER"
+copy "$OTEL_SOURCE" "$(out "$PREFIX-registry" OtelCollectorRepositoryUri):$OTEL"
 
 # アプリのイメージは arm64 で作る。Dockerfile に RUN がないので、エミュレーションは要らない。
 # spire-server の CLI を写すので、SPIRE の版を揃える
@@ -216,6 +223,8 @@ cfn --stack-name "$PREFIX-ecs" --template-file "$(strip ecs)" --capabilities CAP
   "MaxInstances=$MAX_HOSTS" \
   "InstanceTypes=$INSTANCE_TYPES" \
   "ContainerInsights=$CONTAINER_INSIGHTS" \
+  "EnableTracing=$TRACING" \
+  "OtelCollectorImage=$(dualstack "$(out "$PREFIX-registry" OtelCollectorRepositoryUri)"):$OTEL" \
   "Running=$RUNNING" \
   "AppImage=$(dualstack "$APP_REPO"):$APP_TAG" \
   "SpireServerImage=$(dualstack "$(out "$PREFIX-registry" SpireServerRepositoryUri)"):$SPIRE" \
@@ -239,6 +248,7 @@ cfn --stack-name "$PREFIX-apps" --template-file "$(strip apps)" --parameter-over
   "HostSecurityGroupId=$(out "$PREFIX-network" HostSecurityGroupId)" \
   "DbHost=$DB_HOST" \
   "EnableAutoScaling=${GEKKO13_AUTOSCALING:-false}" \
+  "EnableTracing=$TRACING" \
   "Running=$RUNNING" \
   "RpId=$(rp_id)"
 
@@ -255,6 +265,7 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "SpiffeHelperImage=$(dualstack "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri)"):$HELPER" \
     "McpImage=$(dualstack "$MCP_REPO"):$MCP_TAG" \
     "BackendImage=$(dualstack "$BACKEND_REPO"):$BACKEND_TAG" \
+    "EnableTracing=$TRACING" \
     "AuditImage=$(dualstack "$AUDIT_REPO"):$AUDIT_TAG" \
     "Running=$RUNNING" \
     "DbHost=$DB_HOST" \

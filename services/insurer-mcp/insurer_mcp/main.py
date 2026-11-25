@@ -16,7 +16,7 @@ from typing import Any
 import jwt
 import uvicorn
 
-from insurer_mcp import app
+from insurer_mcp import app, tracing
 from insurer_mcp.guard import Guard, Peer, Refusal, keys_from_jwks
 from insurer_mcp.tls import (
     PEER_CERTS,
@@ -109,6 +109,7 @@ def guard_middleware(inner: Any, guard: Guard, keys: Keys) -> Any:
 
 
 def main() -> None:
+    tracing.setup()
     svids = SvidSource(os.environ.get("SVID_DIR", "/svid"))
     svids.wait()
     server_ctx = svids.server_context()
@@ -119,7 +120,7 @@ def main() -> None:
     guard = Guard(service="insurer-mcp", issuer=os.environ.get("ISSUER", app.AUTH),
                   allowed_callers=[app.spiffe("sales-agent")], key_for=lambda kid: keys.keys.get(kid))
     port = int(os.environ.get("APP_PORT", "9443"))
-    config = uvicorn.Config(guard_middleware(app.create_app(), guard, keys), host="0.0.0.0", port=port,
+    config = uvicorn.Config(tracing.middleware(guard_middleware(app.create_app(), guard, keys)), host="0.0.0.0", port=port,
                             http=PeerCertProtocol, lifespan="on", log_level="warning")
     config.load()
     # uvicorn は SSLContext をファイルから作るので、SVID から作ったもの（入れ替えで読み直す）に差し替える

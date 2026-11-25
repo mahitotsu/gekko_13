@@ -76,6 +76,11 @@ Parameters:
     Type: String
     Default: /gekko13/sales-agent/state-key
     Description: SSM SecureString with the AES-256 key that seals the sales agent conversations in Aurora (64 hex characters)
+  EnableTracing:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Load the OpenTelemetry instrumentation and send spans to the collector on the same instance (172.17.0.1:4318)
   Running:
     Type: String
     Default: "false"
@@ -86,6 +91,7 @@ Parameters:
 
 Conditions:
   Run: !Equals [!Ref Running, "true"]
+  Tracing: !Equals [!Ref EnableTracing, "true"]
 
 Resources:
   # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
@@ -164,6 +170,11 @@ Resources:
             StartPeriod: 60
           Environment:
             - { Name: SERVICE, Value: customer-app }
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "customer-app" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: NODE_OPTIONS, Value: "--import=/app/packages/tracing/src/register.ts" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: JWT_SVID_FILE, Value: /svid/jwt_svid.token }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
@@ -253,6 +264,11 @@ Resources:
             StartPeriod: 30
           Environment:
             - { Name: SERVICE, Value: sales-agent }
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "sales-agent" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: NODE_OPTIONS, Value: "--import=/app/packages/tracing/src/register.ts" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
             - { Name: LOGIN_ISSUER, Value: !Sub "https://${RpId}/login/realms/insurer" }
@@ -312,6 +328,10 @@ Resources:
             Retries: 3
             StartPeriod: 30
           Environment:
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "insurer-mcp" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
           MountPoints:
@@ -364,6 +384,12 @@ Resources:
             Retries: 3
             StartPeriod: 90
           Environment:
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "insurer-backend" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_BSP_SCHEDULE_DELAY, Value: "2000" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: JAVA_TOOL_OPTIONS, Value: "-javaagent:/app/otel.jar" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
             - { Name: RP_ID, Value: !Ref RpId }
@@ -532,6 +558,10 @@ Resources:
           PortMappings: [{ ContainerPort: 8080, HostPort: 0, Protocol: tcp }]
           # 土台にシェルがないので、ヘルスチェックは置かない（ECS は、コンテナが動いていれば正常とみなす）
           Environment:
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "insurer-audit" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: JWT_SVID_FILE, Value: /svid/jwt_svid.token }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
