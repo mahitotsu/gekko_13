@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func tracingOn() bool { return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" }
@@ -52,6 +53,11 @@ func traceTransport(next http.RoundTripper) http.RoundTripper {
 		return next
 	}
 	return otelhttp.NewTransport(next)
+}
+
+// startSpan は、処理の中のスパンを始める。トレースしないときは何もしないスパンになる。
+func startSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	return otel.Tracer("insurer-audit").Start(ctx, name)
 }
 
 // pgxTracer は、PostgreSQL の問い合わせをスパンにする（値は入れない）。トレースしないときは nil。

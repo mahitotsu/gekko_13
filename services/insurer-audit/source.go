@@ -47,7 +47,7 @@ func parseAudit(line string) map[string]any {
 // Records は、監査の記録（Logs か docker）と、保険会社のシステムの自己申告を合わせた出どころ。
 // logs は、文字列を含むログの行のうち、監査の記録だけを返す。
 type Records struct {
-	logs       func(needle string) ([]Entry, error)
+	logs       func(ctx context.Context, needle string) ([]Entry, error)
 	selfURL    string
 	selfClient *http.Client
 }
@@ -55,9 +55,11 @@ type Records struct {
 // Snapshot は、1 つの要求の間だけ使う出どころを返す。監査の記録は、最初に 1 回だけまとめて読み、その中で探す。
 // CloudWatch Logs を探すたびに呼ぶと、一覧の画面（契約ごとに何度も探す）が、入口のリバースプロキシの待ちの上限を超えた
 // （gekko_11 の Loki は速かったので、探すたびに読んでいた）。
-func (r Records) Snapshot() Source { return &snapshot{records: r} }
+// ctx は、受けた要求の文脈。トレースをつなぎ、要求が切れたら読むのもやめる。
+func (r Records) Snapshot(ctx context.Context) Source { return &snapshot{ctx: ctx, records: r} }
 
 type snapshot struct {
+	ctx     context.Context
 	records Records
 	loaded  bool
 	entries []Entry
@@ -70,7 +72,9 @@ func (s *snapshot) load() error {
 	if s.loaded {
 		return nil
 	}
-	found, err := s.records.logs(`"audit"`)
+	ctx, span := startSpan(s.ctx, "監査の記録を読む")
+	found, err := s.records.logs(ctx, `"audit"`)
+	span.End()
 	if err != nil {
 		return err
 	}
@@ -111,7 +115,7 @@ func (s *snapshot) Contracts() ([]Entry, error) {
 
 func (s *snapshot) SelfReported() ([]map[string]any, error) {
 	if !s.selfOK {
-		self, err := s.records.SelfReported()
+		self, err := s.records.SelfReported(s.ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -120,8 +124,12 @@ func (s *snapshot) SelfReported() ([]map[string]any, error) {
 	return s.self, nil
 }
 
-func (r Records) SelfReported() ([]map[string]any, error) {
-	res, err := r.selfClient.Get(r.selfURL)
+func (r Records) SelfReported(ctx context.Context) ([]map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.selfURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := r.selfClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("保険会社のシステムの自己申告を読めない: %w", err)
 	}
@@ -139,13 +147,13 @@ func (r Records) SelfReported() ([]map[string]any, error) {
 }
 
 // CloudWatchLogs は、ロググループを文字列で探す。
-func CloudWatchLogs(ctx context.Context, group string) (func(string) ([]Entry, error), error) {
+func CloudWatchLogs(ctx context.Context, group string) (func(context.Context, string) ([]Entry, error), error) {
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithUseDualStackEndpoint(aws.DualStackEndpointStateEnabled))
 	if err != nil {
 		return nil, err
 	}
 	client := cloudwatchlogs.NewFromConfig(cfg)
-	return func(needle string) ([]Entry, error) {
+	return func(ctx context.Context, needle string) ([]Entry, error) {
 		var out []Entry
 		pattern := needle
 		p := cloudwatchlogs.NewFilterLogEventsPaginator(client, &cloudwatchlogs.FilterLogEventsInput{
@@ -176,14 +184,18 @@ func CloudWatchLogs(ctx context.Context, group string) (func(string) ([]Entry, e
 }
 
 // DockerLogs は、手元の docker のソケットから、ラベル gekko13=1 のコンテナのログを読む。
-func DockerLogs(socket string) func(string) ([]Entry, error) {
+func DockerLogs(socket string) func(context.Context, string) ([]Entry, error) {
 	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 		},
 	}}
-	get := func(path string) ([]byte, error) {
-		res, err := client.Get("http://docker" + path)
+	get := func(ctx context.Context, path string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		res, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -193,8 +205,8 @@ func DockerLogs(socket string) func(string) ([]Entry, error) {
 		}
 		return io.ReadAll(res.Body)
 	}
-	return func(needle string) ([]Entry, error) {
-		raw, err := get("/containers/json?filters=" + url.QueryEscape(`{"label":["gekko13=1"]}`))
+	return func(ctx context.Context, needle string) ([]Entry, error) {
+		raw, err := get(ctx, "/containers/json?filters="+url.QueryEscape(`{"label":["gekko13=1"]}`))
 		if err != nil {
 			return nil, err
 		}
@@ -212,7 +224,7 @@ func DockerLogs(socket string) func(string) ([]Entry, error) {
 			if family == "" || container == "" {
 				continue
 			}
-			logs, err := get(fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=0&timestamps=1&since=%d", c.ID, time.Now().Add(-retention).Unix()))
+			logs, err := get(ctx, fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=0&timestamps=1&since=%d", c.ID, time.Now().Add(-retention).Unix()))
 			if err != nil {
 				return nil, err
 			}

@@ -40,7 +40,7 @@ func get(h http.Handler, path string, cookies ...*http.Cookie) *httptest.Respons
 }
 
 func TestNotLoggedInGoesToTheLoginServerWithPkce(t *testing.T) {
-	h := Handler("/audit", testAuth(), func() Source { return regular(fixed60, Route, act) })
+	h := Handler("/audit", testAuth(), func(context.Context) Source { return regular(fixed60, Route, act) })
 	w := get(h, "/audit/")
 	if w.Code != http.StatusFound {
 		t.Fatalf("status = %d", w.Code)
@@ -61,7 +61,7 @@ func TestNotLoggedInGoesToTheLoginServerWithPkce(t *testing.T) {
 
 func TestOnlyAuditorsSeeTheRecords(t *testing.T) {
 	a := testAuth()
-	h := Handler("/audit", a, func() Source { return regular(fixed60, Route, act) })
+	h := Handler("/audit", a, func(context.Context) Source { return regular(fixed60, Route, act) })
 	if w := get(h, "/audit/", withSession(a, "hanako", false)); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `data-testid="forbidden"`) {
 		t.Fatalf("顧客が監査の画面を見られた: %d", w.Code)
 	}
@@ -76,7 +76,7 @@ func TestOnlyAuditorsSeeTheRecords(t *testing.T) {
 
 func TestContractPageStartsWithWhatWasCompared(t *testing.T) {
 	a := testAuth()
-	h := Handler("/audit", a, func() Source { return regular(fixed60, Route, act) })
+	h := Handler("/audit", a, func(context.Context) Source { return regular(fixed60, Route, act) })
 	w := get(h, "/audit/contracts/"+nonce, withSession(a, "kansa", true))
 	body := w.Body.String()
 	if w.Code != http.StatusOK || !strings.Contains(body, `data-testid="status"`) || !strings.Contains(body, "第三者の記録との比較") {
@@ -92,7 +92,7 @@ func TestContractPageStartsWithWhatWasCompared(t *testing.T) {
 
 func TestSignOutAlsoEndsTheLoginAtTheLoginServer(t *testing.T) {
 	a := testAuth()
-	h := Handler("/audit", a, func() Source { return regular(fixed60, Route, act) })
+	h := Handler("/audit", a, func(context.Context) Source { return regular(fixed60, Route, act) })
 	c := withSession(a, "kansa", true)
 	req := httptest.NewRequest(http.MethodPost, "/audit/logout", nil)
 	req.AddCookie(c)
@@ -109,7 +109,7 @@ func TestSignOutAlsoEndsTheLoginAtTheLoginServer(t *testing.T) {
 }
 
 func TestStylesAreServedWithoutLogin(t *testing.T) {
-	h := Handler("/audit", testAuth(), func() Source { return regular(fixed60, Route, act) })
+	h := Handler("/audit", testAuth(), func(context.Context) Source { return regular(fixed60, Route, act) })
 	if w := get(h, "/audit/assets/audit.css"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "--primary") {
 		t.Fatalf("%d", w.Code)
 	}
@@ -134,7 +134,7 @@ func TestStreamNameDecidesTheWriter(t *testing.T) {
 
 func TestAuditWithoutSlashGoesToTheAuditTop(t *testing.T) {
 	// /audit を開くと、/audit/ へ送る（顧客のアプリの / へ送らない）
-	h := Handler("/audit", testAuth(), func() Source { return regular(fixed60, Route, act) })
+	h := Handler("/audit", testAuth(), func(context.Context) Source { return regular(fixed60, Route, act) })
 	if w := get(h, "/audit"); w.Code != http.StatusFound || w.Header().Get("location") != "/audit/" {
 		t.Fatalf("%d %s", w.Code, w.Header().Get("location"))
 	}
@@ -144,8 +144,8 @@ func TestSnapshotReadsTheLogsOnce(t *testing.T) {
 	// 一覧の画面は、契約ごとに何度も探す。記録の読み出しは、要求ごとに 1 回にする
 	m := regular(fixed60, Route, act)
 	calls := 0
-	records := Records{logs: func(string) ([]Entry, error) { calls++; return m.entries, nil }}
-	s := records.Snapshot().(*snapshot)
+	records := Records{logs: func(context.Context, string) ([]Entry, error) { calls++; return m.entries, nil }}
+	s := records.Snapshot(context.Background()).(*snapshot)
 	s.self, s.selfOK = m.self, true
 	list, err := Reconciler{Source: s}.List(listLimit)
 	if err != nil || len(list) != 1 || list[0].Status != "食い違いなし" || calls != 1 {
