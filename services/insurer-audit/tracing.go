@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/exaring/otelpgx"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -50,4 +52,17 @@ func traceTransport(next http.RoundTripper) http.RoundTripper {
 		return next
 	}
 	return otelhttp.NewTransport(next)
+}
+
+// pgxTracer は、PostgreSQL の問い合わせをスパンにする（値は入れない）。トレースしないときは nil。
+func pgxTracer() pgx.QueryTracer {
+	if !tracingOn() {
+		return nil
+	}
+	return otelpgx.NewTracer()
+}
+
+// loginClient は、ログインサーバーを呼ぶ HTTP の呼び手。
+func loginClient() *http.Client {
+	return &http.Client{Transport: traceTransport(http.DefaultTransport)}
 }

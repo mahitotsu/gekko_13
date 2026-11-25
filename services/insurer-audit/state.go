@@ -121,6 +121,9 @@ func newPgState(ctx context.Context, url, user, password, caPEM string) (*pgStat
 	} else {
 		cfg.ConnConfig.TLSConfig = nil
 	}
+	if t := pgxTracer(); t != nil {
+		cfg.ConnConfig.Tracer = t
+	}
 	db, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err

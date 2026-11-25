@@ -390,6 +390,8 @@ Resources:
             - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_BSP_SCHEDULE_DELAY, Value: "2000" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: JAVA_TOOL_OPTIONS, Value: "-javaagent:/app/otel.jar" }, !Ref AWS::NoValue]
+            # 5 秒ごとの送り直しの処理は、トレースしない（Redeliverer）
+            - !If [Tracing, { Name: OTEL_INSTRUMENTATION_SPRING_SCHEDULING_ENABLED, Value: "false" }, !Ref AWS::NoValue]
             - { Name: SVID_DIR, Value: /svid }
             - { Name: TRUST_DOMAIN, Value: gekko13.internal }
             - { Name: RP_ID, Value: !Ref RpId }

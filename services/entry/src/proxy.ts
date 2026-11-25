@@ -6,6 +6,8 @@
 import { promises as dns } from "node:dns";
 import { Agent, request, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
 
+import type { Span, Tracer } from "./trace.ts";
+
 export type Route = { prefix: string; service: string };
 export type Target = { host: string; port: number };
 export interface Resolver {
@@ -124,10 +126,12 @@ export type ProxyOptions = {
    * 閲覧者が送った同じ名前のヘッダーは、あってもなくても捨てる（偽れないようにする）
    */
   publicOrigin?: string;
+  /** トレース（段 T）。なければ、スパンを作らない */
+  tracer?: Tracer;
 };
 
-/** 閲覧者から受け取らない、転送のヘッダー。リバースプロキシが自分で付ける */
-const FORWARDED = ["x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "forwarded"];
+/** 閲覧者から受け取らないヘッダー。転送のヘッダーと、トレースの文脈は、リバースプロキシが自分で付ける */
+const FORWARDED = ["traceparent", "tracestate", "baggage", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port", "forwarded"];
 
 /** 公開の origin を、転送のヘッダーにする。 */
 export function publicForwardHeaders(headers: IncomingHttpHeaders, publicOrigin: string | undefined): IncomingHttpHeaders {
@@ -149,10 +153,11 @@ export function createProxy(o: ProxyOptions) {
   const agent = new Agent({ keepAlive: true, timeout: o.timeoutMs });
   const connectTimeoutMs = o.connectTimeoutMs ?? 2_000;
 
-  function attempt(t: Target, req: IncomingMessage, body: Buffer): Promise<Attempt> {
+  function attempt(t: Target, req: IncomingMessage, body: Buffer, span: Span | undefined): Promise<Attempt> {
     return new Promise((resolve) => {
       let connected = false;
       const headers = publicForwardHeaders(forwardHeaders(req.headers), o.publicOrigin);
+      if (span) headers.traceparent = span.traceparent;
       if (body.length > 0 || "content-length" in req.headers) headers["content-length"] = String(body.length);
       const up = request({ host: t.host, port: t.port, method: req.method, path: req.url, headers, agent });
       up.on("socket", (s) => {
@@ -201,6 +206,9 @@ export function createProxy(o: ProxyOptions) {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     const service = routeFor(o.routes, path);
     if (!service) return reply(res, 404, "not found");
+    const root = o.tracer?.start(`${req.method} ${service}`, { "http.request.method": req.method ?? "", "url.path": path });
+    // 送り先のスパンが終わってから、根を終える（根が終わると、まとめて送る）
+    if (root) res.on("close", () => setImmediate(() => root.end({ "http.response.status_code": res.statusCode }, res.statusCode >= 500 || !res.writableFinished)));
     const body = await readAll(req);
     if (!body) return reply(res, 413, "request body too large");
 
@@ -217,8 +225,10 @@ export function createProxy(o: ProxyOptions) {
     }
 
     for (const [i, t] of targets.slice(0, o.maxAttempts).entries()) {
-      const r = await attempt(t, req, body);
+      const span = root?.child(`${req.method} ${service}`, { "http.request.method": req.method ?? "", "server.address": t.host, "server.port": t.port, "url.path": path });
+      const r = await attempt(t, req, body, span);
       if (r.kind === "response") {
+        if (span) res.on("close", () => span.end({ "http.response.status_code": r.res.statusCode ?? 0 }, (r.res.statusCode ?? 0) >= 500));
         res.writeHead(r.res.statusCode ?? 502, forwardHeaders(r.res.headers));
         r.res.pipe(res);
         r.res.on("error", () => res.destroy());
@@ -228,6 +238,7 @@ export function createProxy(o: ProxyOptions) {
         o.log({ ev: "proxied", service, method: req.method, path, status: r.res.statusCode, attempt: i + 1, ms: Date.now() - started });
         return;
       }
+      span?.end({ "error.type": r.error.message }, true);
       o.log({ ev: "upstream-failed", service, target: `${t.host}:${t.port}`, kind: r.kind, error: r.error.message });
       o.resolver.failed(service);
       if (r.kind === "fatal") return reply(res, 502, "bad gateway");

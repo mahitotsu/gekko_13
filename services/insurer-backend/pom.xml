@@ -45,6 +45,11 @@
       <artifactId>webauthn4j-core</artifactId>
       <version>0.31.11.RELEASE</version>
     </dependency>
+    <!-- トレース（段 T）。エージェントがなければ何もしない。版は Spring Boot が決める -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-api</artifactId>
+    </dependency>
     <!-- nonce、契約、送り出しを、共有の PostgreSQL（AWS では Aurora）に置く。ID とパスワードでつなぐ（段 D の D1-a3） -->
     <dependency>
       <groupId>org.springframework.boot</groupId>

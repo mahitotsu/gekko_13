@@ -197,8 +197,8 @@ start_insurer_audit() {
 # 入口のリバースプロキシ（AWS では Lambda の Web Functions）。同じコードを、送り先を固定して動かす
 start_entry() {
   run --name gekko13-entry \
-    -e AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000 -e ROUTES=/login=keycloak,/audit=insurer-audit,/=customer-app -e "PUBLIC_ORIGIN=$ORIGIN" \
-    -e STATIC_TARGETS=keycloak=keycloak:8080,insurer-audit=insurer-audit:8080,customer-app=customer-app:8080 \
+    $([ "${GEKKO13_TRACING:-}" = 1 ] && printf "%s " -e TRACE_SERVICE=otel-collector) -e AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:3000 -e ROUTES=/login=keycloak,/audit=insurer-audit,/=customer-app -e "PUBLIC_ORIGIN=$ORIGIN" \
+    -e STATIC_TARGETS=keycloak=keycloak:8080,insurer-audit=insurer-audit:8080,customer-app=customer-app:8080,otel-collector=otel:4318 \
     -v "$HERE/../services/entry/src:/app/src:ro" -p 127.0.0.1:18000:3000 \
     node:24-alpine node /app/src/main.ts
 }
@@ -215,7 +215,7 @@ trace() {
   printf "%s " -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel:4318 -e "OTEL_SERVICE_NAME=$1" -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none
   case ${2:-} in
     node) printf "%s " -e NODE_OPTIONS=--import=/app/packages/tracing/src/register.ts ;;
-    java) printf "%s " -e JAVA_TOOL_OPTIONS=-javaagent:/app/otel.jar -e OTEL_BSP_SCHEDULE_DELAY=2000 ;;
+    java) printf "%s " -e JAVA_TOOL_OPTIONS=-javaagent:/app/otel.jar -e OTEL_BSP_SCHEDULE_DELAY=2000 -e OTEL_INSTRUMENTATION_SPRING_SCHEDULING_ENABLED=false ;;
   esac
 }
 

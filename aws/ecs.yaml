@@ -717,12 +717,14 @@ Resources:
           Essential: true
           MemoryReservation: 64
           Memory: 128
-          PortMappings: [{ ContainerPort: 4318, HostPort: 4318, Protocol: tcp }]
+          # 4318 はアプリから。4319 は入口のリバースプロキシ（Lambda）から。入口は、動的なホストのポートを SRV で見つける（network の許可の範囲に収まる）
+          PortMappings: [{ ContainerPort: 4318, HostPort: 4318, Protocol: tcp }, { ContainerPort: 4319, HostPort: 0, Protocol: tcp }]
           Environment:
             - Name: AOT_CONFIG_CONTENT
               Value: !Sub |
                 receivers:
                   otlp: { protocols: { http: { endpoint: "0.0.0.0:4318" } } }
+                  otlp/entry: { protocols: { http: { endpoint: "0.0.0.0:4319" } } }
                 processors:
                   memory_limiter: { check_interval: 1s, limit_mib: 100, spike_limit_mib: 20 }
                   attributes/strip:
@@ -742,10 +744,23 @@ Resources:
                 service:
                   extensions: [sigv4auth]
                   pipelines:
-                    traces: { receivers: [otlp], processors: [memory_limiter, attributes/strip, batch], exporters: [otlphttp/xray] }
+                    traces: { receivers: [otlp, otlp/entry], processors: [memory_limiter, attributes/strip, batch], exporters: [otlphttp/xray] }
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: otel-collector, mode: non-blocking }
+  OtelCollectorDiscovery:
+    Type: AWS::ServiceDiscovery::Service
+    Condition: Tracing
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: SRV records resolved by the entry relay to send its spans (container port 4319, dynamic host port). TTL 10 seconds
+    Properties:
+      Name: otel-collector
+      NamespaceId: !Ref Namespace
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{ Type: SRV, TTL: 10 }]
+      HealthCheckCustomConfig: { FailureThreshold: 1 }
   OtelCollectorService:
     Type: AWS::ECS::Service
     Condition: Tracing
@@ -756,6 +771,7 @@ Resources:
       TaskDefinition: !Ref OtelCollectorTask
       LaunchType: EC2
       SchedulingStrategy: DAEMON
+      ServiceRegistries: [{ RegistryArn: !GetAtt OtelCollectorDiscovery.Arn, ContainerName: collector, ContainerPort: 4319 }]
 
 
 Outputs:

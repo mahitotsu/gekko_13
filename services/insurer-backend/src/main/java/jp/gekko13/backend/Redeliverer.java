@@ -1,5 +1,11 @@
 package jp.gekko13.backend;
 
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanContext;
+import io.opentelemetry.api.trace.TraceFlags;
+import io.opentelemetry.api.trace.TraceState;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -20,6 +26,11 @@ class NoticeKick {
 @Profile("!test")
 class Redeliverer {
 
+	/** 取らない（sampled でない）トレースの文脈。5 秒ごとの処理がトレースを埋めないように、この下のスパンを作らせない（段 T）。 */
+	private static final Context UNSAMPLED = Context.root()
+		.with(Span.wrap(SpanContext.createFromRemoteParent("00000000000000000000000000000001", "0000000000000001", TraceFlags.getDefault(),
+				TraceState.getDefault())));
+
 	private final Notifier notifier;
 
 	Redeliverer(Notifier notifier) {
@@ -28,7 +39,9 @@ class Redeliverer {
 
 	@Scheduled(initialDelay = 5_000, fixedDelay = 5_000)
 	void run() {
-		this.notifier.redeliverDue();
+		try (Scope ignored = UNSAMPLED.makeCurrent()) {
+			this.notifier.redeliverDue();
+		}
 	}
 
 }

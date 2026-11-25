@@ -3,9 +3,11 @@
 // - NAMESPACE: 送り先の SRV を引く名前空間。例 "svc.gekko13.internal"
 // - PUBLIC_ORIGIN: 入口の公開の origin。送り先に X-Forwarded-* で渡す。例 "https://dXXXX.cloudfront.net"
 // - UPSTREAM_TIMEOUT_MS: 送り先が黙っている間を待つ上限（既定 25 秒）。CONNECT_TIMEOUT_MS: 送り先につなぐのを待つ上限（既定 2 秒）
+// - TRACE_SERVICE: トレースの collector のサービスの名前。あれば、スパンを送る（段 T）。例 "otel-collector"
 // - STATIC_TARGETS: ローカルの確かめ用。あれば SRV を引かずに、この送り先へ送る。例 "keycloak=127.0.0.1:8180,customer-app=127.0.0.1:8080"
 import { createServer } from "node:http";
 import { createProxy, parseRoutes, srvResolver, staticResolver } from "./proxy.ts";
+import { collectorSender, createTracer } from "./trace.ts";
 
 const log = (o: object) => console.log(JSON.stringify({ at: new Date().toISOString(), svc: "entry", ...o }));
 
@@ -28,6 +30,7 @@ const handle = createProxy({
   maxAttempts: 3,
   log,
   publicOrigin: process.env.PUBLIC_ORIGIN || undefined,
+  ...(process.env.TRACE_SERVICE ? { tracer: createTracer(collectorSender(process.env.TRACE_SERVICE, resolver)) } : {}),
 });
 
 createServer((req, res) => {

@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.21
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.92.2
 	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/exaring/otelpgx v0.13.0
 	github.com/gowebpki/jcs v1.0.1
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/spiffe/go-spiffe/v2 v2.9.0

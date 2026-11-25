@@ -42,10 +42,18 @@ Parameters:
     Description: >-
       Public origin of the entry distribution (https://<distribution domain>). The relay passes it to targets as X-Forwarded-Proto, Host and Port
       and drops those headers from viewers. Keycloak uses them to rebuild its request URL (DPoP htu). Empty until the distribution exists
+  EnableTracing:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Send spans of the relay to the collector found through the SRV records of otel-collector (ecs stack)
   Routes:
     Type: String
     Default: /login=keycloak,/audit=insurer-audit,/=customer-app
     Description: Path prefix to service routing of the relay. Longest prefix wins
+
+Conditions:
+  Tracing: !Equals [!Ref EnableTracing, "true"]
 
 Resources:
   # Web Functions は、2 つのロググループに書く（.local はエンドポイントが動くリージョンごと）。gekko_10 の作りに合わせた
@@ -160,6 +168,7 @@ Resources:
           ROUTES: !Ref Routes
           PUBLIC_ORIGIN: !Ref PublicOrigin
           NAMESPACE: !Ref NamespaceName
+          TRACE_SERVICE: !If [Tracing, otel-collector, !Ref AWS::NoValue]
           SRV_CACHE_MS: "10000"
           UPSTREAM_TIMEOUT_MS: "25000"
 

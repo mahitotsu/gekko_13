@@ -283,6 +283,7 @@ cfn --stack-name "$PREFIX-entry" --template-file aws/entry.yaml --capabilities C
   "CodeKey=$ENTRY_KEY" \
   "CodeVersion=$ENTRY_VERSION" \
   "NamespaceName=$(out "$PREFIX-ecs" NamespaceName)" \
+  "EnableTracing=$TRACING" \
   "Routes=/login=keycloak,/audit=insurer-audit,/=customer-app" \
   "PublicOrigin=$( [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ] && echo "https://$(rp_id)" )"
 

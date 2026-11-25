@@ -71,7 +71,7 @@ type Auth struct {
 func NewAuth(ctx context.Context, cfg AuthConfig, store stateStore) *Auth {
 	path := mustURL(cfg.Issuer).Path
 	internal := strings.TrimRight(cfg.LoginOrigin, "/") + path
-	keys := oidc.NewRemoteKeySet(ctx, internal+"/protocol/openid-connect/certs")
+	keys := oidc.NewRemoteKeySet(oidc.ClientContext(ctx, loginClient()), internal+"/protocol/openid-connect/certs")
 	return &Auth{
 		cfg: cfg,
 		oauth: oauth2.Config{
@@ -157,7 +157,7 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("JWT-SVID を読めない: %w", err)
 	}
-	token, err := a.oauth.Exchange(r.Context(), r.URL.Query().Get("code"), oauth2.VerifierOption(p.Verifier),
+	token, err := a.oauth.Exchange(oidc.ClientContext(r.Context(), loginClient()), r.URL.Query().Get("code"), oauth2.VerifierOption(p.Verifier),
 		oauth2.SetAuthURLParam("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"),
 		oauth2.SetAuthURLParam("client_assertion", strings.TrimSpace(string(assertion))))
 	if err != nil {
