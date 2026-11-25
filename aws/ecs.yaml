@@ -620,37 +620,10 @@ Resources:
         - { Name: sockets, Host: { SourcePath: /var/run/gekko13/spire-sockets } }
         - { Name: docker, Host: { SourcePath: /var/run/docker.sock } }
       ContainerDefinitions:
-        # server が受け始めるまで待つ。agent に待たせると、再試行の間隔が延び、server が受け始めてから最大 30 秒ほど遅れる（判断 62）
-        - Name: wait-server
-          Image: !Ref AppImage
-          Essential: false
-          MemoryReservation: 8
-          StartTimeout: 900
-          Command:
-            - node
-            - -e
-            - |
-              const net = require("node:net");
-              const [host, port] = [process.env.SPIRE_SERVER_HOST, Number(process.env.SPIRE_SERVER_PORT)];
-              const attempt = () => {
-                const s = net.connect({ host, port });
-                const retry = () => { s.destroy(); setTimeout(attempt, 1000); };
-                s.setTimeout(2000, retry);
-                s.once("error", retry);
-                s.once("connect", () => { console.log("spire-server is accepting connections"); process.exit(0); });
-              };
-              attempt();
-          Environment:
-            - { Name: SPIRE_SERVER_HOST, Value: !Sub "spire-server.svc.${Prefix}.internal" }
-            - { Name: SPIRE_SERVER_PORT, Value: "8081" }
-          LogConfiguration:
-            LogDriver: awslogs
-            Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: spire-agent, mode: non-blocking }
         - Name: spire-agent
           Image: !Ref SpireAgentImage
           Essential: true
           MemoryReservation: 64
-          DependsOn: [{ ContainerName: wait-server, Condition: SUCCESS }]
           Command: ["-config", "/etc/gekko13/spire/agent.conf"]
           MountPoints:
             - { SourceVolume: config, ContainerPath: /etc/gekko13/spire, ReadOnly: true }
