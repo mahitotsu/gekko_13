@@ -85,7 +85,7 @@ Parameters:
       Turn it on for load tests; it adds two CloudWatch alarms per service
   EnableTracing:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
     Description: Load the OpenTelemetry instrumentation and send spans to the collector on the same instance (172.17.0.1:4318)
   Running:

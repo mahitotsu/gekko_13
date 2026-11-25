@@ -1,0 +1,12 @@
+# Dockerfile（Node のイメージ）の文脈。要るものだけを渡す。材料は aws/deploy.sh の APP_TAG とそろえる
+*
+!package.json
+!package-lock.json
+!packages
+!services/customer-app
+!services/sales-agent
+!scripts/spire-registrar.sh
+!scripts/helper-conf.sh
+**/test
+**/node_modules
+services/customer-app/dist

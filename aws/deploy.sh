@@ -7,7 +7,7 @@
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
 #   GEKKO13_AUTOSCALING=true で、Keycloak と auth のタスクのオートスケーリング（2〜4）を作る。既定は作らず、どのサービスも 2 タスク
 #   （段 D の D1-a3。判断 56。性能を確かめるときに使う。アラームの固定費がかかる）。
-#   GEKKO13_TRACING=true で、トレース（collector と計装）を入れる。既定は入れない（段 T）。
+#   GEKKO13_TRACING=false で、トレース（collector と計装）を外す。既定は入れる（判断 63）。
 # 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（Keycloak と auth）→ flow（主の流れのサービス）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
 set -euo pipefail
@@ -26,22 +26,22 @@ CONTAINER_INSIGHTS=${GEKKO13_CONTAINER_INSIGHTS:-disabled}
 . aws/lib.sh
 SPIRE=1.15.3
 HELPER=0.11.0
-# トレースの collector（ADOT）。タグは版で、中身はダイジェストで固定する
+# トレースの collector（ADOT）。タグは版で、中身はダイジェストで固定する。
+# public.ecr.aws の匿名の取得は毎秒 1 回までで、429 で断られた。IAM で認証してから写す（findings 5-38）
 OTEL=v0.51.0
 OTEL_SOURCE=public.ecr.aws/aws-observability/aws-otel-collector@sha256:955e240b27d7fd3c7995fd937db4b963975948eb553f656d8c37a564e5b5e07d
-TRACING=${GEKKO13_TRACING:-false}
+TRACING=${GEKKO13_TRACING:-true}
 case $TRACING in true | false) ;; *) echo "GEKKO13_TRACING は true か false: $TRACING" >&2; exit 2 ;; esac
 # イメージのタグは、イメージごとの材料の、コミットした中身から作る（scripts/image-tag.sh）。材料が同じなら作り直さず、
 # タスクも入れ替わらない。材料にコミットしていない変更があれば、ここで止まる。どのコミットから作ったかは、ラベルに残す
 REVISION=$(git rev-parse HEAD)
-APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile package.json package-lock.json packages services \
-  scripts/spire-registrar.sh scripts/helper-conf.sh scripts/stage-image.sh \
-  ':!services/auth' ':!services/keycloak' ':!services/entry' ':!services/db-init' ':!services/insurer-mcp' ':!services/insurer-backend' ':!**/test/**')
+APP_TAG=$(scripts/image-tag.sh "SPIRE=$SPIRE" Dockerfile .dockerignore package.json package-lock.json packages services/customer-app services/sales-agent \
+  scripts/spire-registrar.sh scripts/helper-conf.sh ':!**/test/**')
 AUTH_TAG=$(scripts/image-tag.sh "" services/auth)
 KEYCLOAK_TAG=$(scripts/image-tag.sh "" services/keycloak)
 DB_INIT_TAG=$(scripts/image-tag.sh "" services/db-init)
 # 事務サービス（Python）と保険会社のシステム（Java。試験は共通の例も読む）。段 D の D1-a2-2
-MCP_TAG=$(scripts/image-tag.sh "" services/insurer-mcp scripts/stage-python.sh ':!services/insurer-mcp/tests/**')
+MCP_TAG=$(scripts/image-tag.sh "" services/insurer-mcp ':!services/insurer-mcp/tests/**')
 BACKEND_TAG=$(scripts/image-tag.sh "" services/insurer-backend packages/token-guard/vectors)
 # 監査サービス（Go）。段 D の D1-a2-3
 AUDIT_TAG=$(scripts/image-tag.sh "" services/insurer-audit)
@@ -77,13 +77,15 @@ copy() { docker buildx imagetools inspect "$2" >/dev/null 2>&1 || docker buildx 
 copy "ghcr.io/spiffe/spire-server:$SPIRE" "$(out "$PREFIX-registry" SpireServerRepositoryUri):$SPIRE"
 copy "ghcr.io/spiffe/spire-agent:$SPIRE" "$(out "$PREFIX-registry" SpireAgentRepositoryUri):$SPIRE"
 copy "ghcr.io/spiffe/spiffe-helper:$HELPER" "$(out "$PREFIX-registry" SpiffeHelperRepositoryUri):$HELPER"
+if ! docker buildx imagetools inspect "$(out "$PREFIX-registry" OtelCollectorRepositoryUri):$OTEL" >/dev/null 2>&1; then
+  aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws >/dev/null
+fi
 copy "$OTEL_SOURCE" "$(out "$PREFIX-registry" OtelCollectorRepositoryUri):$OTEL"
 
-# アプリのイメージは arm64 で作る。Dockerfile に RUN がないので、エミュレーションは要らない。
+# アプリのイメージは arm64 で作る。RUN はビルドする側の CPU で動くので、エミュレーションは要らない。
 # spire-server の CLI を写すので、SPIRE の版を揃える
-CTX=$(scripts/stage-image.sh)
 docker buildx imagetools inspect "$APP_REPO:$APP_TAG" >/dev/null 2>&1 || \
-  docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" --label "$LABEL" -f Dockerfile -t "$APP_REPO:$APP_TAG" --push "$CTX"
+  docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" --label "$LABEL" -f Dockerfile -t "$APP_REPO:$APP_TAG" --push .
 
 # 認可サーバーとログインサーバー（Java）。どちらも、ビルドの段はビルドする側の CPU で動くので、エミュレーションは要らない
 AUTH_REPO=$(out "$PREFIX-registry" AuthRepositoryUri)
@@ -97,10 +99,10 @@ DB_INIT_REPO=$(out "$PREFIX-registry" DbInitRepositoryUri)
 docker buildx imagetools inspect "$DB_INIT_REPO:$DB_INIT_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --label "$LABEL" -t "$DB_INIT_REPO:$DB_INIT_TAG" --push services/db-init
 
-# 事務サービス（Python）は、arm64 の wheel だけを取り込んだ文脈から作る（RUN がないので、エミュレーションは要らない）
+# 事務サービス（Python）は、ビルドする側の CPU の段で、arm64 の wheel だけを取り込む（エミュレーションは要らない）
 MCP_REPO=$(out "$PREFIX-registry" InsurerMcpRepositoryUri)
 docker buildx imagetools inspect "$MCP_REPO:$MCP_TAG" >/dev/null 2>&1 || \
-  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$MCP_REPO:$MCP_TAG" --push "$(scripts/stage-python.sh arm64)"
+  docker buildx build --platform linux/arm64 --label "$LABEL" -t "$MCP_REPO:$MCP_TAG" --push services/insurer-mcp
 # 保険会社のシステム（Java）。ビルドの段はビルドする側の CPU で動く。試験の共通の例を、名前つきの文脈で渡す
 BACKEND_REPO=$(out "$PREFIX-registry" InsurerBackendRepositoryUri)
 docker buildx imagetools inspect "$BACKEND_REPO:$BACKEND_TAG" >/dev/null 2>&1 || \

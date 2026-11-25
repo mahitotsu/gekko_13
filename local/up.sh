@@ -65,10 +65,10 @@ fi
 # 固定の利用者（alice など）のパスワード。手元では、gekko_11 と同じ値にする
 DEMO_PASSWORD=demo
 
-build_node() { docker build -q -t "$IMAGE" -f ../Dockerfile "$(../scripts/stage-image.sh)" >/dev/null; }
+build_node() { docker buildx build -q --load -t "$IMAGE" .. >/dev/null; }
 build_auth() { docker buildx build -q --load -t "$AUTH_IMAGE" ../services/auth >/dev/null; }
 build_keycloak() { docker buildx build -q --load -t "$KEYCLOAK_IMAGE" ../services/keycloak >/dev/null; }
-build_mcp() { docker build -q -t "$MCP_IMAGE" "$(../scripts/stage-python.sh amd64)" >/dev/null; }
+build_mcp() { docker buildx build -q --load -t "$MCP_IMAGE" ../services/insurer-mcp >/dev/null; }
 build_audit() { docker buildx build -q --load -t "$AUDIT_IMAGE" ../services/insurer-audit >/dev/null; }
 build_backend() {
   docker buildx build -q --load --build-context vectors=../packages/token-guard/vectors -t "$BACKEND_IMAGE" ../services/insurer-backend >/dev/null

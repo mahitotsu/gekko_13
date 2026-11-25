@@ -78,7 +78,7 @@ Parameters:
     Description: SSM SecureString with the AES-256 key that seals the sales agent conversations in Aurora (64 hex characters)
   EnableTracing:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
     Description: Load the OpenTelemetry instrumentation and send spans to the collector on the same instance (172.17.0.1:4318)
   Running:
