@@ -679,7 +679,7 @@ Resources:
 
   # トレースの collector（段 T）。EnableTracing（既定 true）のとき、インスタンスごとに 1 つ動かす。
   # host のネットワークではタスクロールを使えない（UserData の ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=false）ので、bridge で、ホストの 4318 に出す。
-  # アプリは、docker0 の既定のアドレス（172.17.0.1）へ送る。URL のクエリを含む属性は、ここで消す（認可コードが載るため。手元の設定は local/otel/collector.yaml）
+  # アプリは、docker0 の既定のアドレス（172.17.0.1）へ送る。URL のクエリを含む属性は、ここで消す（認可コードが載るため。手元の設定は local/otel/collector.yaml）。https の既定のポートも消す（同じ相手が 2 つに分かれて見えるため）
   # 同じホストのコンテナと、同じセキュリティグループのホストからは届く。トレースは監査の証拠にしない
   OtelCollectorTaskRole:
     Type: AWS::IAM::Role
@@ -733,6 +733,9 @@ Resources:
                       - { key: url.full, action: delete }
                       - { key: http.url, action: delete }
                       - { key: http.target, action: delete }
+                  attributes/port:
+                    include: { match_type: strict, attributes: [{ key: server.port, value: 443 }] }
+                    actions: [{ key: server.port, action: delete }]
                   batch: { timeout: 2s }
                 exporters:
                   otlphttp/xray:
@@ -744,7 +747,7 @@ Resources:
                 service:
                   extensions: [sigv4auth]
                   pipelines:
-                    traces: { receivers: [otlp, otlp/entry], processors: [memory_limiter, attributes/strip, batch], exporters: [otlphttp/xray] }
+                    traces: { receivers: [otlp, otlp/entry], processors: [memory_limiter, attributes/strip, attributes/port, batch], exporters: [otlphttp/xray] }
           LogConfiguration:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroup, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: otel-collector, mode: non-blocking }

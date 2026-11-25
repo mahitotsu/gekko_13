@@ -39,6 +39,8 @@ describe("入口のトレース", () => {
     expect(sent[0]?.traceparent).toBe(`00-${root.traceId}-${client.spanId}-01`);
     expect(client.parentSpanId).toBe(root.spanId);
     expect(root.attrs["http.response.status_code"]).toBe(200);
+    expect(client.attrs["server.address"]).toBe("a");
+    expect(client.attrs["network.peer.address"]).toBe("127.0.0.1");
     expect(JSON.stringify(spans)).not.toContain("secret");
   });
   it("トレースしなくても、閲覧者の traceparent は捨てる", async () => {

@@ -225,7 +225,8 @@ export function createProxy(o: ProxyOptions) {
     }
 
     for (const [i, t] of targets.slice(0, o.maxAttempts).entries()) {
-      const span = root?.child(`${req.method} ${service}`, { "http.request.method": req.method ?? "", "server.address": t.host, "server.port": t.port, "url.path": path });
+      // 相手の名前はサービスにする（タスクごとの名前だと、トレースマップで 1 つのサービスが分かれる）。実際の宛先は別の属性に残す
+      const span = root?.child(`${req.method} ${service}`, { "http.request.method": req.method ?? "", "server.address": service, "network.peer.address": t.host, "network.peer.port": t.port, "url.path": path });
       const r = await attempt(t, req, body, span);
       if (r.kind === "response") {
         if (span) res.on("close", () => span.end({ "http.response.status_code": r.res.statusCode ?? 0 }, (r.res.statusCode ?? 0) >= 500));

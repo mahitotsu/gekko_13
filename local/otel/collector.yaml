@@ -9,10 +9,14 @@ processors:
       - { key: url.full, action: delete }
       - { key: http.url, action: delete }
       - { key: http.target, action: delete }
+  # https の既定のポートは消す。付ける計装と付けない計装があり、同じ相手が 2 つに分かれて見えるため
+  attributes/port:
+    include: { match_type: strict, attributes: [{ key: server.port, value: 443 }] }
+    actions: [{ key: server.port, action: delete }]
   batch: { timeout: 2s }
 exporters:
   debug: { verbosity: detailed, sampling_initial: 100000 }
 service:
   telemetry: { metrics: { level: none } }
   pipelines:
-    traces: { receivers: [otlp], processors: [memory_limiter, attributes/strip, batch], exporters: [debug] }
+    traces: { receivers: [otlp], processors: [memory_limiter, attributes/strip, attributes/port, batch], exporters: [debug] }
