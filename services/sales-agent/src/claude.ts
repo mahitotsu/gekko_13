@@ -172,8 +172,12 @@ function childEnv(configDir: string): Record<string, string> {
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
       OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
       OTEL_SERVICE_NAME: "sales-agent-claude",
-      // AWS でトレースが届かない原因を見るため、送信の診断を標準エラーに出す（確かめ終えたら外す）
-      OTEL_LOG_LEVEL: "debug",
+      // 1 回の番は数秒で終わるので、まとめて送る間隔を短くし、終わるときに送り切るのを長めに待つ（Claude Code の資料の環境変数）
+      OTEL_TRACES_EXPORT_INTERVAL: "1000",
+      CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS: "10000",
+      CLAUDE_CODE_OTEL_SHUTDOWN_TIMEOUT_MS: "10000",
+      // 送信の失敗を標準エラーに出す（既定では --debug のときしか出ない）。AWS で届かない原因を見るため（確かめ終えたら外す）
+      CLAUDE_CODE_OTEL_DIAG_STDERR: "1",
     });
   }
   return env;
@@ -241,9 +245,9 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
         cwd,
         env,
         sessionStore: store,
-        // Claude Code の標準エラーのうち、テレメトリーの送信に関わる行だけを残す（AWS でトレースが届かない原因を見るため。会話の本文は入らない）
+        // Claude Code の標準エラーを残す（AWS でトレースが届かない原因を見るため。確かめ終えたら外す）。1 行 300 文字で切る
         stderr: (data: string) => {
-          for (const line of data.split("\n")) if (/otel|otlp|telemetry|export|4318/i.test(line)) console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_stderr", line: line.slice(0, 300) }));
+          for (const line of data.split("\n")) if (line.trim()) console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_stderr", line: line.slice(0, 300) }));
         },
         ...(sessionId ? { resume: sessionId } : {}),
         hooks: { PreToolUse: [{ matcher: FRONTEND_TOOLS.map(full).join("|"), hooks: [hook] }] },

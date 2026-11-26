@@ -92,7 +92,7 @@ Parameters:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Load the OpenTelemetry instrumentation and send spans to the collector on the same instance (172.17.0.1:4318)
+    Description: Load the OpenTelemetry instrumentation and send spans to the collector on the same instance (otel-collector:4318, mapped to the docker0 address by extraHosts)
   Running:
     Type: String
     Default: "false"
@@ -181,9 +181,11 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 60
+          # トレースの送り先の名前（判断 63）。docker0 のアドレスは、基盤の UserData で決めている
+          ExtraHosts: !If [Tracing, [{ Hostname: otel-collector, IpAddress: 172.17.0.1 }], !Ref AWS::NoValue]
           Environment:
             - { Name: SERVICE, Value: customer-app }
-            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://otel-collector:4318" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "customer-app" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
@@ -276,10 +278,12 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 30
+          # トレースの送り先の名前（判断 63）。docker0 のアドレスは、基盤の UserData で決めている
+          ExtraHosts: !If [Tracing, [{ Hostname: otel-collector, IpAddress: 172.17.0.1 }], !Ref AWS::NoValue]
           Environment:
             - { Name: SERVICE, Value: sales-agent }
             - { Name: ENGINE, Value: !Ref SalesAgentEngine }
-            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://otel-collector:4318" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "sales-agent" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
@@ -343,8 +347,10 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 30
+          # トレースの送り先の名前（判断 63）。docker0 のアドレスは、基盤の UserData で決めている
+          ExtraHosts: !If [Tracing, [{ Hostname: otel-collector, IpAddress: 172.17.0.1 }], !Ref AWS::NoValue]
           Environment:
-            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://otel-collector:4318" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "insurer-mcp" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
@@ -399,8 +405,10 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 90
+          # トレースの送り先の名前（判断 63）。docker0 のアドレスは、基盤の UserData で決めている
+          ExtraHosts: !If [Tracing, [{ Hostname: otel-collector, IpAddress: 172.17.0.1 }], !Ref AWS::NoValue]
           Environment:
-            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://otel-collector:4318" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "insurer-backend" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
@@ -575,8 +583,10 @@ Resources:
           User: "1000:0"
           PortMappings: [{ ContainerPort: 8080, HostPort: 0, Protocol: tcp }]
           # 土台にシェルがないので、ヘルスチェックは置かない（ECS は、コンテナが動いていれば正常とみなす）
+          # トレースの送り先の名前（判断 63）。docker0 のアドレスは、基盤の UserData で決めている
+          ExtraHosts: !If [Tracing, [{ Hostname: otel-collector, IpAddress: 172.17.0.1 }], !Ref AWS::NoValue]
           Environment:
-            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
+            - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://otel-collector:4318" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "insurer-audit" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_LOGS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]

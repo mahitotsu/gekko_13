@@ -220,13 +220,13 @@ start_entry() {
 # トレース（段 T）。AWS と同じく、入れたときだけ環境変数を渡す。collector は、ADOT をダイジェストで固定する
 OTEL_IMAGE=public.ecr.aws/aws-observability/aws-otel-collector@sha256:955e240b27d7fd3c7995fd937db4b963975948eb553f656d8c37a564e5b5e07d
 start_otel() {
-  run --name gekko13-otel --network-alias otel --memory 128m -v "$HERE/otel/collector.yaml:/etc/otel/collector.yaml:ro" \
+  run --name gekko13-otel --network-alias otel --network-alias otel-collector --memory 128m -v "$HERE/otel/collector.yaml:/etc/otel/collector.yaml:ro" \
     "$OTEL_IMAGE" --config /etc/otel/collector.yaml
 }
 # trace <サービス> <node か java か その他>: コンテナに渡す環境変数
 trace() {
   [ "${GEKKO13_TRACING:-}" = 1 ] || return 0
-  printf "%s " -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel:4318 -e "OTEL_SERVICE_NAME=$1" -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none
+  printf "%s " -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 -e "OTEL_SERVICE_NAME=$1" -e OTEL_METRICS_EXPORTER=none -e OTEL_LOGS_EXPORTER=none
   case ${2:-} in
     node) printf "%s " -e NODE_OPTIONS=--import=/app/packages/tracing/src/register.ts ;;
     java) printf "%s " -e JAVA_TOOL_OPTIONS=-javaagent:/app/otel.jar -e OTEL_BSP_SCHEDULE_DELAY=2000 -e OTEL_INSTRUMENTATION_SPRING_SCHEDULING_ENABLED=false ;;
