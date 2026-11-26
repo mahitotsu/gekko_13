@@ -86,6 +86,7 @@
 | 5-40 | Agent SDK の defer で回を区切り、別のプロセスから、保存した会話だけで続けられた。同時に 2 つ呼ばれると、資料と違い、1 つ目の呼び出しが答えのないまま残った |
 | 5-41 | 営業 AI エージェントを本物の Claude（Haiku）に替えても、手元で主の流れが照合と監査まで通った。答えを待つ間にタスクを 1 つ止めても、続きが通った |
 | 5-42 | AWS でも、本物の Claude（Haiku）で主の流れが 5 回とも通った。答えを待つ間に営業 AI エージェントのタスクを止めても、止まってから続けると、もう片方のタスクで通った |
+| 5-43 | Service Connect を使う bridge のタスクに extraHosts を付けると、docker がコンテナを作れなかった |
 
 ## 1. 身元の配り方
 ### 1-1. docker の attestor は、ECS と同じ名前のラベルで、ファミリーごとに別の SPIFFE ID を配った
@@ -1116,6 +1117,19 @@ Keycloak の組み込みの部品で、ログインの画面で止める形に�
 - 「使えない」の動き: 手元で、空の文で再開すると、同じ回の中で、待っていた呼び出しが実行され、答えが道具の結果として届いた。記録には空の顧客の文が 1 つ入った。何も流さずに再開すると、終了コード 1 で終わった。資料にない動きである。
 - Claude Code のトレース: 環境変数の名前は渡っており、親の `traceparent` は「取る」の印（`-01`）だった。collector の受け口の直後の `debug` に、Claude Code のスパンはなかった。診断に使った `OTEL_LOG_LEVEL` は Claude Code の資料になく、効かなかった。
 - 営業 AI エージェントのメモリの使用率は、最大 53〜65 %（予約 384 MiB に対して）だった。
+
+</details>
+
+### 5-43. Service Connect を使う bridge のタスクに extraHosts を付けると、docker がコンテナを作れなかった
+**結論:** トレースの送り先を名前（`otel-collector`）にするため、6 つのタスク定義に `extraHosts` を足すと、Service Connect を使うタスクが起動できなくなった。docker は「conflicting options: custom host-to-IP mapping and the network mode」で断った。Service Connect のタスクは、コンテナが別のコンテナのネットワークに入る形で動くためと見ている（推定）。スタックの更新は終わらず、取り消して戻した。
+
+<details>
+<summary>根拠</summary>
+
+- 2026-11-26 15:59〜16:29 UTC、コミット `35b4a62`。止まったタスクの理由は `CannotCreateContainerError`。記録は `local/run/c2/stuck.txt`。
+- Keycloak（awsvpc）、SPIRE server（awsvpc）、collector（DAEMON）は動いた。どれも `extraHosts` を付けていないか、Service Connect を使っていない。
+- 取り消し（`GEKKO13_CANCEL=1 aws/scale.sh down`）で、apps と flow のスタックは `UPDATE_ROLLBACK_COMPLETE` になった。`aws/scale.sh` は、この状態を待つ段で失敗とみなして止まった。タスクが 0 であることを確かめてから、ASG の希望台数を手で 0 にした。
+- この回は、Claude Code のトレースを確かめる前に止まった。
 
 </details>
 
