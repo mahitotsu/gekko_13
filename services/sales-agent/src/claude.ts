@@ -9,6 +9,7 @@
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { context, propagation } from "@opentelemetry/api";
 import { createSdkMcpServer, query, tool, type HookCallback, type SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { callMcp } from "./mcp.ts";
@@ -171,6 +172,8 @@ function childEnv(configDir: string): Record<string, string> {
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
       OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
       OTEL_SERVICE_NAME: "sales-agent-claude",
+      // AWS でトレースが届かない原因を見るため、送信の診断を標準エラーに出す（確かめ終えたら外す）
+      OTEL_LOG_LEVEL: "debug",
     });
   }
   return env;
@@ -213,8 +216,17 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
   const cwd = mkdtempSync(join(tmpdir(), "claude-cwd-"));
   let failed: string | undefined;
   let sessionId = state.sessionId;
+  // AWS でトレースが届かない原因を見るため、渡す環境変数の名前（値は出さない）と、親の traceparent を残す（確かめ終えたら外す）
+  const carrier: Record<string, string> = {};
+  propagation.inject(context.active(), carrier);
+  const env = childEnv(configDir);
+  const started = Date.now();
+  console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_spawn", env: Object.keys(env).sort(), traceparent: carrier.traceparent ?? null }));
   try {
     for await (const m of run({
+      // 答えを渡す回は、空の文で再開する。再開した直後は、プロセスの中の MCP サーバーがまだつながっておらず、Claude Code は待っている呼び出しを
+      // いったん「使えない」（tool_deferred_unavailable）とし、同じ回の中で、つながったあとに呼び出しを実行して、答えを渡す。記録には空の文が 1 つ入る。
+      // 何も流さずに再開すると、「使えない」のまま終了コード 1 で終わった（手元、2026-11-26。資料にない動きなので、版を上げたら確かめ直す）
       prompt: "text" in input ? input.text : "",
       options: {
         systemPrompt: SYSTEM,
@@ -227,7 +239,7 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
         maxTurns: 30,
         model: MODEL,
         cwd,
-        env: childEnv(configDir),
+        env,
         sessionStore: store,
         // Claude Code の標準エラーのうち、テレメトリーの送信に関わる行だけを残す（AWS でトレースが届かない原因を見るため。会話の本文は入らない）
         stderr: (data: string) => {
@@ -244,12 +256,14 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
         failed = "会話を保存できませんでした";
       } else if (m.type === "result") {
         sessionId = m.session_id;
+        console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_result", subtype: m.subtype, terminal: (m as { terminal_reason?: string }).terminal_reason, ms: Date.now() - started }));
         if (m.subtype !== "success") failed ??= `営業 AI エージェント（Claude）がエラーになりました: ${m.subtype}`;
       }
     }
   } catch (e) {
     failed ??= `営業 AI エージェント（Claude）が止まりました: ${(e as Error).message}`;
   } finally {
+    console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_done", ms: Date.now() - started }));
     rmSync(configDir, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   }
