@@ -229,6 +229,10 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
         cwd,
         env: childEnv(configDir),
         sessionStore: store,
+        // Claude Code の標準エラーのうち、テレメトリーの送信に関わる行だけを残す（AWS でトレースが届かない原因を見るため。会話の本文は入らない）
+        stderr: (data: string) => {
+          for (const line of data.split("\n")) if (/otel|otlp|telemetry|export|4318/i.test(line)) console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_stderr", line: line.slice(0, 300) }));
+        },
         ...(sessionId ? { resume: sessionId } : {}),
         hooks: { PreToolUse: [{ matcher: FRONTEND_TOOLS.map(full).join("|"), hooks: [hook] }] },
       },
