@@ -11,6 +11,8 @@
 #   主の流れの 5 つのサービスは、AWS と同じく 2 つずつ立てる。GEKKO13_LOCAL_REPLICAS で数を変える（段 D の D1-a3）。
 #   手元の確かめだけで使う切り方: GEKKO13_FAULT_CUT_STREAM=1（営業 AI エージェントが、回の途中でつなぎを切る）、
 #   GEKKO13_FAULT_DROP_SUBMIT_REPLY=1（事務サービスが、最初の提出の返事を捨てる）。
+#   GEKKO13_ENGINE=claude で、営業 AI エージェントを本物の Claude にする（段 C）。トークンは local/run/claude-oauth-token（持ち主が置く）を、
+#   読み取りだけでマウントし、環境変数には出さない。既定は台本（scripted）。
 #   GEKKO13_TRACING=1 で、collector（標準出力に書く）を立て、各サービスの計装を入れる（段 T）。
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -23,6 +25,7 @@ NET=gekko13
 SPIRE=1.15.3
 HELPER=ghcr.io/spiffe/spiffe-helper:0.11.0
 IMAGE=gekko13/node:local
+AGENT_IMAGE=gekko13/sales-agent:local
 AUTH_IMAGE=gekko13/auth:local
 KEYCLOAK_IMAGE=gekko13/keycloak:local
 MCP_IMAGE=gekko13/insurer-mcp:local
@@ -65,7 +68,10 @@ fi
 # 固定の利用者（alice など）のパスワード。手元では、gekko_11 と同じ値にする
 DEMO_PASSWORD=demo
 
-build_node() { docker buildx build -q --load -t "$IMAGE" .. >/dev/null; }
+build_node() {
+  docker buildx build -q --load -t "$IMAGE" .. >/dev/null
+  docker buildx build -q --load --target sales-agent -t "$AGENT_IMAGE" .. >/dev/null
+}
 build_auth() { docker buildx build -q --load -t "$AUTH_IMAGE" ../services/auth >/dev/null; }
 build_keycloak() { docker buildx build -q --load -t "$KEYCLOAK_IMAGE" ../services/keycloak >/dev/null; }
 build_mcp() { docker buildx build -q --load -t "$MCP_IMAGE" ../services/insurer-mcp >/dev/null; }
@@ -146,16 +152,24 @@ start_customer_app() {
     "$IMAGE"
 }
 
-# 営業 AI エージェント（台本）。受け口は SVID の mTLS（8443）で、顧客のアプリの BFF だけが呼ぶ
+# 営業 AI エージェントのエンジン（段 C）。claude なら、トークンのファイルを読み取りだけでマウントする
+engine() {
+  [ "${GEKKO13_ENGINE:-scripted}" = claude ] || return 0
+  [ -s "$HERE/run/claude-oauth-token" ] || { echo "local/run/claude-oauth-token がない（claude setup-token で作って置く）" >&2; exit 1; }
+  printf "%s " -e ENGINE=claude ${CLAUDE_MODEL:+-e "CLAUDE_MODEL=$CLAUDE_MODEL"} -e CLAUDE_CODE_OAUTH_TOKEN_FILE=/run/secrets/claude-oauth-token \
+    -v "$HERE/run/claude-oauth-token:/run/secrets/claude-oauth-token:ro"
+}
+
+# 営業 AI エージェント（既定は台本）。受け口は SVID の mTLS（8443）で、顧客のアプリの BFF だけが呼ぶ
 start_sales_agent() {
   # shellcheck disable=SC2046
   run --name "gekko13-sales-agent$R" --network-alias sales-agent $(app_labels sales-agent) $(trace sales-agent node) \
     -e SERVICE=sales-agent -e SVID_DIR=/svid -e "TRUST_DOMAIN=$TD" \
     -e "LOGIN_ISSUER=$ISSUER" -e LOGIN_ORIGIN=http://keycloak:8080 \
-    -e "GEKKO13_FAULT_CUT_STREAM=${GEKKO13_FAULT_CUT_STREAM:-}" \
+    -e "GEKKO13_FAULT_CUT_STREAM=${GEKKO13_FAULT_CUT_STREAM:-}" $(engine) \
     -e DB_URL=postgres://postgres:5432/sales_agent -e DB_USER=sales_agent -e "DB_PASSWORD=$DB_SALES_AGENT" -e "STATE_KEY=$AGENT_STATE_KEY" \
     -v "$HERE/run/svid/sales-agent:/svid:ro" \
-    "$IMAGE"
+    "$AGENT_IMAGE"
 }
 
 # 事務サービス（Python）。受け口は SVID の mTLS（9443）で、営業 AI エージェントだけが呼ぶ。svid-helper と同じホストの利用者で読む

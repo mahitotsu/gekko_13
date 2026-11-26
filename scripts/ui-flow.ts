@@ -11,9 +11,19 @@ import { chromium, type Page } from "playwright-core";
 const origin = process.argv[2] ?? "http://gekko13.localhost:18000";
 const user = process.env.USER_NAME ?? "hanako";
 const password = process.env.DEMO_PASSWORD ?? "demo";
-/** 台本が組み立てる案のうち、選ぶもの（gekko_11 の test/ui/browser.ts の PLANS と同じ）。 */
-const CHOSEN = { id: "fixed-60", name: "確定年金 10年・年額60万円" };
-const OTHERS = ["確定年金 10年・年額120万円", "終身年金・年額120万円"];
+/** 台本が組み立てる案のうち、選ぶもの（gekko_11 の test/ui/browser.ts の PLANS と同じ）。本物の Claude では、示された最初の案を選ぶ（段 C）。 */
+let CHOSEN = { id: "fixed-60", name: "確定年金 10年・年額60万円" };
+let OTHERS = ["確定年金 10年・年額120万円", "終身年金・年額120万円"];
+/** 本物の Claude は、質問の数と順が回ごとに違う。書類か案か誤りが出るまで、質問には最初の選択肢で答える。 */
+const answerUntil = async (page: Page, ids: string[], max = 8) => {
+  const target = ids.map((id) => `[data-testid=${id}]:visible`).join(", ");
+  for (let i = 0; i < max; i++) {
+    await page.locator(`${target}, [data-testid=ask-option-0]:visible:enabled, [data-testid=error]:visible`).first().waitFor({ timeout: 90_000 });
+    if ((await page.locator(target).count()) > 0 || (await page.getByTestId("error").isVisible())) return;
+    await page.locator("[data-testid=ask-option-0]:enabled").last().click();
+    await page.waitForTimeout(300);
+  }
+};
 
 const log = (step: string, o: object = {}) => console.log(JSON.stringify({ at: new Date().toISOString(), step, ...o }));
 let ok = true;
@@ -81,12 +91,21 @@ try {
     log("続ける");
   }
 
-  // 3. 案を選び、意向確認書面と申込書を読んで、どちらも選んだ案なら署名する
+  // 3. 案を選び、意向確認書面と申込書を読んで、どちらも選んだ案なら署名する。台本の案がなければ（本物の Claude）、最初の案を選ぶ
+  if (!(await page.getByTestId(`choose-${CHOSEN.id}`).isVisible())) {
+    const cards = page.locator("[data-testid^=plan-]:visible");
+    const ids = await cards.evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")!.slice("plan-".length)));
+    const names = await cards.locator("strong").allTextContents();
+    CHOSEN = { id: ids[0]!, name: names[0]! };
+    OTHERS = names.slice(1).filter((n) => !n.includes(CHOSEN.name) && !CHOSEN.name.includes(n));
+  }
   await page.getByTestId(`choose-${CHOSEN.id}`).click();
+  await answerUntil(page, ["sign-intent"]);
   await visible(page, "sign-intent", "error").waitFor({ timeout: 60_000 });
   const intent = (await page.getByTestId("intent-confirm").textContent()) ?? "";
   expect("3a 意向確認書面が選んだ案を示す", intent.includes(CHOSEN.name) && !OTHERS.some((n) => intent.includes(n)));
   await page.getByTestId("sign-intent").click();
+  await answerUntil(page, ["sign-application"]);
   await visible(page, "sign-application", "error").waitFor({ timeout: 60_000 });
   const application = (await page.getByTestId("application-confirm").textContent()) ?? "";
   expect("3b 申込書が選んだ案を示す", application.includes(CHOSEN.name) && !OTHERS.some((n) => application.includes(n)));

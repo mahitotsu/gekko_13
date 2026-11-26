@@ -27,9 +27,8 @@ export function redact(value: unknown): unknown {
 /** JCS（RFC 8785）で正規化した内容の SHA-256 の base64url。事務サービスのハッシュと同じ算出（監査の突き合わせ。gekko_11 の D-32）。 */
 export const digest = (value: unknown) => createHash("sha256").update(canonicalize(value) ?? "").digest("base64url");
 
-/** 動いているモデル（Claude か台本）。 */
-const model = () =>
-  process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY ? (process.env.CLAUDE_MODEL ?? "claude-haiku-5-5") : "scripted";
+/** 動いているモデル（Claude か台本）。エンジンの選び方（app.ts の engine）とそろえる。 */
+const model = () => (process.env.ENGINE === "claude" ? (process.env.CLAUDE_MODEL ?? "claude-haiku-5-5") : "scripted");
 
 /** 回の区切り。PAUSE は顧客の答えを待つ、END は営業 AI エージェントの番が終わった。 */
 export type Item = BaseEvent | { pause: true } | { end: true; error?: string };

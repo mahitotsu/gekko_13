@@ -7,7 +7,7 @@ import { getRequestListener } from "@hono/node-server";
 import { createRemoteJWKSet } from "jose";
 import { createMtlsServer, peerX5tS256, SvidSource } from "../../../packages/spiffe-tls/src/index.ts";
 import { createGuard, Refusal, warmKeys } from "../../../packages/token-guard/src/index.ts";
-import { createApp } from "./app.ts";
+import { createApp, engine } from "./app.ts";
 import type { Verified } from "./claims.ts";
 import { useSvids } from "./mcp.ts";
 import { pgState, useState } from "../../../packages/state/src/index.ts";
@@ -40,7 +40,7 @@ const guard = createGuard({
 
 const svids = new SvidSource(env("SVID_DIR", "/svid"));
 const first = await svids.start();
-log({ ev: "svid", id: first.id, notAfter: first.notAfter, engine: "scripted" });
+log({ ev: "svid", id: first.id, notAfter: first.notAfter, engine: engine() });
 useSvids(svids);
 // 会話は、共有のデータベースに置く（段 D の D1-a3。判断 55）。会話には、顧客が署名した書類が入るので、暗号化して置く
 useState(await pgState());
