@@ -33,6 +33,14 @@ Parameters:
   AppImage:
     Type: String
     Description: URI and tag of the gekko13/node image in ECR (customer app, and helper-config that writes the spiffe-helper config)
+  SalesAgentImage:
+    Type: String
+    Description: URI and tag of the sales agent image with the Claude Code binary (Dockerfile target sales-agent). Used when SalesAgentEngine is claude
+  SalesAgentEngine:
+    Type: String
+    Default: scripted
+    AllowedValues: [scripted, claude]
+    Description: Engine of the sales agent. claude runs the real Claude through the Agent SDK with the owner's subscription token (owner-only verification)
   SpiffeHelperImage:
     Type: String
   McpImage:
@@ -72,6 +80,10 @@ Parameters:
   DbSalesAgentPasswordParameter:
     Type: String
     Default: /gekko13/db/sales-agent-password
+  SalesAgentClaudeTokenParameter:
+    Type: String
+    Default: /gekko13/sales-agent/claude-oauth-token
+    Description: SSM SecureString with the owner's Claude subscription token (claude setup-token) for the sales agent when SalesAgentEngine is claude
   SalesAgentStateKeyParameter:
     Type: String
     Default: /gekko13/sales-agent/state-key
@@ -92,6 +104,7 @@ Parameters:
 Conditions:
   Run: !Equals [!Ref Running, "true"]
   Tracing: !Equals [!Ref EnableTracing, "true"]
+  Claude: !Equals [!Ref SalesAgentEngine, claude]
 
 Resources:
   # 入口のリバースプロキシが引く SRV（apps のスタックの Keycloak と同じ形）。ECS が、正常なタスクを、インスタンスの IP と動的なポートの組で登録する
@@ -227,7 +240,7 @@ Resources:
     Metadata:
       com.aws.cloudformation.Context:
         why: >-
-          Sales agent (scripted). SVID mTLS ingress on 8443 for the customer app BFF only; exchanges token A for B at auth before each MCP call
+          Sales agent (scripted, or the real Claude through the Agent SDK). SVID mTLS ingress on 8443 for the customer app BFF only; exchanges token A for B at auth before each MCP call
     Properties:
       Family: !Sub "${Prefix}-sales-agent"
       RequiresCompatibilities: [EC2]
@@ -251,9 +264,10 @@ Resources:
             LogDriver: awslogs
             Options: { awslogs-group: !Ref LogGroupName, awslogs-region: !Ref AWS::Region, awslogs-stream-prefix: sales-agent, mode: non-blocking }
         - Name: app
-          Image: !Ref AppImage
+          # 本物の Claude のときは、Claude Code の本体を入れたイメージにする。1 回ごとに Claude Code のプロセスを起こすので、約 200 MiB 多く取る（findings 5-40）
+          Image: !If [Claude, !Ref SalesAgentImage, !Ref AppImage]
           Essential: true
-          MemoryReservation: 128
+          MemoryReservation: !If [Claude, 384, 128]
           PortMappings: [{ Name: app, ContainerPort: 8443, Protocol: tcp }]
           # 受け口は mTLS だけなので、受けられるかだけを見る
           HealthCheck:
@@ -264,6 +278,7 @@ Resources:
             StartPeriod: 30
           Environment:
             - { Name: SERVICE, Value: sales-agent }
+            - { Name: ENGINE, Value: !Ref SalesAgentEngine }
             - !If [Tracing, { Name: OTEL_EXPORTER_OTLP_ENDPOINT, Value: "http://172.17.0.1:4318" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_SERVICE_NAME, Value: "sales-agent" }, !Ref AWS::NoValue]
             - !If [Tracing, { Name: OTEL_METRICS_EXPORTER, Value: "none" }, !Ref AWS::NoValue]
@@ -278,6 +293,7 @@ Resources:
           Secrets:
             - { Name: DB_PASSWORD, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbSalesAgentPasswordParameter}" }
             - { Name: DB_CA_PEM, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}" }
+            - !If [Claude, { Name: CLAUDE_CODE_OAUTH_TOKEN, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SalesAgentClaudeTokenParameter}" }, !Ref AWS::NoValue]
             - { Name: STATE_KEY, ValueFrom: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SalesAgentStateKeyParameter}" }
           MountPoints:
             - { SourceVolume: svid, ContainerPath: /svid, ReadOnly: true }

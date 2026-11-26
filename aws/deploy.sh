@@ -7,6 +7,8 @@
 #   GEKKO13_CONTAINER_INSIGHTS=enabled でメモリの測定を有効にする。インスタンスは全部スポットで起動する。
 #   GEKKO13_AUTOSCALING=true で、Keycloak と auth のタスクのオートスケーリング（2〜4）を作る。既定は作らず、どのサービスも 2 タスク
 #   （段 D の D1-a3。判断 56。性能を確かめるときに使う。アラームの固定費がかかる）。
+#   GEKKO13_ENGINE=claude で、営業 AI エージェントを本物の Claude にする（段 C。既定は台本）。持ち主のトークンは SSM に置く。
+#   SSM になければ、local/run/claude-oauth-token（持ち主が claude setup-token で作って置く）から、値を出さずに送る。
 #   GEKKO13_TRACING=false で、トレース（collector と計装）を外す。既定は入れる（判断 63）。
 # 順番: registry → イメージとリバースプロキシの zip → network → db（共有の Aurora）→ ecs（基盤）→ apps（Keycloak と auth）→ flow（主の流れのサービス）→ entry（入口のリバースプロキシ）→ edge（CloudFront のディストリビューション）。
 # 秘密は画面にもファイルにも出さない。SSM の SecureString（AWS 管理のキー。月額なし）に直接入れる。
@@ -31,6 +33,8 @@ HELPER=0.11.0
 OTEL=v0.51.0
 OTEL_SOURCE=public.ecr.aws/aws-observability/aws-otel-collector@sha256:955e240b27d7fd3c7995fd937db4b963975948eb553f656d8c37a564e5b5e07d
 TRACING=${GEKKO13_TRACING:-true}
+ENGINE=${GEKKO13_ENGINE:-scripted}
+case $ENGINE in scripted | claude) ;; *) echo "GEKKO13_ENGINE は scripted か claude: $ENGINE" >&2; exit 2 ;; esac
 case $TRACING in true | false) ;; *) echo "GEKKO13_TRACING は true か false: $TRACING" >&2; exit 2 ;; esac
 # イメージのタグは、イメージごとの材料の、コミットした中身から作る（scripts/image-tag.sh）。材料が同じなら作り直さず、
 # タスクも入れ替わらない。材料にコミットしていない変更があれば、ここで止まる。どのコミットから作ったかは、ラベルに残す
@@ -86,6 +90,10 @@ copy "$OTEL_SOURCE" "$(out "$PREFIX-registry" OtelCollectorRepositoryUri):$OTEL"
 # spire-server の CLI を写すので、SPIRE の版を揃える
 docker buildx imagetools inspect "$APP_REPO:$APP_TAG" >/dev/null 2>&1 || \
   docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" --label "$LABEL" -f Dockerfile -t "$APP_REPO:$APP_TAG" --push .
+# 営業 AI エージェント（本物の Claude）。同じ材料から、Claude Code の本体を入れた段（--target sales-agent）を作る。タグは -agent を付ける
+AGENT_TAG=$APP_TAG-agent
+docker buildx imagetools inspect "$APP_REPO:$AGENT_TAG" >/dev/null 2>&1 || \
+  docker buildx build --platform linux/arm64 --build-arg "SPIRE=$SPIRE" --label "$LABEL" -f Dockerfile --target sales-agent -t "$APP_REPO:$AGENT_TAG" --push .
 
 # 認可サーバーとログインサーバー（Java）。どちらも、ビルドの段はビルドする側の CPU で動くので、エミュレーションは要らない
 AUTH_REPO=$(out "$PREFIX-registry" AuthRepositoryUri)
@@ -154,6 +162,13 @@ hex32() { openssl rand -hex 32 | tr -d '\n'; }
 put_secret "/$PREFIX/customer-app/state-key" hex32
 # 営業 AI エージェントの会話の暗号鍵（判断 55）。サービスごとに分ける
 put_secret "/$PREFIX/sales-agent/state-key" hex32
+# 営業 AI エージェントの本物の Claude の、持ち主のトークン（段 C）。持ち主だけが使う検証に限る。作り直しはしない（替えるときは、SSM を消してから送る）
+CLAUDE_TOKEN="/$PREFIX/sales-agent/claude-oauth-token"
+if [ "$ENGINE" = claude ] && ! has_param "$CLAUDE_TOKEN"; then
+  [ -s local/run/claude-oauth-token ] || { echo "$CLAUDE_TOKEN が SSM になく、local/run/claude-oauth-token もない。claude setup-token で作って置く" >&2; exit 1; }
+  aws ssm put-parameter --region "$REGION" --name "$CLAUDE_TOKEN" --type SecureString --value "file://local/run/claude-oauth-token" >/dev/null
+  echo "SSM に $CLAUDE_TOKEN を作った"
+fi
 # SPIRE のルート CA（ECDSA P-256、5 年）。全部の server が、この下で中間 CA を作る。鍵と証明書は、一緒に一度だけ作る。
 # 片方だけあるときは止める（作り直すと、トラストアンカーが替わり、全部のインスタンスの agent が server を信じなくなる）
 ROOT_KEY="/$PREFIX/spire/root-key"
@@ -268,6 +283,8 @@ if [ -n "$(rp_id)" ] && [ "$(rp_id)" != None ]; then
     "McpImage=$(dualstack "$MCP_REPO"):$MCP_TAG" \
     "BackendImage=$(dualstack "$BACKEND_REPO"):$BACKEND_TAG" \
     "EnableTracing=$TRACING" \
+    "SalesAgentEngine=$ENGINE" \
+    "SalesAgentImage=$(dualstack "$APP_REPO"):$AGENT_TAG" \
     "AuditImage=$(dualstack "$AUDIT_REPO"):$AUDIT_TAG" \
     "Running=$RUNNING" \
     "DbHost=$DB_HOST" \

@@ -112,6 +112,10 @@ Parameters:
     Type: String
     Default: /gekko13/customer-app/state-key
     Description: SSM SecureString with the AES-256 key that seals the customer app sessions in Aurora
+  SalesAgentClaudeTokenParameter:
+    Type: String
+    Default: /gekko13/sales-agent/claude-oauth-token
+    Description: SSM SecureString with the owner's Claude subscription token (claude setup-token) for the sales agent when SalesAgentEngine is claude
   SalesAgentStateKeyParameter:
     Type: String
     Default: /gekko13/sales-agent/state-key
@@ -245,6 +249,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${OfferSigningKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${StateKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SalesAgentStateKeyParameter}"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SalesAgentClaudeTokenParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${DbCaParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AuthSigningKeyParameter}"
                   - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SpireRootCertParameter}"

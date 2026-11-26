@@ -157,6 +157,8 @@ function childEnv(configDir: string): Record<string, string> {
     // sessionStore のキーを、回ごとに替わる作業場所ではなく、この名前で決める
     CLAUDE_CODE_PROJECT_DIR_NAME: "gekko13-sales-agent",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    // 更新の確かめや、エラーの報告などの通信をしない（モデルの呼び出しと、下のトレースだけにする）
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
     CLAUDE_CODE_OAUTH_TOKEN: token(),
   };
   if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
