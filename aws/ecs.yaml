@@ -782,6 +782,17 @@ Resources:
       LaunchType: EC2
       SchedulingStrategy: DAEMON
       ServiceRegistries: [{ RegistryArn: !GetAtt OtelCollectorDiscovery.Arn, ContainerName: collector, ContainerPort: 4319 }]
+  # 閲覧者の要求（入口を通るトレース）だけでマップを描く。裏の処理は、根の手前に「クライアント」が描かれて紛らわしいので分ける
+  RequestsTraceGroup:
+    Type: AWS::XRay::Group
+    Condition: Tracing
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Service map of viewer requests only (traces through the entry relay). Background jobs appear as roots with a client node and are kept out of this view
+    Properties:
+      GroupName: !Sub "${Prefix}-requests"
+      FilterExpression: service("entry")
+      InsightsConfiguration: { InsightsEnabled: false, NotificationsEnabled: false }
 
 
 Outputs:

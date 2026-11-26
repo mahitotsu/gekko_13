@@ -14,6 +14,11 @@ import { UndiciInstrumentation } from "@opentelemetry/instrumentation-undici";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 
+/** 送り元が同じコンテナの中（ループバック）か。 */
+export function fromLoopback(address: string | undefined): boolean {
+  return address === "::1" || /^(::ffff:)?127\./.test(address ?? "");
+}
+
 if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
   const provider = new TracerProvider({
     resource: resourceFromAttributes({ "service.name": process.env.OTEL_SERVICE_NAME ?? process.env.SERVICE ?? "unknown" }),
@@ -24,7 +29,8 @@ if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
   trace.setGlobalTracerProvider(provider);
   registerInstrumentations({
     tracerProvider: provider,
-    instrumentations: [new HttpInstrumentation(), new UndiciInstrumentation(), new PgInstrumentation({ requireParentSpan: true })],
+    // コンテナのヘルスチェック（127.0.0.1 から）は、スパンにしない。実際の要求は Service Connect の Envoy から docker0 の側で届く
+    instrumentations: [new HttpInstrumentation({ ignoreIncomingRequestHook: (req) => fromLoopback(req.socket.remoteAddress) }),new UndiciInstrumentation(), new PgInstrumentation({ requireParentSpan: true })],
   });
   // 計装は CommonJS の読み込みで当たる。先に読んで当て、組み込みの部品は、ESM の名前つきの import にも写す
   const require = createRequire(import.meta.url);
