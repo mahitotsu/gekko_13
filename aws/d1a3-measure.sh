@@ -102,7 +102,7 @@ END=$KC
 [ "$FLOW" -gt "$END" ] && END=$FLOW
 # 内訳（ログの時刻）。終点には入れない
 # 取り込みの内訳（段 S）。サービスごとに、最初のタスクの作成、取り込みの始まりと終わり、起動を、始点からの秒で出す。インスタンスの登録の時刻も出す
-TASK_TIMES=$(for s in $SERVICES; do
+TASK_TIMES=$({ for s in $SERVICES; do
   aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --service-name "$s" --desired-status RUNNING --query 'taskArns' --output text |
     xargs -r -n 100 aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --output json --tasks |
     python3 -c "
@@ -113,7 +113,7 @@ if not ts: print('| $s | なし | なし | なし | なし |'); sys.exit()
 f=min(ts,key=lambda t:t['createdAt'])
 s=lambda k: round(datetime.datetime.fromisoformat(f[k]).timestamp()-t0) if f.get(k) else 'なし'
 print(f'| $s | {s(\"createdAt\")} | {s(\"pullStartedAt\")} | {s(\"pullStoppedAt\")} | {s(\"startedAt\")} |')"
-done)
+done; } 2>/dev/null || echo "| （内訳を集められなかった） | | | | |")
 REGISTERED=$(aws ecs list-container-instances --region "$REGION" --cluster "$CLUSTER" --query 'containerInstanceArns' --output text |
   xargs -r -n 100 aws ecs describe-container-instances --region "$REGION" --cluster "$CLUSTER" --query 'containerInstances[].registeredAt' --output text --container-instances |
   tr -s '\t ' '\n' | grep . | python3 -c "
@@ -121,7 +121,8 @@ import sys,datetime
 print(' '.join(str(round(datetime.datetime.fromisoformat(l.strip()).timestamp()-$T0)) for l in sys.stdin))")
 # 測っている間に、スポットの再調整で入れ替わったか（入れ替わった回は、数に入れない）
 REBALANCE=$(aws autoscaling describe-scaling-activities --region "$REGION" --auto-scaling-group-name "$ASG" --max-items 20 \
-  --query "Activities[?StartTime>='$(date -u -d "@$T0" +%FT%TZ)' && contains(Cause, 'rebalance')] | length(@)" --output text)
+  --query "Activities[?StartTime>='$(date -u -d "@$T0" +%FT%TZ)' && contains(Cause, 'rebalance')].ActivityId" --output text |
+  tr -s '\t ' '\n' | grep -v '^None$' | grep -c . || true)
 SERVER_AT=$(log_time spire-server/spire-server "Starting Server APIs")
 AGENT_AT=$(log_time spire-agent/spire-agent "Node attestation was successful")
 {
