@@ -3,7 +3,7 @@
 #   始点: aws/scale.sh up を呼ぶ直前（Running を true にする。スタックの更新が始まるまでの数秒も含む）。
 #   終点: 次の 3 つがそろった時刻。CloudFront を通して Keycloak の discovery が、ディストリビューションのドメイン名を issuer にして返る。
 #         auth のログに「Started InsurerAuthApplication」が出る。CloudFront を通して、主の流れ（scripts/ui-flow.ts）が最後まで通る（通った回が終わった時刻）。
-#   内訳: インスタンスが ASG に加わった時刻。全部のサービスで 2 タスクが動き、2 つの AZ に分かれた時刻（終点には入れない）。
+#   内訳: インスタンスが ASG に加わった時刻。終点の時点で、全部のサービスが 2 つの AZ に分かれていたか（待たない。終点には入れない）。
 # 主の流れは、手元の Docker の Playwright（BROWSER_WS、既定 ws://127.0.0.1:3334/）で回す。固定の利用者のパスワードは SSM から読み、表示しない。
 # 結果は local/run/d1a3/ に書く（local/down.sh で消えるので、残すものは先に写す）。
 # 使い方: aws/d1a3-measure.sh。前提: インスタンスが 0（aws/scale.sh down のあと）。終わってもインスタンスは動いたまま。
@@ -87,11 +87,8 @@ while :; do
       echo "  +$(( $(now) - T0 )) 秒: 主の流れの $FLOWS 回目は通らなかった（$(grep -o '"step":"[^"]*","ok":false' "$RUN/flow-$FLOWS.log" | head -1)）"
     fi
   fi
-  [ -n "${AT[全部のサービスが 2 タスクで 2 つの AZ に分かれた]:-}" ] || { all_spread && mark "全部のサービスが 2 タスクで 2 つの AZ に分かれた"; }
-  [ -n "${AT[主の流れが通った]:-}" ] && [ -n "${AT[全部のサービスが 2 タスクで 2 つの AZ に分かれた]:-}" ] && break
-  # 主の流れが通ってから 10 分たっても分かれなければ、内訳は「なし」で終える
-  FLOW_AT=${AT["主の流れが通った"]:-}
-  [ -n "$FLOW_AT" ] && [ "$(( $(now) - T0 - FLOW_AT ))" -gt 600 ] && break
+  # 使えるようになったら終える。AZ に分かれたかは、その時点の状態だけを記録する（分かれるのを待たない。終点には入らず、待つと 1 回が最長 10 分延びた）
+  [ -n "${AT[主の流れが通った]:-}" ] && break
   sleep 5
 done
 
@@ -100,6 +97,7 @@ FLOW=${AT["主の流れが通った"]}
 END=$KC
 [ "$AUTH_STARTED" -gt "$END" ] && END=$AUTH_STARTED
 [ "$FLOW" -gt "$END" ] && END=$FLOW
+SPREAD=$(all_spread && echo はい || echo いいえ)
 # 内訳（ログの時刻）。終点には入れない
 # 取り込みの内訳（段 S）。サービスごとに、最初のタスクの作成、取り込みの始まりと終わり、起動を、始点からの秒で出す。インスタンスの登録の時刻も出す
 TASK_TIMES=$({ for s in $SERVICES; do
@@ -143,6 +141,7 @@ AGENT_AT=$(log_time spire-agent/spire-agent "Node attestation was successful")
   echo "|---|---|---|---|---|"
   echo "$TASK_TIMES"
   echo
+  echo "終点の時点で、全部のサービスが 2 タスクで 2 つの AZ に分かれていたか: $SPREAD"
   echo "主の流れを回した回数: $FLOWS（1 回目で通ったか: $([ "$FLOWS" = 1 ] && echo はい || echo いいえ)）。台の数: $(hosts)"
   echo "判定（${LIMIT} 秒以内か）: $([ "$END" -le "$LIMIT" ] && echo 以内 || echo 超えた)"
 } | tee "$RUN/result.md"
