@@ -36,9 +36,11 @@ check_ready() {
 
 # set_running <true|false> <スタック…>。Running だけを変える。テンプレートとほかのパラメーターは、スタックの今のものを使う
 # （手元のテンプレートの変更を、知らないうちに送らない）。受け付けられるまでで戻る。終わりは wait_stacks で待つ
+# 更新を始めたスタックを UPDATED に残す。wait_stacks は、更新しなかったスタックの「取り消しで戻った」状態を、終わったものとして扱う
 set_running() {
   local want=$1 s cur params args=() todo=()
   shift
+  UPDATED=()
   check_ready "$@" || return 1
   for s in "$@"; do
     cur=$(running_of "$s") || return 1
@@ -58,11 +60,14 @@ set_running() {
     done
     aws cloudformation update-stack --region "$REGION" --stack-name "$s" --use-previous-template \
       --capabilities CAPABILITY_IAM --parameters "${args[@]}" "ParameterKey=Running,ParameterValue=$want" >/dev/null || return 1
+    UPDATED+=("$s")
     echo "$s の Running を $want にする更新を始めた"
   done
 }
 
-# 更新が終わるまで待つ（上限 40 分）。戻されたら失敗にする
+# 更新が終わるまで待つ（上限 40 分）。この回に更新したスタックが戻されたら、失敗にする。
+# 更新しなかったスタック（値が同じで飛ばしたもの）は、前の更新を取り消して戻った状態（UPDATE_ROLLBACK_COMPLETE）でもよい
+# （GEKKO13_CANCEL=1 の down で、取り消したスタックが、すでに false に戻っていたとき。2026-11-26、findings 5-43）
 wait_stacks() {
   local deadline=$(($(date +%s) + 2400)) s st
   for s in "$@"; do
@@ -70,6 +75,8 @@ wait_stacks() {
       st=$(stack_status "$s") || return 1
       case "$st" in
         CREATE_COMPLETE | UPDATE_COMPLETE) break ;;
+        UPDATE_ROLLBACK_COMPLETE) [[ " ${UPDATED[*]:-} " == *" $s "* ]] || break
+          echo "$s の更新が戻された（$st）。aws cloudformation describe-stack-events --stack-name $s を見る" >&2; return 1 ;;
         UPDATE_IN_PROGRESS | UPDATE_COMPLETE_CLEANUP_IN_PROGRESS) ;;
         *) echo "$s が $st になった。aws cloudformation describe-stack-events --stack-name $s を見る" >&2; return 1 ;;
       esac

@@ -62,5 +62,13 @@ setup - 0; [ "$(dr)" = false ] || fail dr; ok "deploy: Running がなく、タ�
 setup - 2; ! dr >/dev/null || fail "移行"; ok "deploy: Running がなく、タスクがあれば止まる"
 setup false 0; echo true > "$T/gekko13-apps.running"; ! dr >/dev/null || fail "混在"; ok "deploy: そろっていなければ止まる"
 setup false 0; rm "$T"/*.status; [ "$(dr)" = false ] || fail "新規"; ok "deploy: 何もなければ false"
+# 取り消しの down: apps と flow は、up の更新の途中で取り消され、false に戻った。ecs だけが true のまま
+setup false 0; echo true > "$T/gekko13-ecs.running"; for s in apps flow; do echo UPDATE_IN_PROGRESS > "$T/gekko13-$s.status"; done
+GEKKO13_CANCEL=1 aws/scale.sh down >/dev/null 2>"$T/err" || { cat "$T/err" >&2; fail "取り消しの down"; }
+[ "$(updates)" = 1 ] && [ "$(grep -c cancel-update-stack "$T/calls")" = 2 ] && grep -q 'set-desired-capacity.*--desired-capacity 0' "$T/calls" || fail "取り消しの down"
+ok "取り消して戻ったスタックがあっても、down は 0 台まで進む"
+setup true 2; echo UPDATE_ROLLBACK_COMPLETE > "$T/gekko13-flow.status"
+! aws/scale.sh down >/dev/null 2>"$T/err" || fail "更新が戻されたのに進んだ"; ! grep -q set-desired-capacity "$T/calls" || fail "戻されたのに台を 0 にした"
+ok "この回に更新したスタックが戻されたら、失敗にする"
 setup true 2; sed -i 's/^auth 2 2/auth 2 1/' "$T/counts"; ! bash -c '. aws/lib.sh; verify_counts true gekko13' 2>/dev/null || fail "足りない"; ok "実行中が希望より少なければ、合わないと判定する"
 echo "scale の試験: $N 件とも通った"

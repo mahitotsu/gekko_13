@@ -321,7 +321,8 @@ Resources:
             EOF
 
             # bridge のコンテナが IPv6 で外へ出られるようにする（ULA を ip6tables で変換する）。
-            # docker0 のアドレス（bip）は、既定に頼らずここで決める。bridge のタスクは、名前 otel-collector でこのアドレスを引き、同じインスタンスの collector へ送る（判断 63）
+            # docker0 のアドレス（bip）は、既定に頼らずここで決める。bridge のタスクは、このアドレスの 4318 で、同じインスタンスの collector へ送る（判断 63）。
+            # 名前で送る extraHosts は、Service Connect のタスクで docker に断られた（findings 5-43）
             # この AMI の docker では、ip6tables に experimental が要る（推定。docs/findings.md の 5-3）
             mkdir -p /etc/docker
             cat > /etc/docker/daemon.json <<'EOF'
@@ -685,7 +686,7 @@ Resources:
 
   # トレースの collector（段 T）。EnableTracing（既定 true）のとき、インスタンスごとに 1 つ動かす。
   # host のネットワークではタスクロールを使えない（UserData の ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=false）ので、bridge で、ホストの 4318 に出す。
-  # アプリは、名前 otel-collector（タスク定義の extraHosts で、UserData が決めた docker0 のアドレス 172.17.0.1 を引く）へ送る。URL のクエリを含む属性は、ここで消す（認可コードが載るため。手元の設定は local/otel/collector.yaml）。https の既定のポートも消す（同じ相手が 2 つに分かれて見えるため）
+  # アプリは、UserData が決めた docker0 のアドレス（172.17.0.1）の 4318 へ送る（名前で送る extraHosts は、Service Connect のタスクで使えない。findings 5-43）。URL のクエリを含む属性は、ここで消す（認可コードが載るため。手元の設定は local/otel/collector.yaml）。https の既定のポートも消す（同じ相手が 2 つに分かれて見えるため）
   # 同じホストのコンテナと、同じセキュリティグループのホストからは届く。トレースは監査の証拠にしない
   OtelCollectorTaskRole:
     Type: AWS::IAM::Role
