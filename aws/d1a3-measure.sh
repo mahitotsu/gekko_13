@@ -101,6 +101,27 @@ END=$KC
 [ "$AUTH_STARTED" -gt "$END" ] && END=$AUTH_STARTED
 [ "$FLOW" -gt "$END" ] && END=$FLOW
 # 内訳（ログの時刻）。終点には入れない
+# 取り込みの内訳（段 S）。サービスごとに、最初のタスクの作成、取り込みの始まりと終わり、起動を、始点からの秒で出す。インスタンスの登録の時刻も出す
+TASK_TIMES=$(for s in $SERVICES; do
+  aws ecs list-tasks --region "$REGION" --cluster "$CLUSTER" --service-name "$s" --desired-status RUNNING --query 'taskArns' --output text |
+    xargs -r -n 100 aws ecs describe-tasks --region "$REGION" --cluster "$CLUSTER" --output json --tasks |
+    python3 -c "
+import json,sys,datetime
+t0=$T0
+ts=[t for t in json.load(sys.stdin)['tasks'] if t.get('startedAt')]
+if not ts: print('| $s | なし | なし | なし | なし |'); sys.exit()
+f=min(ts,key=lambda t:t['createdAt'])
+s=lambda k: round(datetime.datetime.fromisoformat(f[k]).timestamp()-t0) if f.get(k) else 'なし'
+print(f'| $s | {s(\"createdAt\")} | {s(\"pullStartedAt\")} | {s(\"pullStoppedAt\")} | {s(\"startedAt\")} |')"
+done)
+REGISTERED=$(aws ecs list-container-instances --region "$REGION" --cluster "$CLUSTER" --query 'containerInstanceArns' --output text |
+  xargs -r -n 100 aws ecs describe-container-instances --region "$REGION" --cluster "$CLUSTER" --query 'containerInstances[].registeredAt' --output text --container-instances |
+  tr -s '\t ' '\n' | grep . | python3 -c "
+import sys,datetime
+print(' '.join(str(round(datetime.datetime.fromisoformat(l.strip()).timestamp()-$T0)) for l in sys.stdin))")
+# 測っている間に、スポットの再調整で入れ替わったか（入れ替わった回は、数に入れない）
+REBALANCE=$(aws autoscaling describe-scaling-activities --region "$REGION" --auto-scaling-group-name "$ASG" --max-items 20 \
+  --query "Activities[?StartTime>='$(date -u -d "@$T0" +%FT%TZ)' && contains(Cause, 'rebalance')] | length(@)" --output text)
 SERVER_AT=$(log_time spire-server/spire-server "Starting Server APIs")
 AGENT_AT=$(log_time spire-agent/spire-agent "Node attestation was successful")
 {
@@ -114,6 +135,12 @@ AGENT_AT=$(log_time spire-agent/spire-agent "Node attestation was successful")
   echo "| 最初の agent の attestation（内訳、ログの時刻） | ${AGENT_AT:-なし} |"
   echo "| 通った流れの始まり（内訳） | $FLOW_START |"
   echo "| **終点（使えるまで）** | **$END** |"
+  echo
+  echo "インスタンスが ECS に登録された（始点からの秒）: ${REGISTERED:-なし}。スポットの再調整による入れ替え: ${REBALANCE:-不明} 回"
+  echo
+  echo "| サービス（最初のタスク） | 作成 | 取り込みの始まり | 取り込みの終わり | 起動 |"
+  echo "|---|---|---|---|---|"
+  echo "$TASK_TIMES"
   echo
   echo "主の流れを回した回数: $FLOWS（1 回目で通ったか: $([ "$FLOWS" = 1 ] && echo はい || echo いいえ)）。台の数: $(hosts)"
   echo "判定（${LIMIT} 秒以内か）: $([ "$END" -le "$LIMIT" ] && echo 以内 || echo 超えた)"

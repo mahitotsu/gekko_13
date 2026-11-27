@@ -95,6 +95,30 @@ final class SpiffeTls {
 	/** 送り直す回数の上限（最初の 1 回を含む）。握手の待ちで見切ると、3 回で約 10 秒に収まる。 */
 	static final int ATTEMPTS = 3;
 
+	/**
+	 * 握手が終わる前の失敗（まだ何も送っていない）を、回数に依らず送り直す時間の上限（最初から合わせて）。0 台から起こした直後は、相手が
+	 * Service Connect の送り先になるまで、つなぎが握手の前に切られる（段 S。findings 5-36）。2 度届くことはない。
+	 */
+	static final Duration PRE_TLS_BUDGET = Duration.ofSeconds(10);
+
+	/**
+	 * 握手が終わる前の失敗か。つなげなかった、握手の待ちで見切った、握手の途中で切られた（証明書を確かめて断ったときを除く）。
+	 */
+	static boolean beforeTls(java.io.IOException ex) {
+		if (ex instanceof java.net.http.HttpConnectTimeoutException || ex instanceof java.net.ConnectException) {
+			return true;
+		}
+		if (!(ex instanceof javax.net.ssl.SSLHandshakeException)) {
+			return false;
+		}
+		for (Throwable c = ex; c != null; c = c.getCause()) {
+			if (c instanceof java.security.cert.CertificateException) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(SpiffeTls.class);
 
 	/**
@@ -138,14 +162,17 @@ final class SpiffeTls {
 						throw new java.io.InterruptedIOException("送り直しの待ちが止められた");
 					}
 					catch (java.io.IOException ex) {
-						boolean retried = !(i >= ATTEMPTS || ex instanceof javax.net.ssl.SSLPeerUnverifiedException);
-						logAttempt(request, i, ex instanceof java.net.http.HttpConnectTimeoutException ? "handshake" : "response",
-								ex.getClass().getSimpleName(), retried, t0, started);
+						boolean pre = beforeTls(ex);
+						long wait = Math.min(300L * i, 1_000L);
+						boolean withinBudget = (System.nanoTime() - started) / 1_000_000 + wait < PRE_TLS_BUDGET.toMillis();
+						boolean retried = !(ex instanceof javax.net.ssl.SSLPeerUnverifiedException) && (i < ATTEMPTS || (pre && withinBudget))
+								&& !(ex instanceof javax.net.ssl.SSLHandshakeException && !pre);
+						logAttempt(request, i, pre ? "handshake" : "response", ex.getClass().getSimpleName(), retried, t0, started);
 						if (!retried) {
 							throw ex;
 						}
 						try {
-							Thread.sleep(300L * i);
+							Thread.sleep(wait);
 						}
 						catch (InterruptedException ie) {
 							Thread.currentThread().interrupt();

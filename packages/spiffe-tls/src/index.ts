@@ -209,8 +209,11 @@ export const isRetryable = (e: unknown) => {
  * （2026-11-23 の AWS）。送り直しは、つなぐたびに Service Connect が送り先を選び直す。POST も送り直すが、受ける側は 2 度届いても困らない
  * （営業 AI エージェントの回は、同じ答えの 2 度目を 409 で拒む。申込みは nonce が 1 回しか通さない。交換は、トークンがもう 1 つ出るだけ）。
  * 相手の SPIFFE ID が違う、時間切れ、取りやめ、応答が始まったあとの失敗は、送り直さない。
+ * TLS の握手が終わる前の失敗（まだ 1 バイトも送っていない）は、回数に依らず、最初から合わせて preTlsBudgetMs（既定 10 秒）まで送り直す
+ * （段 S。0 台から起こした直後は、相手が Service Connect の送り先になるまで、つなぎが握手の前に切られ、0.9〜4.5 秒の送り直しが尽きていた。
+ * findings 5-36）。2 度届くことはない。
  */
-export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 6, handshakeTimeoutMs = 3_000): typeof fetch {
+export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutMs = 30_000, attempts = 6, handshakeTimeoutMs = 3_000, preTlsBudgetMs = 10_000): typeof fetch {
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const headers = Object.fromEntries(new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined)));
@@ -218,6 +221,8 @@ export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutM
     const once = () =>
       new Promise<Response>((resolve, reject) => {
         const svid = source.current;
+        // TLS の握手が終わったか。終わる前の失敗は、まだ何も送っていない
+        let secured = false;
         const req = httpsRequest(
           url,
           {
@@ -250,11 +255,14 @@ export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutM
             () => req.destroy(Object.assign(new Error(`握手が ${handshakeTimeoutMs} ms で終わらなかった`), { code: "EHANDSHAKETIMEOUT" })),
             handshakeTimeoutMs,
           );
-          s.once("secureConnect", () => clearTimeout(timer));
+          s.once("secureConnect", () => {
+            secured = true;
+            clearTimeout(timer);
+          });
           s.once("close", () => clearTimeout(timer));
         });
         req.on("timeout", () => req.destroy(new Error("timeout")));
-        req.on("error", reject);
+        req.on("error", (e) => reject(Object.assign(e, { beforeTls: !secured })));
         init.signal?.addEventListener("abort", () => req.destroy(new Error("aborted")));
         req.end(body);
       });
@@ -264,14 +272,17 @@ export function mtlsFetch(source: SvidSource, expectedServerId: string, timeoutM
       try {
         return await once();
       } catch (e) {
-        const retried = !(i >= attempts || init.signal?.aborted || !isRetryable(e));
+        const beforeTls = (e as { beforeTls?: boolean }).beforeTls === true;
+        const wait = Math.min(300 * i, 1_000);
+        const retried =
+          !init.signal?.aborted && isRetryable(e) && (i < attempts || (beforeTls && Date.now() - started + wait < preTlsBudgetMs));
         // 送り直しと時間切れを、段と経過の秒つきで残す（どの呼び出しの、どの段で待ったかを、あとで読むため）
         if (!init.signal?.aborted) {
           const code = (e as NodeJS.ErrnoException).code;
-          console.log(JSON.stringify({ at: new Date().toISOString(), ev: "call_retry", url: url.origin + url.pathname, attempt: i, phase: code === "EHANDSHAKETIMEOUT" ? "handshake" : "response", error: code ?? (e as Error).message, retried, ms: Date.now() - t0, totalMs: Date.now() - started }));
+          console.log(JSON.stringify({ at: new Date().toISOString(), ev: "call_retry", url: url.origin + url.pathname, attempt: i, phase: code === "EHANDSHAKETIMEOUT" || beforeTls ? "handshake" : "response", error: code ?? (e as Error).message, retried, ms: Date.now() - t0, totalMs: Date.now() - started }));
         }
         if (!retried) throw e;
-        await new Promise((r) => setTimeout(r, 300 * i));
+        await new Promise((r) => setTimeout(r, wait));
       }
     }
   }) as typeof fetch;

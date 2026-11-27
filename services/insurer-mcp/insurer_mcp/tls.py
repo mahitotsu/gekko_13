@@ -132,6 +132,10 @@ class Refused(Exception):
     """相手の SPIFFE ID が違う。要求は送っていない。"""
 
 
+class BeforeTls(ConnectionError):
+    """TLS の握手が終わる前に、つなぎが切れた。まだ何も送っていないので、送り直してよい（段 S）。"""
+
+
 class HandshakeTimeout(TimeoutError):
     """握手（TCP と TLS）が、握手の待ちのうちに終わらなかった。まだ何も送っていないので、送り直してよい。"""
 
@@ -145,19 +149,23 @@ def _log_attempt(**o: Any) -> None:
 
 async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
                        headers: dict[str, str] | None = None, body: bytes = b"", timeout: float = 5,
-                       attempts: int = 6, handshake_timeout: float = 3) -> tuple[int, bytes]:
+                       attempts: int = 6, handshake_timeout: float = 3, pre_tls_budget: float = 10) -> tuple[int, bytes]:
     """_mtls_once を呼び、まだ応答を受け取っていない失敗なら、最大 attempts 回まで、間を 0.3 秒ずつ延ばして送り直す（段 D の D1-a3）。
     送り直すのは、握手の前の時間切れ（HandshakeTimeout。まだ何も送っていない）と、応答が届く前につなぎが切れたとき（ConnectionError、
     ssl.SSLError、途中で切れた読み取り）である。Service Connect は TCP の中継なので、止まったタスクへ向かったつなぎは、握手で黙る。
     つなぎ直すと、Service Connect が送り先を選び直す。相手の SPIFFE ID が違う（Refused）と、握手のあとの時間切れは、送り直さない。
     待ちは、握手の待ち（handshake_timeout）と、1 回の応答の待ち（timeout）に分ける。呼ぶ側は、外側の待ちより短い値を渡す
     （待ちは外側ほど長くする。2026-11-24 の AWS で、内側と外側が同じ 15 秒だったため、内側が待たされると外側が先に切れた）。
-    送り直しは、段（握手か、応答か）と経過の秒つきで、1 行ずつログに出す。"""
+    送り直しは、段（握手か、応答か）と経過の秒つきで、1 行ずつログに出す。
+    握手が終わる前の失敗（HandshakeTimeout、BeforeTls。まだ何も送っていない）は、回数に依らず、最初から合わせて pre_tls_budget 秒まで送り直す
+    （段 S。0 台から起こした直後は、相手が Service Connect の送り先になるまで、つなぎが握手の前に切られる。findings 5-36）。"""
     import asyncio
     import time as _time
 
     started = _time.monotonic()
-    for i in range(1, attempts + 1):
+    i = 0
+    while True:
+        i += 1
         t0 = _time.monotonic()
         try:
             sent = dict(headers or {})
@@ -169,17 +177,19 @@ async def mtls_request(ctx: ssl.SSLContext, method: str, url: str, expected_id: 
         except Refused:
             raise
         except (HandshakeTimeout, ConnectionError, ssl.SSLError, asyncio.IncompleteReadError) as e:
-            phase = "handshake" if isinstance(e, HandshakeTimeout) else "response"
-            _log_attempt(url=url, attempt=i, phase=phase, error=type(e).__name__,
-                         ms=round((_time.monotonic() - t0) * 1000), total_ms=round((_time.monotonic() - started) * 1000))
-            if i >= attempts:
+            before_tls = isinstance(e, (HandshakeTimeout, BeforeTls))
+            wait = min(0.3 * i, 1.0)
+            retried = i < attempts or (before_tls and _time.monotonic() - started + wait < pre_tls_budget)
+            _log_attempt(url=url, attempt=i, phase="handshake" if before_tls else "response", error=type(e).__name__,
+                         retried=retried, ms=round((_time.monotonic() - t0) * 1000),
+                         total_ms=round((_time.monotonic() - started) * 1000))
+            if not retried:
                 raise
-            await asyncio.sleep(0.3 * i)
+            await asyncio.sleep(wait)
         except TimeoutError:
             _log_attempt(url=url, attempt=i, phase="response", error="TimeoutError", retried=False,
                          ms=round((_time.monotonic() - t0) * 1000), total_ms=round((_time.monotonic() - started) * 1000))
             raise
-    raise AssertionError("届かない")
 
 
 async def _mtls_once(ctx: ssl.SSLContext, method: str, url: str, expected_id: str,
@@ -198,6 +208,8 @@ async def _mtls_once(ctx: ssl.SSLContext, method: str, url: str, expected_id: st
                                     ssl_handshake_timeout=handshake_timeout), handshake_timeout)
     except TimeoutError as e:
         raise HandshakeTimeout(f"握手が {handshake_timeout} 秒で終わらなかった") from e
+    except (ConnectionError, ssl.SSLError) as e:
+        raise BeforeTls(f"握手の前に切れた: {type(e).__name__}") from e
     try:
         der = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
         got = spiffe_id_of(der) if der else None

@@ -53,4 +53,40 @@ class HandshakeTimeoutTest {
 		}
 	}
 
+	/** 握手の前に切る相手（起こした直後の Service Connect と同じ見え方）の失敗は、握手の前の失敗と見分けられる（段 S）。 */
+	@Test
+	void cutBeforeTlsIsClassifiedAsBeforeTls() throws Exception {
+		try (ServerSocket cutting = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+			Thread.ofVirtual().start(() -> {
+				try {
+					while (true) {
+						cutting.accept().close();
+					}
+				}
+				catch (Exception ex) {
+					// 閉じたら終わる
+				}
+			});
+			HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
+			HttpRequest request = HttpRequest.newBuilder(URI.create("https://127.0.0.1:" + cutting.getLocalPort() + "/x"))
+				.POST(HttpRequest.BodyPublishers.ofString("x"))
+				.build();
+			java.io.IOException err = null;
+			try {
+				client.send(request, HttpResponse.BodyHandlers.ofString());
+			}
+			catch (java.io.IOException ex) {
+				err = ex;
+			}
+			assertThat(err).isNotNull();
+			assertThat(SpiffeTls.beforeTls(err)).as(err.toString()).isTrue();
+		}
+		// 証明書を確かめて断ったとき（相手の SPIFFE ID が違う）は、握手の前の失敗としない（送り直さない）
+		assertThat(SpiffeTls.beforeTls(new javax.net.ssl.SSLHandshakeException("x") {
+			{
+				initCause(new java.security.cert.CertificateException("相手の SPIFFE ID が違う"));
+			}
+		})).isFalse();
+	}
+
 }
