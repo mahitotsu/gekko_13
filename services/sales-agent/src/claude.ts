@@ -9,7 +9,6 @@
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { context, propagation } from "@opentelemetry/api";
 import { createSdkMcpServer, query, tool, type HookCallback, type SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { callMcp } from "./mcp.ts";
@@ -176,8 +175,6 @@ function childEnv(configDir: string): Record<string, string> {
       OTEL_TRACES_EXPORT_INTERVAL: "1000",
       CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS: "10000",
       CLAUDE_CODE_OTEL_SHUTDOWN_TIMEOUT_MS: "10000",
-      // 送信の失敗を標準エラーに出す（既定では --debug のときしか出ない）。AWS で届かない原因を見るため（確かめ終えたら外す）
-      CLAUDE_CODE_OTEL_DIAG_STDERR: "1",
     });
   }
   return env;
@@ -220,12 +217,6 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
   const cwd = mkdtempSync(join(tmpdir(), "claude-cwd-"));
   let failed: string | undefined;
   let sessionId = state.sessionId;
-  // AWS でトレースが届かない原因を見るため、渡す環境変数の名前（値は出さない）と、親の traceparent を残す（確かめ終えたら外す）
-  const carrier: Record<string, string> = {};
-  propagation.inject(context.active(), carrier);
-  const env = childEnv(configDir);
-  const started = Date.now();
-  console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_spawn", env: Object.keys(env).sort(), traceparent: carrier.traceparent ?? null }));
   try {
     for await (const m of run({
       // 答えを渡す回は、空の文で再開する。再開した直後は、プロセスの中の MCP サーバーがまだつながっておらず、Claude Code は待っている呼び出しを
@@ -243,12 +234,8 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
         maxTurns: 30,
         model: MODEL,
         cwd,
-        env,
+        env: childEnv(configDir),
         sessionStore: store,
-        // Claude Code の標準エラーを残す（AWS でトレースが届かない原因を見るため。確かめ終えたら外す）。1 行 300 文字で切る
-        stderr: (data: string) => {
-          for (const line of data.split("\n")) if (line.trim()) console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_stderr", line: line.slice(0, 300) }));
-        },
         ...(sessionId ? { resume: sessionId } : {}),
         hooks: { PreToolUse: [{ matcher: FRONTEND_TOOLS.map(full).join("|"), hooks: [hook] }] },
       },
@@ -260,14 +247,12 @@ export async function claudeRun(t: Thread, input: Input, run: QueryFn = query, c
         failed = "会話を保存できませんでした";
       } else if (m.type === "result") {
         sessionId = m.session_id;
-        console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_result", subtype: m.subtype, terminal: (m as { terminal_reason?: string }).terminal_reason, ms: Date.now() - started }));
         if (m.subtype !== "success") failed ??= `営業 AI エージェント（Claude）がエラーになりました: ${m.subtype}`;
       }
     }
   } catch (e) {
     failed ??= `営業 AI エージェント（Claude）が止まりました: ${(e as Error).message}`;
   } finally {
-    console.log(JSON.stringify({ at: new Date().toISOString(), svc: "sales-agent", ev: "claude_done", ms: Date.now() - started }));
     rmSync(configDir, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   }
