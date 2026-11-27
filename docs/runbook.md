@@ -50,7 +50,7 @@ node scripts/ui-flow.ts
 
 期待する結果: `1 ログイン` から `8c 監査の担当は顧客のアプリにログインできない` までの行がどれも `"ok":true` で、最後に `"判定","ok":true` と出る。8 の段は、監査の担当（kansa）が別のブラウザで `/audit` にログインして確かめる。顧客は監査の画面を、監査の担当は顧客のアプリを、ログインサーバーの画面で断られる。事務サービス（Python）の試験は `scripts/test-python.sh`、監査サービス（Go）の試験は `scripts/test-go.sh` で回る（`npm test` も回す）。保険会社のシステム（Java）の試験は、イメージのビルドの中で回る。
 
-ホストが眠ったあとは、手元の SPIRE の agent が立ち直れず、SVID が書かれないことがある（[findings 5-22](findings.md#5-22-手元で主の流れの-27-段がenvoy-なしで通ったサービスのトークンの確かめはtypescriptpythonjava-の-3-つで共通の例-15-件の判定が全部一致した)）。そのときは `local/down.sh` と `local/up.sh` で作り直す。
+ホストが眠ったあとは、手元の SPIRE の agent が立ち直れず、SVID が書かれないことがある（[findings 5-22](findings.md#5-22-手元で主の流れの-27-段がenvoy-なしで通ったサービスのトークンの確かめはtypescriptpythonjava-の-3-つで共通の例-15-件の判定が全部一致した)）。そのときは `local/up.sh agent` で agent だけを立て直す（`local/down.sh` は `local/run` を全部消すので使わない）。
 
 手元だけで使う切り方が 2 つある。どちらも `local/up.sh` に環境変数を付けて立てたときだけ働き、AWS のタスク定義には付けない。
 
@@ -228,7 +228,7 @@ SPIRE のルート CA を消すと、次に作るときは新しい根になる�
 - **`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`:** Node.js の型の取り除きは `node_modules` の中で動かない。パッケージは相対パスで読む。
 - **`aws/deploy.sh` が、テンプレートの検査で止まる:** テンプレートのコメント以外の行に、日本語がある。CloudFormation は、ASCII 以外の文字を「?」に置き換える。Description と Metadata は英語で書き、日本語は `#` のコメントに移す（[findings 2-1](findings.md#2-1-cloudformation-はテンプレートの-ascii-以外の文字をに置き換えた)）。
 - **ECS のスタックが `ROLLBACK_COMPLETE` になった:** そのままでは作り直せない。資源が残っていないのを確かめてから消し、作り直す。作成中に巻き戻ったときは、Cloud Map の名前空間がスタックの外に残ることがあるので、`aws servicediscovery list-namespaces` で確かめる（[findings 2-5](findings.md#2-5-作成中に巻き戻すとcloud-map-の名前空間がスタックの外に残った)）。
-- **手元の spire-agent が落ち続け、各サービスの SVID の期限が切れる:** agent のログに `x509svid: could not verify leaf certificate` が出る。agent が持つバンドルが古い（[findings 5-29](findings.md#5-段-d)）。`local/down.sh` は `local/run` を全部消すので使わず、agent だけを立て直す。`docker exec gekko13-spire-server /opt/spire/bin/spire-server bundle show > local/run/bundle/bundle.crt` でバンドルを取り直す。`spire-server token generate -spiffeID spiffe://gekko13.internal/node/local` で新しい join token を作る。`gekko13-spire-agent` を、`local/up.sh` と同じ引数で立て直す。最後に、各サービスの `-helper` のコンテナを `docker restart` する。
+- **手元の spire-agent が落ち続け、各サービスの SVID の期限が切れる:** agent のログに `x509svid: could not verify leaf certificate` が出る。agent が持つバンドルが古い（[findings 5-29](findings.md#5-段-d)）。`local/up.sh agent` を回す。バンドルと join token を新しくして agent を作り直し、各サービスの `-helper` を再起動し、SVID が書き直されるまで待つ。
 - **spire-agent のタスクが、止まっては再起動する:** インスタンスを起動した直後の 1 分ほどは、agent が server より先に起きる。そのため、server に届かずに止まる。server が起きれば安定する。server がいないまま 5 分ほどたつと、agent の SVID が切れて止まり続ける（[findings 3-4](findings.md#3-4-server-が-5-分ほどいないとagent-は自分の-svid-が切れて止まった)）。spire-server のサービスが動いているかを見る。
 - **agent が「attestation data has already been used」で止まる:** aws_iid は、同じインスタンスで一度しか確認を通さない。ホストの `/var/lib/gekko13/spire-agent` が消えたときに起きる。インスタンスを入れ替える（`scale.sh down` と `up`）。
 - **ホストの中を見たい:** IPv6 だけのインスタンスは、Session Manager に登録されなかった（[findings 2-11](findings.md#2-11-ipv6-だけのインスタンスはsession-manager-に登録されなかった)）。サブネットに IPv4 の経路がないので、公開 IPv4 を付けて入る逃げ道もない。中の様子は、CloudWatch Logs と ECS の API で見る。

@@ -8,6 +8,8 @@
 # 手順: PostgreSQL → SPIRE の server → バンドルと join token → 登録 → agent → サービス → 入口。
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
 #   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry、otel）
+#   local/up.sh agent（SPIRE の agent を立て直す。機械が眠ったあと、agent は使い切った join token で server につなげず、SVID が古くなる。
+#   findings 4 章）。バンドルと join token を新しくして agent を作り直し、各サービスの svid-helper を再起動する
 #   主の流れの 5 つのサービスは、AWS と同じく 2 つずつ立てる。GEKKO13_LOCAL_REPLICAS で数を変える（段 D の D1-a3）。
 #   手元の確かめだけで使う切り方: GEKKO13_FAULT_CUT_STREAM=1（営業 AI エージェントが、回の途中でつなぎを切る）、
 #   GEKKO13_FAULT_DROP_SUBMIT_REPLY=1（事務サービスが、最初の提出の返事を捨てる）。
@@ -233,6 +235,38 @@ trace() {
   esac
 }
 
+# SPIRE の agent（docker の attestor は、呼び出し元の PID からコンテナを探す。ホストの PID と docker のソケットが要る）
+start_agent() {
+  run --name gekko13-spire-agent --pid host \
+    -v "$HERE/spire/agent.conf:/etc/spire/agent.conf:ro" \
+    -v "$HERE/run/bundle:/run/spire/bundle:ro" \
+    -v gekko13-agent-sockets:/run/spire/sockets \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    "ghcr.io/spiffe/spire-agent:$SPIRE" -config /etc/spire/agent.conf -joinToken "$1"
+}
+
+# agent を立て直す。server と登録はそのまま使い、バンドルと join token だけを新しくする。SVID が書き直されるまで待つ
+restart_agent() {
+  docker rm -f gekko13-spire-agent >/dev/null 2>&1 || true
+  srv bundle show > run/bundle/bundle.crt
+  start_agent "$(srv token generate -spiffeID "$NODE_ID" -ttl 600 | awk '/^Token:/ {print $2}')"
+  local before s i
+  before=$(stat -c %Y run/svid/auth/svid.pem 2>/dev/null || echo 0)
+  sleep 10
+  for s in "${SERVICES[@]}"; do docker restart "gekko13-$s-helper" >/dev/null; done
+  for i in $(seq 1 30); do
+    [ "$(stat -c %Y run/svid/auth/svid.pem 2>/dev/null || echo 0)" -gt "$before" ] && { echo "agent を立て直し、SVID が書き直された"; return 0; }
+    sleep 2
+  done
+  echo "agent を立て直したが、60 秒で SVID が書き直されない。docker logs gekko13-spire-agent を見る" >&2
+  return 1
+}
+
+if [ "${1:-}" = agent ]; then
+  restart_agent
+  exit $?
+fi
+
 # サービスを指定されたら、そのサービスだけを入れ替える
 if [ $# -gt 0 ]; then
   for s in "$@"; do
@@ -287,13 +321,7 @@ for s in "${SERVICES[@]}"; do
     -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper" >/dev/null
 done
 
-# docker の attestor は、呼び出し元の PID からコンテナを探す。ホストの PID と docker のソケットが要る
-run --name gekko13-spire-agent --pid host \
-  -v "$HERE/spire/agent.conf:/etc/spire/agent.conf:ro" \
-  -v "$HERE/run/bundle:/run/spire/bundle:ro" \
-  -v gekko13-agent-sockets:/run/spire/sockets \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  "ghcr.io/spiffe/spire-agent:$SPIRE" -config /etc/spire/agent.conf -joinToken "$JOIN_TOKEN"
+start_agent "$JOIN_TOKEN"
 
 [ "${GEKKO13_TRACING:-}" != 1 ] || start_otel
 start_keycloak
