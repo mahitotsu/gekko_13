@@ -8,6 +8,8 @@
 # 手順: PostgreSQL → SPIRE の server → バンドルと join token → 登録 → agent → サービス → 入口。
 # 使い方: local/up.sh（全部を立てる）。local/up.sh <サービス>...（立っている環境で、そのサービスのイメージを作り直して入れ替える。
 #   サービスは keycloak、auth、customer-app、sales-agent、insurer-mcp、insurer-backend、insurer-audit、entry、otel）
+#   local/up.sh probes（段 D の D1-b の確かめの役を立てる。役ごとに、svid-helper と、node のコンテナを置く。乗っ取られた複製は、
+#   本物と同じラベルで同じ SVID を受け取る。攻撃者、運用の担当、監査の役は、検証用の SPIFFE ID を登録する。試験は test/scenarios）
 #   local/up.sh agent（SPIRE の agent を立て直す。機械が眠ったあと、agent は使い切った join token で server につなげず、SVID が古くなる。
 #   findings 4 章）。バンドルと join token を新しくして agent を作り直し、各サービスの svid-helper を再起動する
 #   主の流れの 5 つのサービスは、AWS と同じく 2 つずつ立てる。GEKKO13_LOCAL_REPLICAS で数を変える（段 D の D1-a3）。
@@ -261,6 +263,47 @@ restart_agent() {
   echo "agent を立て直したが、60 秒で SVID が書き直されない。docker logs gekko13-spire-agent を見る" >&2
   return 1
 }
+
+# 段 D の D1-b の確かめの役。役の名前、SVID を受け取るファミリー、自分のクライアント ID（client_credentials と交換に使う）、JWT-SVID の要否
+PROBES=(
+  "customer-app customer-app customer-app jwt"
+  "sales-agent sales-agent sales-agent -"
+  "mcp-1 insurer-mcp insurer-mcp -"
+  "intruder intruder intruder -"
+  "operator operator operator -"
+  "auditor auditor auditor -"
+)
+start_probes() {
+  local spec role family self jwt aud
+  # 検証用の SPIFFE ID（攻撃者、運用の担当、監査の役）。乗っ取られた複製は、本物の登録をそのまま使う
+  for family in intruder operator auditor; do
+    srv entry show -spiffeID "spiffe://$TD/svc/$family" 2>/dev/null | grep -q "Entry ID" ||
+      srv entry create -parentID "$NODE_ID" -spiffeID "spiffe://$TD/svc/$family" -x509SVIDTTL "$SVID_TTL" \
+        -selector "docker:label:com.amazonaws.ecs.task-definition-family:gekko13-$family" \
+        -selector "docker:label:com.amazonaws.ecs.container-name:svid-helper" >/dev/null
+  done
+  for spec in "${PROBES[@]}"; do
+    read -r role family self jwt <<<"$spec"
+    aud=; [ "$jwt" = jwt ] && aud=$ISSUER
+    docker rm -f "gekko13-probe-$role" "gekko13-probe-$role-helper" >/dev/null 2>&1 || true
+    mkdir -p "run/svid/probe-$role"
+    JWT_AUDIENCE=$aud ../scripts/helper-conf.sh "run/helper/probe-$role.conf"
+    run --name "gekko13-probe-$role-helper" --user "$(id -u):$(id -g)" \
+      --label "com.amazonaws.ecs.task-definition-family=gekko13-$family" --label "com.amazonaws.ecs.container-name=svid-helper" \
+      -v gekko13-agent-sockets:/run/spire/sockets:ro -v "$HERE/run/helper/probe-$role.conf:/etc/helper/helper.conf:ro" \
+      -v "$HERE/run/svid/probe-$role:/svid" "$HELPER" -config /etc/helper/helper.conf
+    run --name "gekko13-probe-$role" --label gekko13-probe=1 \
+      -e "SELF=$self" -e "PUBLIC_ORIGIN=$ORIGIN" -e ENTRY_URL=http://gekko13-entry:3000 -e "RP_ID=$RP_ID" -e "DEMO_PASSWORD=$DEMO_PASSWORD" \
+      -v "$HERE/run/svid/probe-$role:/svid:ro" -v "$HERE/../test/scenarios:/app/test/scenarios:ro" \
+      "$IMAGE" sleep infinity
+  done
+  echo "確かめの役を立てた: ${#PROBES[@]} 個（gekko13-probe-*）"
+}
+
+if [ "${1:-}" = probes ]; then
+  start_probes
+  exit 0
+fi
 
 if [ "${1:-}" = agent ]; then
   restart_agent

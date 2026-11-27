@@ -1,0 +1,255 @@
+// 試験の補助は、相手の JSON を形を決めずに扱う（gekko_11 と同じ）
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// 段 D の D1-b のシナリオの基盤（gekko_11 の test/cluster/world.ts を写して直した）。確かめの役（probe）を動かし、署名は試験の側で作る。
+// gekko_13 は防御を外す版を持たない（gekko_11 の vulnerable は写していない）。役は、手元では docker のコンテナ（docker exec）で動かす。
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+import { parseSse } from "./sse.ts";
+import { challengeOf, sign, type AuthenticatorState } from "./probe/webauthn.ts";
+
+const run = promisify(execFile);
+
+export type Json = Record<string, any>;
+
+/** probe の役。役のコンテナの svid-helper が受け取る SVID が、身元（SPIFFE ID）を決める（local/up.sh probes）。 */
+export type Role = "probe-customer-app" | "probe-sales-agent" | "probe-mcp-1" | "probe-intruder" | "probe-operator" | "probe-auditor";
+
+/** 公開の origin（入口）。手元は local/up.sh の入口、AWS は CloudFront のディストリビューション。 */
+export const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN ?? "http://gekko13.localhost:18000";
+/** passkey の RP ID（入口の名前）。 */
+export const RP_ID = new URL(PUBLIC_ORIGIN).hostname;
+
+export async function probe(who: Role, command: string, args: object = {}): Promise<Json> {
+  try {
+    const { stdout } = await run(
+      "docker",
+      ["exec", `gekko13-${who}`, "node", "test/scenarios/probe/probe.ts", command, JSON.stringify(args)],
+      { maxBuffer: 16 * 1024 * 1024 },
+    );
+    return JSON.parse(stdout.trim().split("\n").at(-1)!);
+  } catch (e) {
+    const out = (e as { stdout?: string }).stdout?.trim().split("\n").at(-1);
+    if (out) return JSON.parse(out);
+    throw e;
+  }
+}
+
+
+export const TERMS = [{ type: "insurance_application", kinds: ["fixed", "lifetime"], maxBenefit: 1_200_000 }];
+
+/** 顧客。ログイン、passkey の登録、A の受け取りは probe が行い、署名は手元で行う。 */
+export class Customer {
+  token = "";
+  idToken = "";
+  refreshToken = "";
+  dpopKey: Json = {};
+  authenticator!: AuthenticatorState;
+  /** passkey と一緒に登録した受信箱の番号（直送の宛先）。 */
+  inbox = "";
+
+  readonly user: string;
+
+  constructor(user: string) {
+    this.user = user;
+  }
+
+  get origin() {
+    return PUBLIC_ORIGIN;
+  }
+
+  async setup(terms: unknown = TERMS): Promise<this> {
+    const r = await probe("probe-customer-app", "customer-setup", { user: this.user, terms });
+    if (r.status !== 200) throw new Error(`顧客の準備に失敗: ${JSON.stringify(r)}`);
+    Object.assign(this, { token: r.token, idToken: r.idToken, refreshToken: r.refreshToken, dpopKey: r.dpopKey, authenticator: r.authenticator, inbox: r.inbox });
+    return this;
+  }
+
+  /** A を更新する（P-18）。使えた更新のトークンと A を、新しいものに置き換える。 */
+  async refresh(proof: "good" | "none" | "other-key" = "good", refreshToken = this.refreshToken, withoutClientAuth = false): Promise<Json> {
+    const r = await probe("probe-customer-app", "refresh-login", { refreshToken, dpopKey: this.dpopKey, proof, withoutClientAuth });
+    if (r.status === 200) Object.assign(this, { token: r.body.access_token, refreshToken: r.body.refresh_token });
+    return r;
+  }
+
+  /** 営業 AI エージェントの AG-UI の受け口に、1 回分（RunAgentInput）を、A と DPoP の proof で出す。返すのは、SSE のイベントの列。 */
+  async agui(input: Json, proof: "good" | "none" | "other-key" = "good"): Promise<{ status: number; events: Json[]; body: unknown }> {
+    const r = await probe("probe-customer-app", "call-sales-agent", { path: "/agui", body: input, token: this.token, dpopKey: this.dpopKey, proof });
+    return { status: r.status, events: typeof r.body === "string" ? parseSse(r.body) : [], body: r.body };
+  }
+
+  /**
+   * 顧客のアプリ（BFF）の役で、営業 AI エージェントと会話を進める（D-29）。質問には最初の選択肢で答え、案は planId を選び、
+   * 2 つの書類には、示された内容そのものに署名する。返すのは、提示の nonce と、全てのイベント。
+   */
+  async converse(planId: string, message = "案を見たい"): Promise<{ nonce: string; events: Json[] }> {
+    const threadId = randomUUID();
+    const messages: Json[] = [{ id: randomUUID(), role: "user", content: message }];
+    const all: Json[] = [];
+    let nonce = "";
+    for (let i = 0; i < 8; i++) {
+      const r = await this.agui({ threadId, runId: randomUUID(), messages, tools: [], state: {}, context: [], forwardedProps: {} });
+      if (r.status !== 200) throw new Error(`営業 AI エージェントが断った: ${JSON.stringify(r.body)}`);
+      all.push(...r.events);
+      const error = r.events.find((e) => e.type === "RUN_ERROR");
+      if (error) throw new Error(`営業 AI エージェントが止まった: ${error.message}`);
+      const start = r.events.find((e) => e.type === "TOOL_CALL_START");
+      if (!start) return { nonce, events: all };
+      const args = JSON.parse(r.events.filter((e) => e.type === "TOOL_CALL_ARGS" && e.toolCallId === start.toolCallId).map((e) => e.delta).join(""));
+      messages.push({ id: randomUUID(), role: "assistant", toolCalls: [{ id: start.toolCallId, type: "function", function: { name: start.toolCallName, arguments: JSON.stringify(args) } }] });
+      let content: unknown;
+      if (start.toolCallName === "ask_customer") content = args.options[0];
+      if (start.toolCallName === "present_offers") {
+        nonce = args.offer.nonce;
+        content = { planId, plan: args.offer.offerSet.plans.find((p: Plan) => p.id === planId) };
+      }
+      if (start.toolCallName === "present_intent") content = { intent: args.intent, assertion: this.sign(args.intent) };
+      if (start.toolCallName === "present_application") content = { application: args.application, assertion: this.sign(args.application) };
+      messages.push({ id: randomUUID(), role: "tool", toolCallId: start.toolCallId, content: JSON.stringify(content) });
+    }
+    throw new Error("会話が終わらない");
+  }
+
+  /** 内容に署名する（顧客のアプリの画面で passkey を使う操作に当たる）。 */
+  sign(content: unknown, origin = this.origin) {
+    // passkey は、ログインと申込みの署名で同じもの。RP ID は、ログインサーバーと顧客のアプリの共通の親の名前（D-42）
+    return sign(this.authenticator, RP_ID, challengeOf(content), origin);
+  }
+
+  /** 案を選んで、意向確認と申込みに署名する（3 章の 3 段）。 */
+  prepare(offer: Offer, planId: string, plan = offer.offerSet.plans.find((p) => p.id === planId)!): Submission {
+    const intent = { customer: this.user, offerSetId: offer.offerSetId, planId, wish: "老後の生活費に備えたい", nonce: offer.nonce, expiresAt: offer.expiresAt };
+    const intentAssertion = this.sign(intent);
+    const application = {
+      customer: this.user,
+      plan,
+      offerSetId: offer.offerSetId,
+      intentSignature: intentAssertion.response.signature,
+      nonce: offer.nonce,
+      expiresAt: offer.expiresAt,
+    };
+    return { offerJws: offer.offerJws, intent, intentAssertion, application, assertion: this.sign(application) };
+  }
+
+  async notices(): Promise<Json[]> {
+    return (await probe("probe-sales-agent", "notices", { inbox: this.inbox })).body as Json[];
+  }
+}
+
+export interface Plan {
+  id: string;
+  name: string;
+  kind: string;
+  benefit: number;
+  monthly: number;
+}
+
+export interface Offer {
+  offerJws: string;
+  offerSet: { customer: string; plans: Plan[] };
+  offerSetId: string;
+  nonce: string;
+  expiresAt: number;
+}
+
+export interface Submission {
+  offerJws?: string;
+  intent: Json;
+  intentAssertion: Json | null;
+  application: Json;
+  assertion: unknown;
+}
+
+/** 監査の役が読む、契約の記録と直送の記録。 */
+export async function records(): Promise<{ contracts: Json[]; outbox: Json[] }> {
+  const r = await probe("probe-auditor", "audit");
+  if (r.status !== 200) throw new Error(`監査の記録を読めない: ${JSON.stringify(r)}`);
+  return r.body as { contracts: Json[]; outbox: Json[] };
+}
+
+/** 監査の担当（kansa）としてログインし、監査サービスの受け口を読む（D-31）。user を変えると、ほかの者のログインを試せる。 */
+export const auditorGet = (path: string, user = "kansa") => probe("probe-auditor", "auditor", { user, path });
+
+/** 監査サービスが示す、契約ごとの突き合わせの結果の、点ごとの一致。 */
+export const checksOf = (report: Json): Record<string, boolean> =>
+  Object.fromEntries((report.checks as Json[]).map((c) => [String(c.name).replace(/（.*/, ""), c.ok as boolean]));
+
+/**
+ * 監査サービスの、契約ごとの突き合わせ（G25）。記録が届くまで数秒かかる（手元は docker のログ、AWS は CloudWatch Logs）ので、until を満たすまで問い合わせ直す。
+ * 満たさないまま時間が過ぎたら、最後の結果を返す（テストの期待で、何が足りないかを示す）。
+ */
+export async function auditOf(nonce: string, until: (report: Json) => boolean): Promise<Json> {
+  let last: Json = {};
+  for (let i = 0; i < 15; i++) {
+    const r = await auditorGet(`/api/contracts/${nonce}`);
+    last = r.status === 200 ? (r.body as Json) : { status: r.status, body: r.body };
+    if (r.status === 200 && until(last)) return last;
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  return last;
+}
+
+// ---- 乗っ取られた窓口と、攻撃者の役 ----
+
+/** 窓口の役が、自分の SVID で、トークンを替える（actor_token は自分のトークン）。 */
+export async function exchangeAs(who: Role, subject: string, audience: string, terms?: unknown): Promise<Json> {
+  const once = async () => {
+    const actor = (await probe(who, "client-credentials")).body?.access_token;
+    return probe(who, "exchange", { subject, actor, audience, terms });
+  };
+  const r = await once();
+  // actor_token を受け取ってから替えるまでの間に SVID が入れ替わると、前の証明書に結んだ actor_token は拒まれる（F-G54）。
+  // token-guard と同じく、actor_token を取り直して 1 度だけやり直す
+  return String(r.body?.error_description ?? "").includes("not bound to the requester certificate") ? once() : r;
+}
+
+/** 乗っ取られた営業 AI エージェント: 顧客の A を、事務サービス宛ての B に替える。 */
+export async function atMcp(customer: Customer, terms?: unknown): Promise<string> {
+  const r = await exchangeAs("probe-sales-agent", customer.token, "insurer-mcp", terms);
+  if (r.status !== 200) throw new Error(`B を受け取れない: ${JSON.stringify(r)}`);
+  return r.body.access_token;
+}
+
+/** 事務サービスの MCP の道具を、トークンを付けて呼ぶ。 */
+export const mcpCall = (token: string, tool: string, args: Json = {}, who: Role = "probe-sales-agent") =>
+  probe(who, "mcp", { token, tool, args });
+
+/** 申込みを、事務サービスの道具の引数の形にする。extras は、窓口が足せる欄。 */
+export const applyArgs = (s: Submission, extras?: Json) => ({
+  intent: s.intent,
+  intent_assertion: s.intentAssertion,
+  application: s.application,
+  assertion: s.assertion,
+  offer_jws: s.offerJws,
+  ...(extras ? { extras } : {}),
+});
+
+/** 既定の条件（確定年金は 10 年、払込は 25 年）の 4 案。金額は、保険会社のシステムの試算と同じ値。 */
+export const DEFAULT_PLANS = [
+  { kind: "fixed", monthly: 20_000, benefit: 600_000 },
+  { kind: "fixed", monthly: 40_000, benefit: 1_200_000 },
+  { kind: "lifetime", monthly: 60_000, benefit: 1_200_000 },
+  { kind: "lifetime", monthly: 120_000, benefit: 2_400_000 },
+];
+
+/** 攻撃の材料として、正規の経路で、顧客宛ての提示を受け取る（防御の設定に左右されない）。 */
+export async function offerFor(customer: Customer): Promise<Offer> {
+  let r = await mcpCall(await atMcp(customer), "issue_offer", { plans: DEFAULT_PLANS });
+  // B を受け取ってから呼ぶまでの間に SVID が入れ替わると、前の証明書に結んだ B は拒まれる（F-G54）。B から取り直して 1 度だけやり直す
+  if (String(r.body?.error ?? "").includes("相手の証明書に結ばれていない")) r = await mcpCall(await atMcp(customer), "issue_offer", { plans: DEFAULT_PLANS });
+  if (!r.body?.offerJws) throw new Error(`提示を受け取れない: ${JSON.stringify(r)}`);
+  return r.body as Offer;
+}
+
+/** 保険会社のシステムへ、事務サービスを通らずに直接申し込む。 */
+export const backendPost = (token: string, body: unknown, who: Role = "probe-mcp-1") =>
+  probe(who, "call-service", { service: "insurer-backend", path: "/applications", token, body });
+
+/** 監査の記録に、その nonce の契約があるか。 */
+export async function contractsOf(nonce: string): Promise<Json[]> {
+  return (await records()).contracts.filter((c) => c.contract.nonce === nonce);
+}
+
+/** 認可サーバーの issuer（サービスどうしの名前）と、ログインサーバーの issuer（公開の名前）。 */
+export const ISSUER = () => "https://auth:8443";
+export const LOGIN_ISSUER = () => `${PUBLIC_ORIGIN}/login/realms/insurer`;

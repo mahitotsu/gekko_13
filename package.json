@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "local:up": "local/up.sh",
-    "local:down": "local/down.sh"
+    "local:down": "local/down.sh",
+    "scenarios:local": "vitest run --config vitest.scenarios.config.ts"
   },
   "dependencies": {
     "@ag-ui/core": "1.0.3",
